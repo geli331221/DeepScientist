@@ -299,7 +299,20 @@ class BashExecService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.meta_path(quest_root, bash_id).exists():
             raise FileNotFoundError(f"Unknown bash session `{bash_id}`.")
+        deadline = time.monotonic() + 0.6
         entries = read_jsonl(self.log_path(quest_root, bash_id))
+        while time.monotonic() < deadline:
+            if any(str(entry.get("stream") or "") not in {"system", "prompt"} for entry in entries):
+                break
+            session = read_json(self.meta_path(quest_root, bash_id), {}) or {}
+            status = _coerce_session_status(session.get("status"))
+            if status in TERMINAL_STATUSES:
+                break
+            if entries:
+                time.sleep(0.05)
+            else:
+                time.sleep(0.03)
+            entries = read_jsonl(self.log_path(quest_root, bash_id))
         normalized_before = before_seq if isinstance(before_seq, int) and before_seq > 0 else None
         if normalized_before is not None:
             entries = [entry for entry in entries if int(entry.get("seq") or 0) < normalized_before]

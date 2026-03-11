@@ -269,6 +269,25 @@ function getQuestWorkspaceTabView(
   return customData?.quest_workspace_view === 'details' ? 'details' : 'canvas'
 }
 
+function isQuestFriendlyTab(
+  tab: { pluginId?: string; context?: { customData?: Record<string, unknown> } } | null | undefined,
+  projectId?: string
+) {
+  if (!tab) return false
+  if (isQuestWorkspaceTab(tab, projectId)) return true
+  return [
+    BUILTIN_PLUGINS.PDF_VIEWER,
+    BUILTIN_PLUGINS.PDF_MARKDOWN,
+    BUILTIN_PLUGINS.NOTEBOOK,
+    BUILTIN_PLUGINS.LATEX,
+    BUILTIN_PLUGINS.CODE_EDITOR,
+    BUILTIN_PLUGINS.CODE_VIEWER,
+    BUILTIN_PLUGINS.IMAGE_VIEWER,
+    BUILTIN_PLUGINS.TEXT_VIEWER,
+    BUILTIN_PLUGINS.MARKDOWN_VIEWER,
+  ].includes(tab.pluginId as (typeof BUILTIN_PLUGINS)[keyof typeof BUILTIN_PLUGINS])
+}
+
 type CommandItem = {
   id: string
   title: string
@@ -1387,9 +1406,7 @@ function WorkspaceTabStrip({
   const projectTabs = React.useMemo(
     () =>
       tabs.filter(
-        (tab) =>
-          tabMatchesProject(tab, projectId) &&
-          (!localQuestMode || tab.pluginId !== BUILTIN_PLUGINS.LAB)
+        (tab) => tabMatchesProject(tab, projectId) && (!localQuestMode || isQuestFriendlyTab(tab, projectId))
       ),
     [localQuestMode, projectId, tabs]
   )
@@ -2038,9 +2055,10 @@ function LeftPanel({
   const isPlanningView = activeExplorer === 'planning'
   const isArxivView = activeExplorer === 'arxiv'
   const disableExplorerActions = readOnlyMode || isArxivView
+  const disableExplorerMutations = readOnlyMode || isArxivView || localQuestMode
 
   const handleExplorerNewFile = React.useCallback(() => {
-    if (disableExplorerActions) return
+    if (disableExplorerMutations) return
     if (isFilesView) {
       setCreateFileOpen(true)
       return
@@ -2050,10 +2068,10 @@ function LeftPanel({
       return
     }
     cliExplorerRef.current?.createFile()
-  }, [disableExplorerActions, isFilesView, isPlanningView])
+  }, [disableExplorerMutations, isFilesView, isPlanningView])
 
   const handleExplorerNewFolder = React.useCallback(() => {
-    if (disableExplorerActions) return
+    if (disableExplorerMutations) return
     if (isFilesView) {
       void handleNewFolder()
       return
@@ -2063,10 +2081,10 @@ function LeftPanel({
       return
     }
     cliExplorerRef.current?.createFolder()
-  }, [disableExplorerActions, handleNewFolder, isFilesView, isPlanningView])
+  }, [disableExplorerMutations, handleNewFolder, isFilesView, isPlanningView])
 
   const handleExplorerUpload = React.useCallback(() => {
-    if (disableExplorerActions) return
+    if (disableExplorerMutations) return
     if (isFilesView) {
       handleUploadClick()
       return
@@ -2076,7 +2094,7 @@ function LeftPanel({
       return
     }
     cliExplorerRef.current?.upload()
-  }, [disableExplorerActions, handleUploadClick, isFilesView, isPlanningView])
+  }, [disableExplorerMutations, handleUploadClick, isFilesView, isPlanningView])
 
   const handleExplorerRefresh = React.useCallback(() => {
     if (disableExplorerActions) return
@@ -2212,12 +2230,14 @@ function LeftPanel({
               variant="ghost"
               size="icon"
               onClick={handleExplorerNewFile}
-              disabled={disableExplorerActions}
+              disabled={disableExplorerMutations}
               className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
               title={
-                disableExplorerActions
+                disableExplorerMutations
                   ? readOnlyMode
                     ? t('leftpanel_view_only')
+                    : localQuestMode
+                      ? 'Create files from the document editor in local quest mode.'
                     : t('explorer_unavailable_in_arxiv')
                   : t('explorer_new_file')
               }
@@ -2230,12 +2250,14 @@ function LeftPanel({
               variant="ghost"
               size="icon"
               onClick={handleExplorerNewFolder}
-              disabled={disableExplorerActions}
+              disabled={disableExplorerMutations}
               className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
               title={
-                disableExplorerActions
+                disableExplorerMutations
                   ? readOnlyMode
                     ? t('leftpanel_view_only')
+                    : localQuestMode
+                      ? 'Folder creation is not exposed in local quest mode.'
                     : t('explorer_unavailable_in_arxiv')
                   : t('explorer_new_folder')
               }
@@ -2248,12 +2270,14 @@ function LeftPanel({
               variant="ghost"
               size="icon"
               onClick={handleExplorerUpload}
-              disabled={disableExplorerActions}
+              disabled={disableExplorerMutations}
               className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
               title={
-                disableExplorerActions
+                disableExplorerMutations
                   ? readOnlyMode
                     ? t('leftpanel_view_only')
+                    : localQuestMode
+                      ? 'Upload is disabled in local quest mode.'
                     : t('explorer_unavailable_in_arxiv')
                   : t('explorer_upload_files')
               }
@@ -2604,16 +2628,14 @@ function CenterPanel({
   const projectTabs = React.useMemo(
     () =>
       tabs.filter(
-        (tab) =>
-          tabMatchesProject(tab, projectId) &&
-          (!localQuestMode || tab.pluginId !== BUILTIN_PLUGINS.LAB)
+        (tab) => tabMatchesProject(tab, projectId) && (!localQuestMode || isQuestFriendlyTab(tab, projectId))
       ),
     [localQuestMode, projectId, tabs]
   )
   const activeProjectTab =
     activeTab &&
     tabMatchesProject(activeTab, projectId) &&
-    (!localQuestMode || activeTab.pluginId !== BUILTIN_PLUGINS.LAB)
+    (!localQuestMode || isQuestFriendlyTab(activeTab, projectId))
       ? activeTab
       : null
   const openQuestWorkspaceTab = React.useCallback(
@@ -3131,18 +3153,21 @@ export function WorkspaceLayout({
   const isLabContextActive = Boolean(activeLabContextSessionId)
   const copilotSurfaceStorageKey = `ds:project:${projectId}:copilot-surface`
   const defaultCopilotSurface: CopilotSurfaceMode =
-    (activeTab?.pluginId === BUILTIN_PLUGINS.LAB && tabMatchesProject(activeTab, projectId)) ||
-    isLabContextActive
+    isLocalQuestProject
+      ? 'agent'
+      : (activeTab?.pluginId === BUILTIN_PLUGINS.LAB && tabMatchesProject(activeTab, projectId)) ||
+          isLabContextActive
       ? 'lab'
       : 'agent'
   const [copilotSurface, setCopilotSurface] = React.useState<CopilotSurfaceMode>(() => {
     if (typeof window === 'undefined') return defaultCopilotSurface
+    if (isLocalQuestProject) return 'agent'
     const stored = window.localStorage.getItem(copilotSurfaceStorageKey)
     if (stored === 'lab' || stored === 'agent') return stored
     return defaultCopilotSurface
   })
   const isLabTab = copilotSurface === 'lab'
-  const labDataEnabled = Boolean(projectId && isLabTab)
+  const labDataEnabled = Boolean(projectId && isLabTab && !isLocalQuestProject)
   const labStaleTime = 30000
   const cliServers = useCliStore((state) => state.servers)
   const loadCliServers = useCliStore((state) => state.loadServers)
@@ -3157,42 +3182,47 @@ export function WorkspaceLayout({
   }, [clearLabSelections, projectId])
 
   React.useEffect(() => {
-    if (!labDataEnabled || !projectId) return
+    if (isLocalQuestProject || !labDataEnabled || !projectId) return
     if (cliProjectId === projectId) return
     void loadCliServers(projectId)
-  }, [cliProjectId, labDataEnabled, loadCliServers, projectId])
+  }, [cliProjectId, isLocalQuestProject, labDataEnabled, loadCliServers, projectId])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
+    if (isLocalQuestProject) {
+      setCopilotSurface('agent')
+      return
+    }
     const stored = window.localStorage.getItem(copilotSurfaceStorageKey)
     if (stored === 'lab' || stored === 'agent') {
       setCopilotSurface(stored)
       return
     }
     setCopilotSurface(defaultCopilotSurface)
-  }, [copilotSurfaceStorageKey])
+  }, [copilotSurfaceStorageKey, defaultCopilotSurface, isLocalQuestProject])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
+    if (isLocalQuestProject) return
     window.localStorage.setItem(copilotSurfaceStorageKey, copilotSurface)
-  }, [copilotSurface, copilotSurfaceStorageKey])
+  }, [copilotSurface, copilotSurfaceStorageKey, isLocalQuestProject])
 
   const templatesQuery = useQuery({
     queryKey: ['lab-templates', projectId],
     queryFn: () => listLabTemplates(projectId),
-    enabled: labDataEnabled && !shareReadOnly,
+    enabled: labDataEnabled && !shareReadOnly && !isLocalQuestProject,
     staleTime: labStaleTime,
   })
   const agentsQuery = useQuery({
     queryKey: ['lab-agents', projectId],
     queryFn: () => listLabAgents(projectId, { silent: true }),
-    enabled: labDataEnabled && !shareReadOnly,
+    enabled: labDataEnabled && !shareReadOnly && !isLocalQuestProject,
     staleTime: labStaleTime,
   })
   const questsQuery = useQuery({
     queryKey: ['lab-quests', projectId],
     queryFn: () => listLabQuests(projectId, { silent: true }),
-    enabled: labDataEnabled && !shareReadOnly,
+    enabled: labDataEnabled && !shareReadOnly && !isLocalQuestProject,
     staleTime: labStaleTime,
   })
 
@@ -4017,7 +4047,7 @@ export function WorkspaceLayout({
       }
       if (isLocalQuestProject) {
         const visibleQuestTabs = tabs.filter(
-          (t) => tabMatchesProject(t, projectId) && t.pluginId !== BUILTIN_PLUGINS.LAB
+          (t) => tabMatchesProject(t, projectId) && isQuestFriendlyTab(t, projectId)
         )
         if (visibleQuestTabs.length === 0) {
           openTab({
@@ -4344,7 +4374,7 @@ export function WorkspaceLayout({
           rightVisible={homeMode || copilotDock.state.open}
           rightLocked={homeMode}
           readOnly={readOnlyMode}
-          notificationsEnabled={notificationsReady && !isSharedView}
+          notificationsEnabled={notificationsReady && !isSharedView && !isLocalQuestProject}
           collapsed={navbarCollapsed}
           onToggleCollapse={toggleNavbarCollapsed}
           onExitHome={exitHome}

@@ -37,7 +37,7 @@ export function QuestCopilotDockPanel({
   )
 
   return (
-    <div data-quest-copilot-host="ai-manus-compat" className="h-full min-h-0">
+    <div className="h-full min-h-0">
       <AiManusChatView
         mode="copilot"
         projectId={questId}

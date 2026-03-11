@@ -6,7 +6,7 @@ import { HintDot } from '@/components/ui/hint-dot'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
-import type { ConfigTestPayload, ConfigValidationPayload, ConnectorSnapshot, Locale } from '@/types'
+import type { ConfigTestPayload, ConfigValidationPayload, ConnectorSnapshot, ConnectorTargetSnapshot, Locale } from '@/types'
 
 import { connectorCatalog, type ConnectorCatalogEntry, type ConnectorField, type ConnectorName } from './connectorCatalog'
 import { translateSettingsCatalogText } from './settingsCatalogI18n'
@@ -44,18 +44,27 @@ const copy = {
     emptyValidation: 'No issues.',
     emptyTest: 'No issues.',
     snapshot: 'Runtime',
+    transportLabel: 'Transport',
+    connection: 'Connection',
+    auth: 'Auth',
     lastMode: 'Mode',
     queues: 'Queues',
     queueIn: 'in',
     queueOut: 'out',
     bindings: 'Bindings',
     boundTarget: 'Bound target',
+    defaultTarget: 'Default target',
+    discoveredTargets: 'Discovered targets',
     lastSeen: 'Last seen',
     noSnapshot: 'No snapshot.',
+    noTargets: 'No runtime targets yet.',
+    useTarget: 'Use',
     validation: 'Check',
     testResult: 'Test',
     ok: 'Ready',
     needsWork: 'Needs work',
+    showLegacy: 'Show legacy fields',
+    hideLegacy: 'Hide legacy fields',
     routingTitle: 'Routing',
     routingSubtitle: 'Choose where milestone and decision updates go.',
     routingEmpty: 'Enable a connector first.',
@@ -93,18 +102,27 @@ const copy = {
     emptyValidation: '没有问题。',
     emptyTest: '没有问题。',
     snapshot: '运行时',
+    transportLabel: '传输方式',
+    connection: '连接状态',
+    auth: '鉴权状态',
     lastMode: '模式',
     queues: '队列',
     queueIn: '入',
     queueOut: '出',
     bindings: '绑定数',
     boundTarget: '已绑定目标',
+    defaultTarget: '默认目标',
+    discoveredTargets: '已发现目标',
     lastSeen: '最近会话',
     noSnapshot: '暂无快照。',
+    noTargets: '暂未发现运行时目标。',
+    useTarget: '使用',
     validation: '校验',
     testResult: '测试',
     ok: '就绪',
     needsWork: '需处理',
+    showLegacy: '显示旧式字段',
+    hideLegacy: '隐藏旧式字段',
     routingTitle: '路由',
     routingSubtitle: '决定里程碑和决策更新优先发往哪里。',
     routingEmpty: '请先启用一个连接器。',
@@ -154,6 +172,16 @@ function testItemByName(payload: ConfigTestPayload | null) {
     next.set(item.name, item)
   }
   return next
+}
+
+function connectorTargetLabel(target: ConnectorTargetSnapshot) {
+  const label = String(target.label || '').trim()
+  if (label) {
+    return label
+  }
+  const chatType = String(target.chat_type || '').trim()
+  const chatId = String(target.chat_id || '').trim()
+  return [chatType, chatId].filter(Boolean).join(' · ')
 }
 
 function routingConfig(value: ConnectorConfigMap): Record<string, unknown> {
@@ -248,6 +276,7 @@ function ConnectorFieldControl({
             type="checkbox"
             checked={Boolean(value)}
             onChange={(event) => onChange(field.key, event.target.checked)}
+            disabled={Boolean(field.readOnly)}
             className="h-4 w-4 rounded border-black/20 text-foreground"
           />
         </label>
@@ -268,6 +297,7 @@ function ConnectorFieldControl({
         <select
           value={String(value || '')}
           onChange={(event) => onChange(field.key, normalizeFieldValue(field, event.target.value))}
+          disabled={Boolean(field.readOnly)}
           className={cn(
             'flex h-11 w-full rounded-[18px] border px-3 py-2 text-sm ring-offset-background transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
             controlClass
@@ -351,6 +381,7 @@ function ConnectorCard({
   const t = copy[locale]
   const Icon = entry.icon
   const enabled = Boolean(config.enabled)
+  const [legacyExpanded, setLegacyExpanded] = useState(false)
   const chatIdPlaceholder = entry.name === 'qq' ? (deliveryTarget.chat_type === 'group' ? 'group_openid' : 'openid') : '123456789'
 
   return (
@@ -402,21 +433,34 @@ function ConnectorCard({
         <div className="space-y-5">
           {entry.sections.map((section) => (
             <section key={section.id} className="border-t border-black/[0.06] pt-4 first:border-t-0 first:pt-0 dark:border-white/[0.08]">
-              <div className="mb-4 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                <span>{translateSettingsCatalogText(locale, section.title)}</span>
-                <HintDot label={translateSettingsCatalogText(locale, section.description)} />
+              <div className="mb-4 flex items-center justify-between gap-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <span>{translateSettingsCatalogText(locale, section.title)}</span>
+                  <HintDot label={translateSettingsCatalogText(locale, section.description)} />
+                </div>
+                {section.variant === 'legacy' ? (
+                  <button
+                    type="button"
+                    onClick={() => setLegacyExpanded((current) => !current)}
+                    className="rounded-full border border-black/[0.08] bg-white/[0.44] px-3 py-1 text-[10px] tracking-[0.14em] text-muted-foreground transition hover:text-foreground dark:border-white/[0.12] dark:bg-white/[0.03]"
+                  >
+                    {legacyExpanded ? t.hideLegacy : t.showLegacy}
+                  </button>
+                ) : null}
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                {section.fields.map((field) => (
-                  <ConnectorFieldControl
-                    key={field.key}
-                    field={field}
-                    config={config}
-                    locale={locale}
-                    onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                  />
-                ))}
-              </div>
+              {section.variant !== 'legacy' || legacyExpanded ? (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {section.fields.map((field) => (
+                    <ConnectorFieldControl
+                      key={field.key}
+                      field={field}
+                      config={config}
+                      locale={locale}
+                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </section>
           ))}
         </div>
@@ -430,6 +474,18 @@ function ConnectorCard({
             {snapshot ? (
               <div className="space-y-2 text-sm text-muted-foreground">
                 <div>
+                  <span className="text-foreground">{t.transportLabel}:</span>{' '}
+                  {translateSettingsCatalogText(locale, snapshot.transport || snapshot.display_mode || snapshot.mode || 'default')}
+                </div>
+                <div>
+                  <span className="text-foreground">{t.connection}:</span>{' '}
+                  {translateSettingsCatalogText(locale, snapshot.connection_state || 'idle')}
+                </div>
+                <div>
+                  <span className="text-foreground">{t.auth}:</span>{' '}
+                  {translateSettingsCatalogText(locale, snapshot.auth_state || 'idle')}
+                </div>
+                <div>
                   <span className="text-foreground">{t.lastMode}:</span>{' '}
                   {translateSettingsCatalogText(locale, snapshot.display_mode || snapshot.mode || 'default')}
                 </div>
@@ -439,6 +495,14 @@ function ConnectorCard({
                 <div>
                   <span className="text-foreground">{t.bindings}:</span> {snapshot.binding_count ?? 0}
                 </div>
+                <div>
+                  <span className="text-foreground">{t.discoveredTargets}:</span> {snapshot.target_count ?? snapshot.discovered_targets?.length ?? 0}
+                </div>
+                {snapshot.default_target ? (
+                  <div className="break-all">
+                    <span className="text-foreground">{t.defaultTarget}:</span> {connectorTargetLabel(snapshot.default_target)}
+                  </div>
+                ) : null}
                 {snapshot.main_chat_id ? (
                   <div className="break-all">
                     <span className="text-foreground">{t.boundTarget}:</span> {snapshot.main_chat_id}
@@ -482,6 +546,35 @@ function ConnectorCard({
                   className="rounded-[18px] border-black/[0.08] bg-white/[0.44] shadow-none dark:bg-white/[0.03]"
                 />
                 {entry.name === 'qq' ? <div className="text-xs text-muted-foreground">{t.qqChatIdHint}</div> : null}
+              </div>
+              <div className="grid gap-2">
+                <label className="text-sm font-medium">{t.discoveredTargets}</label>
+                {snapshot?.discovered_targets?.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {snapshot.discovered_targets.map((target) => (
+                      <button
+                        key={target.conversation_id}
+                        type="button"
+                        onClick={() =>
+                          onUpdateDelivery(entry.name, {
+                            chat_type: target.chat_type === 'group' ? 'group' : 'direct',
+                            chat_id: target.chat_id,
+                          })
+                        }
+                        className={cn(
+                          'rounded-full border px-3 py-2 text-xs transition',
+                          deliveryTarget.chat_id === target.chat_id && deliveryTarget.chat_type === (target.chat_type === 'group' ? 'group' : 'direct')
+                            ? 'border-black/[0.14] bg-black/[0.05] text-foreground dark:border-white/[0.18] dark:bg-white/[0.08]'
+                            : 'border-black/[0.08] bg-white/[0.44] text-muted-foreground hover:text-foreground dark:border-white/[0.12] dark:bg-white/[0.03]'
+                        )}
+                      >
+                        {connectorTargetLabel(target)}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">{t.noTargets}</div>
+                )}
               </div>
               <div className="grid gap-2">
                 <label className="text-sm font-medium">{t.probeText}</label>

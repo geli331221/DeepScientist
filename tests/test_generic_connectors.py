@@ -19,6 +19,8 @@ def test_default_connectors_include_feishu_and_whatsapp(temp_home: Path) -> None
     assert "whatsapp" in connectors
     assert "feishu" in connectors
     assert connectors["whatsapp"]["dm_policy"] == "pairing"
+    assert connectors["whatsapp"]["transport"] == "local_session"
+    assert connectors["feishu"]["transport"] == "long_connection"
     assert connectors["feishu"]["app_id"] is None
 
 
@@ -76,6 +78,13 @@ def test_generic_connector_starts_in_help_mode_and_auto_binds_to_newest_quest(te
     assert "whatsapp" in connector_statuses
     assert "feishu" in connector_statuses
     assert connector_statuses["whatsapp"]["last_conversation_id"] == "whatsapp:direct:+15550001111"
+    assert connector_statuses["whatsapp"]["transport"] == "local_session"
+    assert connector_statuses["whatsapp"]["connection_state"] in {"configured", "ready"}
+    assert connector_statuses["whatsapp"]["target_count"] >= 1
+    assert any(
+        item["conversation_id"] == "whatsapp:direct:+15550001111"
+        for item in connector_statuses["whatsapp"]["discovered_targets"]
+    )
 
 
 def test_generic_connector_supports_terminal_command_and_restore(temp_home: Path) -> None:

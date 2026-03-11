@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from ..connector_runtime import build_discovered_target, infer_connector_transport, merge_discovered_targets
 from ..bridges import get_connector_bridge
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, utc_now, write_json
 from .base import BaseChannel
@@ -53,19 +55,71 @@ class GenericRelayChannel(BaseChannel):
     def status(self) -> dict[str, Any]:
         bindings = self.list_bindings()
         state = read_json(self.state_path, {})
+        runtime_state = read_json(self.root / "runtime.json", {})
         last_conversation_id = str((state or {}).get("last_conversation_id") or "").strip() or None
+        transport = infer_connector_transport(self.name, self.config)
+        default_conversation_id = last_conversation_id or (bindings[0]["conversation_id"] if bindings else None)
+        discovered_targets = merge_discovered_targets(
+            [
+                build_discovered_target(
+                    last_conversation_id,
+                    source="recent_runtime_activity",
+                    is_default=last_conversation_id == default_conversation_id,
+                    updated_at=str((state or {}).get("updated_at") or "").strip() or None,
+                ),
+                *[
+                    build_discovered_target(
+                        item.get("conversation_id"),
+                        source="quest_binding",
+                        is_default=item.get("conversation_id") == default_conversation_id,
+                        quest_id=str(item.get("quest_id") or "").strip() or None,
+                        updated_at=str(item.get("updated_at") or "").strip() or None,
+                    )
+                    for item in bindings
+                ],
+            ]
+        )
+        default_target = next((item for item in discovered_targets if item.get("is_default")), None)
+        connection_state = self._connection_state(transport, last_conversation_id)
+        auth_state = self._auth_state(transport)
+        if (
+            bool(self.config.get("enabled", False))
+            and isinstance(runtime_state, dict)
+            and str(runtime_state.get("transport") or "").strip() == transport
+        ):
+            runtime_connection_state = str(runtime_state.get("connection_state") or "").strip()
+            runtime_auth_state = str(runtime_state.get("auth_state") or "").strip()
+            if runtime_connection_state:
+                connection_state = runtime_connection_state
+            elif runtime_state.get("connected") is True:
+                connection_state = "connected"
+            elif runtime_state.get("last_error"):
+                connection_state = "error"
+            if runtime_auth_state:
+                auth_state = runtime_auth_state
+            elif runtime_state.get("auth_ok") is True:
+                auth_state = "ready"
+            elif runtime_state.get("auth_ok") is False:
+                auth_state = "error"
         return {
             "name": self.name,
             "display_mode": self.display_mode,
             "mode": self.config.get("mode", "relay"),
+            "transport": transport,
             "relay_url": self.config.get("relay_url"),
             "enabled": bool(self.config.get("enabled", False)),
+            "connection_state": connection_state,
+            "auth_state": auth_state,
             "last_conversation_id": last_conversation_id,
+            "last_error": runtime_state.get("last_error") if isinstance(runtime_state, dict) else None,
             "inbox_count": len(read_jsonl(self.inbox_path)),
             "outbox_count": len(read_jsonl(self.outbox_path)),
             "ignored_count": len(read_jsonl(self.ignored_path)),
             "binding_count": len(bindings),
             "bindings": bindings,
+            "target_count": len(discovered_targets),
+            "default_target": default_target,
+            "discovered_targets": discovered_targets,
         }
 
     def ingest(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -302,3 +356,45 @@ class GenericRelayChannel(BaseChannel):
                 "status_code": None,
                 "error": str(exc),
             }
+
+    def _connection_state(self, transport: str, last_conversation_id: str | None) -> str:
+        if not bool(self.config.get("enabled", False)):
+            return "disabled"
+        if transport == "relay":
+            return "relay_configured" if str(self.config.get("relay_url") or "").strip() else "awaiting_relay"
+        if self._has_runtime_credentials(transport):
+            return "ready" if last_conversation_id else "configured"
+        return "needs_credentials"
+
+    def _auth_state(self, transport: str) -> str:
+        if not bool(self.config.get("enabled", False)):
+            return "disabled"
+        if transport == "relay":
+            return "ready" if str(self.config.get("relay_url") or "").strip() else "missing_configuration"
+        return "ready" if self._has_runtime_credentials(transport) else "missing_credentials"
+
+    def _has_runtime_credentials(self, transport: str) -> bool:
+        if self.name == "telegram":
+            return bool(self._secret("bot_token", "bot_token_env"))
+        if self.name == "discord":
+            return bool(self._secret("bot_token", "bot_token_env"))
+        if self.name == "slack":
+            if transport == "socket_mode":
+                return bool(self._secret("bot_token", "bot_token_env") and self._secret("app_token", "app_token_env"))
+            return bool(self._secret("bot_token", "bot_token_env"))
+        if self.name == "feishu":
+            return bool(str(self.config.get("app_id") or "").strip() and self._secret("app_secret", "app_secret_env"))
+        if self.name == "whatsapp":
+            if transport == "local_session":
+                return bool(str(self.config.get("session_dir") or "").strip())
+            return bool(self._secret("access_token", "access_token_env") and str(self.config.get("phone_number_id") or "").strip())
+        return False
+
+    def _secret(self, key: str, env_key: str) -> str:
+        direct = str(self.config.get(key) or "").strip()
+        if direct:
+            return direct
+        env_name = str(self.config.get(env_key) or "").strip()
+        if not env_name:
+            return ""
+        return str(os.environ.get(env_name) or "").strip()

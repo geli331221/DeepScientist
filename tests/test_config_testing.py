@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from deepscientist.bridges import register_builtin_connector_bridges
 from deepscientist.config import ConfigManager
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
@@ -179,7 +180,7 @@ def test_connectors_config_test_supports_qq_direct_without_callback_url(monkeypa
     assert result["ok"] is True
     item = result["items"][0]
     assert item["name"] == "qq"
-    assert item["details"]["transport"] == "qq-gateway-direct"
+    assert item["details"]["transport"] == "gateway_direct"
     assert item["details"]["gateway_url"] == "wss://api.sgroup.qq.com/websocket"
     assert not any("public_callback_url" in warning for warning in item["warnings"])
     assert not any("target chat id is empty" in warning for warning in item["warnings"])
@@ -232,6 +233,40 @@ def test_connectors_config_test_uses_recent_qq_conversation_as_default_target(mo
     item = result["items"][0]
     assert item["details"]["delivery_target"]["used_default_target"] is True
     assert not any("target is empty" in warning for warning in item["warnings"])
+
+
+def test_connectors_config_test_queues_whatsapp_local_session_delivery(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    session_dir = temp_home / "whatsapp-session"
+    connectors["whatsapp"]["enabled"] = True
+    connectors["whatsapp"]["transport"] = "local_session"
+    connectors["whatsapp"]["session_dir"] = str(session_dir)
+    connectors["whatsapp"]["group_policy"] = "open"
+    register_builtin_connector_bridges()
+
+    import yaml
+
+    result = manager.test_named_text(
+        "connectors",
+        yaml.safe_dump(connectors, sort_keys=False),
+        live=True,
+        delivery_targets={
+            "whatsapp": {
+                "chat_type": "direct",
+                "chat_id": "15550001111@s.whatsapp.net",
+                "text": "老师您好，这是一条本地 session 测试消息。",
+            }
+        },
+    )
+
+    assert result["ok"] is True
+    item = next(entry for entry in result["items"] if entry["name"] == "whatsapp")
+    assert item["details"]["delivery"]["transport"] == "whatsapp-local-session"
+    outbox_path = session_dir / "outbox.jsonl"
+    assert outbox_path.exists()
 
 
 def test_plugins_structured_config_normalizes_legacy_search_paths(temp_home: Path) -> None:

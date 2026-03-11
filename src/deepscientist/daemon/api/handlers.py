@@ -55,7 +55,7 @@ class ApiHandlers:
 
     def _ui_dist_root(self) -> Path | None:
         dist_root = self.app.repo_root / "src" / "ui" / "dist"
-        if dist_root.exists():
+        if dist_root.exists() and dist_root.joinpath("index.html").exists():
             return dist_root
         return None
 
@@ -997,8 +997,12 @@ npm --prefix src/ui run build</pre>
 
     def config_save(self, name: str, body: dict) -> dict:
         if isinstance(body.get("structured"), dict):
-            return self.app.config_manager.save_named_payload(name, body["structured"])
-        return self.app.config_manager.save_named_text(name, body.get("content", ""))
+            result = self.app.config_manager.save_named_payload(name, body["structured"])
+        else:
+            result = self.app.config_manager.save_named_text(name, body.get("content", ""))
+        if result.get("ok") and name == "connectors":
+            result["runtime_reload"] = self.app.reload_connectors_config()
+        return result
 
     def config_validate(self, body: dict | None = None) -> dict:
         if body and "name" in body and isinstance(body.get("structured"), dict):

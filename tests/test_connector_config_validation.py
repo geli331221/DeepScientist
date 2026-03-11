@@ -10,19 +10,21 @@ from deepscientist.shared import write_yaml
 from deepscientist.skills import SkillInstaller
 
 
-def test_connector_validation_rejects_unsupported_generic_mode(temp_home: Path) -> None:
+def test_connector_validation_accepts_no_callback_first_transport_defaults(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["feishu"]["enabled"] = True
-    connectors["feishu"]["mode"] = "websocket"
+    connectors["feishu"]["transport"] = "long_connection"
+    connectors["feishu"]["app_id"] = "cli_a1b2c3"
+    connectors["feishu"]["app_secret"] = "secret-value"
 
     import yaml
 
     result = manager.validate_named_text("connectors", yaml.safe_dump(connectors, sort_keys=False))
-    assert result["ok"] is False
-    assert any("only `relay` mode is implemented" in item for item in result["errors"])
+    assert result["ok"] is True
+    assert result["parsed"]["feishu"]["transport"] == "long_connection"
 
 
 def test_connector_validation_rejects_whatsapp_meta_without_required_tokens(temp_home: Path) -> None:
@@ -31,6 +33,7 @@ def test_connector_validation_rejects_whatsapp_meta_without_required_tokens(temp
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
+    connectors["whatsapp"]["transport"] = "legacy_meta_cloud"
     connectors["whatsapp"]["provider"] = "meta"
 
     import yaml
@@ -58,6 +61,7 @@ def test_connector_validation_strips_legacy_qq_mode_fields(temp_home: Path) -> N
     normalized = result["parsed"]["qq"]
     assert "mode" not in normalized
     assert "public_callback_url" not in normalized
+    assert normalized["transport"] == "gateway_direct"
 
 
 def test_connector_validation_accepts_qq_direct_without_callback_url(temp_home: Path) -> None:
@@ -101,6 +105,7 @@ def test_generic_connector_enforces_dm_allowlist(temp_home: Path) -> None:
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
+    connectors["whatsapp"]["transport"] = "local_session"
     connectors["whatsapp"]["dm_policy"] = "allowlist"
     connectors["whatsapp"]["allow_from"] = ["+15550001111"]
     write_yaml(manager.path_for("connectors"), connectors)

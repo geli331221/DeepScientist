@@ -65,6 +65,7 @@ export interface SendChatOptions {
   metadata?: Record<string, unknown>
   mentionTargets?: string[]
   replayFromLastEvent?: boolean
+  questMessagePosted?: boolean
 }
 
 type RuntimeListener = () => void
@@ -450,6 +451,15 @@ const postChat = async (payload: SendChatOptions, projectId: string | null, atte
 
   if (questId) {
     const message = payload.message ?? ''
+    if (isCopilotDebugEnabled()) {
+      console.info('[CopilotAudit][stream] quest postChat', {
+        projectId,
+        sessionId: activeSessionId,
+        questId,
+        messageLength: message.length,
+        attempt,
+      })
+    }
     if (!message.trim()) return
     const url = `${getApiBaseUrl()}/api/quests/${questId}/chat`
     const method = 'POST'
@@ -589,7 +599,9 @@ const runStream = async (
   }
 
   let currentLastEventId = useChatSessionStore.getState().getLastEventId(activeSessionId)
-  if (isQuestSession && !currentLastEventId) {
+  const shouldSeedQuestResumeToken =
+    isQuestSession && !currentLastEventId && (shouldReplay || streamOnly)
+  if (shouldSeedQuestResumeToken) {
     try {
       const seedSession = await getSession(activeSessionId, { limit: 1 })
       const seedToken = resolveQuestResumeToken(seedSession.events ?? [])
@@ -641,8 +653,9 @@ const runStream = async (
       method = 'GET'
       requestBody = undefined
       delete headers['Content-Type']
-      if (!streamOnly && (hasMessage || hasAttachments)) {
+      if (!streamOnly && (hasMessage || hasAttachments) && !payload.questMessagePosted) {
         await postChat(payload, runtime.projectId ?? projectId ?? null, attempt)
+        payload.questMessagePosted = true
       }
     }
     debugLog(runtime, 'start', {
@@ -1021,6 +1034,15 @@ export function useSSESession(options: {
     async (payload: SendChatOptions) => {
       const targetSessionId = payload.sessionId ?? sessionId
       if (!targetSessionId) return
+      if (isCopilotDebugEnabled()) {
+        console.info('[CopilotAudit][stream] sendMessage', {
+          targetSessionId,
+          projectId,
+          hasMessage: (payload.message ?? '').trim().length > 0,
+          attachmentCount: (payload.attachments ?? []).length,
+          replayFromLastEvent: Boolean(payload.replayFromLastEvent),
+        })
+      }
 
       const runtime = getOrCreateRuntime(targetSessionId)
       if (projectId && !runtime.projectId) {
@@ -1049,6 +1071,12 @@ export function useSSESession(options: {
       }
 
       if (runtime.isStreaming) {
+        if (isCopilotDebugEnabled()) {
+          console.info('[CopilotAudit][stream] runtime already streaming', {
+            targetSessionId,
+            streamOnly,
+          })
+        }
         if (streamOnly) return
         await postChat(request, projectId ?? null, 0)
         return

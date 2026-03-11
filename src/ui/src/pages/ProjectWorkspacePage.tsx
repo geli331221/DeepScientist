@@ -114,7 +114,16 @@ export function ProjectWorkspacePage() {
     )
   }
 
-  if (!isSharedView && !maxEntitlement.isEntitlementLoading && !maxEntitlement.isMaxEntitled) {
+  const projectName = (isSharedView ? sharedProjectName : project?.name) || `Project ${projectId}`
+  const isLocalQuestProject =
+    !isSharedView && typeof project?.settings?.source === 'string' && project.settings.source === 'quest'
+
+  if (
+    !isSharedView &&
+    !isLocalQuestProject &&
+    !maxEntitlement.isEntitlementLoading &&
+    !maxEntitlement.isMaxEntitled
+  ) {
     return (
       <AtmosphereFrame>
         <div className="flex h-screen items-center justify-center">
@@ -141,8 +150,6 @@ export function ProjectWorkspacePage() {
       </AtmosphereFrame>
     )
   }
-
-  const projectName = (isSharedView ? sharedProjectName : project?.name) || `Project ${projectId}`
 
   return (
     <WorkspaceLayout

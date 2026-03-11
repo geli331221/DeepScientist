@@ -1,7 +1,9 @@
 from __future__ import annotations
+import os
 from pathlib import Path
 from typing import Any
 
+from ..connector_runtime import build_discovered_target, merge_discovered_targets
 from ..bridges import get_connector_bridge
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, utc_now, write_json
 from .base import BaseChannel
@@ -49,20 +51,71 @@ class QQRelayChannel(BaseChannel):
     def status(self) -> dict[str, Any]:
         bindings = self.list_bindings()
         state = read_json(self.state_path, {})
+        gateway_state = read_json(self.root / "gateway.json", {})
         last_conversation_id = str((state or {}).get("last_conversation_id") or "").strip() or None
+        main_chat_id = str(self.config.get("main_chat_id") or "").strip() or None
+        default_conversation_id = (
+            f"qq:direct:{main_chat_id}"
+            if main_chat_id
+            else (last_conversation_id or (bindings[0]["conversation_id"] if bindings else None))
+        )
+        discovered_targets = merge_discovered_targets(
+            [
+                build_discovered_target(
+                    default_conversation_id if main_chat_id else None,
+                    source="saved_main_chat",
+                    is_default=bool(main_chat_id),
+                ),
+                build_discovered_target(
+                    last_conversation_id,
+                    source="recent_runtime_activity",
+                    is_default=last_conversation_id == default_conversation_id,
+                    updated_at=str((state or {}).get("updated_at") or "").strip() or None,
+                ),
+                *[
+                    build_discovered_target(
+                        item.get("conversation_id"),
+                        source="quest_binding",
+                        is_default=item.get("conversation_id") == default_conversation_id,
+                        quest_id=str(item.get("quest_id") or "").strip() or None,
+                        updated_at=str(item.get("updated_at") or "").strip() or None,
+                    )
+                    for item in bindings
+                ],
+            ]
+        )
+        default_target = next((item for item in discovered_targets if item.get("is_default")), None)
+        connection_state = self._connection_state(main_chat_id=main_chat_id, last_conversation_id=last_conversation_id)
+        auth_state = self._auth_state()
+        if bool(self.config.get("enabled", False)) and isinstance(gateway_state, dict):
+            if gateway_state.get("connected") is True:
+                connection_state = "connected"
+            elif gateway_state.get("last_error"):
+                connection_state = "error"
+            elif gateway_state.get("enabled") and connection_state not in {"disabled", "needs_credentials"}:
+                connection_state = "connecting"
+            if gateway_state.get("last_error") and auth_state == "ready":
+                auth_state = "ready"
         return {
             "name": self.name,
             "display_mode": self.display_mode,
             "mode": "gateway-direct",
+            "transport": "gateway_direct",
             "relay_url": None,
             "enabled": bool(self.config.get("enabled", False)),
-            "main_chat_id": str(self.config.get("main_chat_id") or "").strip() or None,
+            "connection_state": connection_state,
+            "auth_state": auth_state,
+            "main_chat_id": main_chat_id,
             "last_conversation_id": last_conversation_id,
+            "last_error": gateway_state.get("last_error") if isinstance(gateway_state, dict) else None,
             "inbox_count": len(read_jsonl(self.inbox_path)),
             "outbox_count": len(read_jsonl(self.outbox_path)),
             "ignored_count": len(read_jsonl(self.ignored_path)),
             "binding_count": len(bindings),
             "bindings": bindings,
+            "target_count": len(discovered_targets),
+            "default_target": default_target,
+            "discovered_targets": discovered_targets,
         }
 
     def ingest(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -262,3 +315,28 @@ class QQRelayChannel(BaseChannel):
         if bridge is not None:
             return bridge.deliver(record, self.config)
         return None
+
+    def _connection_state(self, *, main_chat_id: str | None, last_conversation_id: str | None) -> str:
+        if not bool(self.config.get("enabled", False)):
+            return "disabled"
+        if not str(self.config.get("app_id") or "").strip() or not self._secret("app_secret", "app_secret_env"):
+            return "needs_credentials"
+        if main_chat_id or last_conversation_id:
+            return "ready"
+        return "awaiting_first_message"
+
+    def _auth_state(self) -> str:
+        if not bool(self.config.get("enabled", False)):
+            return "disabled"
+        if str(self.config.get("app_id") or "").strip() and self._secret("app_secret", "app_secret_env"):
+            return "ready"
+        return "missing_credentials"
+
+    def _secret(self, key: str, env_key: str) -> str:
+        direct = str(self.config.get(key) or "").strip()
+        if direct:
+            return direct
+        env_name = str(self.config.get(env_key) or "").strip()
+        if not env_name:
+            return ""
+        return str(os.environ.get(env_name) or "").strip()

@@ -87,7 +87,7 @@ function parseStructuredValue(value: unknown) {
   return null
 }
 
-function questSessionId(questId: string) {
+export function buildQuestSessionId(questId: string) {
   return `${QUEST_SESSION_PREFIX}${questId}`
 }
 
@@ -458,7 +458,7 @@ export function normalizeQuestAcpUpdateEnvelope(
   const sessionId =
     asString(params?.sessionId) ||
     asString(update?.session_id) ||
-    questSessionId(asString(update?.quest_id) || '')
+    buildQuestSessionId(asString(update?.quest_id) || '')
   const questId =
     asString(update?.quest_id) ||
     getQuestIdFromSessionId(sessionId) ||
@@ -587,7 +587,7 @@ async function fetchQuestEventEnvelope(
       after,
       limit: QUEST_HISTORY_PAGE_SIZE,
       format: 'acp',
-      session_id: questSessionId(questId),
+      session_id: buildQuestSessionId(questId),
     },
   })
   return response.data
@@ -646,7 +646,7 @@ function buildQuestSessionLike(
       ? Math.floor(options.limit)
       : QUEST_DEFAULT_LIMIT
   return {
-    session_id: questSessionId(payload.quest_id),
+    session_id: buildQuestSessionId(payload.quest_id),
     status,
     title: asString(snapshot.title) || payload.quest_id,
     is_active: isActive,
@@ -770,7 +770,7 @@ export async function listQuestSessionSummaries(projectId: string) {
 export function buildQuestStreamUrl(questId: string) {
   const params = new URLSearchParams({
     format: 'acp',
-    session_id: questSessionId(questId),
+    session_id: buildQuestSessionId(questId),
     stream: '1',
   })
   return `${getApiBaseUrl()}/api/quests/${questId}/events?${params.toString()}`

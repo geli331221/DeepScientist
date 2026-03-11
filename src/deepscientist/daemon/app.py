@@ -12,7 +12,12 @@ from ..artifact import ArtifactService
 from ..bash_exec import BashExecService
 from ..bridges import get_connector_bridge, register_builtin_connector_bridges
 from ..channels import QQRelayChannel, get_channel_factory, list_channel_names, register_builtin_channels
+from ..channels.discord_gateway import DiscordGatewayService
+from ..channels.feishu_long_connection import FeishuLongConnectionService
 from ..channels.qq_gateway import QQGatewayService
+from ..channels.slack_socket import SlackSocketModeService
+from ..channels.telegram_polling import TelegramPollingService
+from ..channels.whatsapp_local_session import WhatsAppLocalSessionService
 from ..cloud import CloudLinkService
 from ..config import ConfigManager
 from ..home import repo_root
@@ -79,6 +84,11 @@ class DaemonApp:
         self._server: ThreadingHTTPServer | None = None
         self._shutdown_requested = threading.Event()
         self._qq_gateway: QQGatewayService | None = None
+        self._telegram_polling: TelegramPollingService | None = None
+        self._slack_socket: SlackSocketModeService | None = None
+        self._discord_gateway: DiscordGatewayService | None = None
+        self._feishu_long_connection: FeishuLongConnectionService | None = None
+        self._whatsapp_local_session: WhatsAppLocalSessionService | None = None
         self.handlers = ApiHandlers(self)
 
     def get_runner(self, name: str):
@@ -96,6 +106,25 @@ class DaemonApp:
     def _create_channel(self, name: str):
         factory = get_channel_factory(name)
         return factory(home=self.home, app=self, config=self.connectors_config.get(name, {}))
+
+    def reload_connectors_config(self, *, restart_background: bool = True) -> dict[str, object]:
+        self.connectors_config = self.config_manager.load_named("connectors")
+        register_builtin_channels(home=self.home, connectors_config=self.connectors_config)
+        for name, channel in self.channels.items():
+            config = self.connectors_config.get(name, {})
+            if hasattr(channel, "config") and isinstance(getattr(channel, "config"), dict):
+                channel.config.clear()
+                if isinstance(config, dict):
+                    channel.config.update(config)
+        if restart_background and self._server is not None:
+            self._stop_background_connectors()
+            self._start_background_connectors()
+        return {
+            "ok": True,
+            "connectors": sorted(
+                name for name, config in self.connectors_config.items() if not str(name).startswith("_") and isinstance(config, dict)
+            ),
+        }
 
     def _preferred_locale(self) -> str:
         config = self.config_manager.load_named("config")
@@ -1348,24 +1377,91 @@ class DaemonApp:
 
     def _start_background_connectors(self) -> None:
         qq_config = self.connectors_config.get("qq", {})
-        if not isinstance(qq_config, dict):
-            return
-        if self._qq_gateway is not None:
-            return
-        gateway = QQGatewayService(
-            home=self.home,
-            config=qq_config,
-            on_event=lambda event: self.handle_connector_inbound("qq", event),
-            log=lambda level, message: self.logger.log(level, "connector.qq_gateway", message=message),
-        )
-        if gateway.start():
-            self._qq_gateway = gateway
+        if isinstance(qq_config, dict) and self._qq_gateway is None:
+            gateway = QQGatewayService(
+                home=self.home,
+                config=qq_config,
+                on_event=lambda event: self.handle_connector_inbound("qq", event),
+                log=lambda level, message: self.logger.log(level, "connector.qq_gateway", message=message),
+            )
+            if gateway.start():
+                self._qq_gateway = gateway
+        telegram_config = self.connectors_config.get("telegram", {})
+        if isinstance(telegram_config, dict) and self._telegram_polling is None:
+            polling = TelegramPollingService(
+                home=self.home,
+                config=telegram_config,
+                on_event=lambda event: self.handle_connector_inbound("telegram", event),
+                log=lambda level, message: self.logger.log(level, "connector.telegram_polling", message=message),
+            )
+            if polling.start():
+                self._telegram_polling = polling
+        slack_config = self.connectors_config.get("slack", {})
+        if isinstance(slack_config, dict) and self._slack_socket is None:
+            slack = SlackSocketModeService(
+                home=self.home,
+                config=slack_config,
+                on_event=lambda event: self.handle_connector_inbound("slack", event),
+                log=lambda level, message: self.logger.log(level, "connector.slack_socket", message=message),
+            )
+            if slack.start():
+                self._slack_socket = slack
+        discord_config = self.connectors_config.get("discord", {})
+        if isinstance(discord_config, dict) and self._discord_gateway is None:
+            discord = DiscordGatewayService(
+                home=self.home,
+                config=discord_config,
+                on_event=lambda event: self.handle_connector_inbound("discord", event),
+                log=lambda level, message: self.logger.log(level, "connector.discord_gateway", message=message),
+            )
+            if discord.start():
+                self._discord_gateway = discord
+        feishu_config = self.connectors_config.get("feishu", {})
+        if isinstance(feishu_config, dict) and self._feishu_long_connection is None:
+            feishu = FeishuLongConnectionService(
+                home=self.home,
+                config=feishu_config,
+                on_event=lambda event: self.handle_connector_inbound("feishu", event),
+                log=lambda level, message: self.logger.log(level, "connector.feishu_long_connection", message=message),
+            )
+            if feishu.start():
+                self._feishu_long_connection = feishu
+        whatsapp_config = self.connectors_config.get("whatsapp", {})
+        if isinstance(whatsapp_config, dict) and self._whatsapp_local_session is None:
+            whatsapp = WhatsAppLocalSessionService(
+                home=self.home,
+                config=whatsapp_config,
+                on_event=lambda event: self.handle_connector_inbound("whatsapp", event),
+                log=lambda level, message: self.logger.log(level, "connector.whatsapp_local_session", message=message),
+            )
+            if whatsapp.start():
+                self._whatsapp_local_session = whatsapp
 
     def _stop_background_connectors(self) -> None:
         gateway = self._qq_gateway
         self._qq_gateway = None
         if gateway is not None:
             gateway.stop()
+        polling = self._telegram_polling
+        self._telegram_polling = None
+        if polling is not None:
+            polling.stop()
+        slack = self._slack_socket
+        self._slack_socket = None
+        if slack is not None:
+            slack.stop()
+        discord = self._discord_gateway
+        self._discord_gateway = None
+        if discord is not None:
+            discord.stop()
+        feishu = self._feishu_long_connection
+        self._feishu_long_connection = None
+        if feishu is not None:
+            feishu.stop()
+        whatsapp = self._whatsapp_local_session
+        self._whatsapp_local_session = None
+        if whatsapp is not None:
+            whatsapp.stop()
 
     @staticmethod
     def _format_status(snapshot: dict) -> str:
@@ -1836,6 +1932,7 @@ class DaemonApp:
                         "git_diff_file",
                         "git_commit_file",
                         "explorer",
+                        "quest_search",
                         "node_traces",
                         "node_trace",
                         "document_asset",

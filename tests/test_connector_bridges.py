@@ -394,6 +394,7 @@ def test_bridge_direct_outbound_telegram_and_whatsapp(monkeypatch, temp_home: Pa
     manager = ConfigManager(temp_home)
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
+    connectors["whatsapp"]["transport"] = "legacy_meta_cloud"
     connectors["whatsapp"]["provider"] = "meta"
     connectors["whatsapp"]["access_token"] = "wa-access"
     connectors["whatsapp"]["phone_number_id"] = "phone-123"

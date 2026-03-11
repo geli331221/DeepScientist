@@ -114,13 +114,14 @@ export async function hasQuestApi(): Promise<boolean> {
 }
 
 export async function shouldUseQuestProject(projectId: string): Promise<boolean> {
-  let probe = questProjectProbeCache.get(projectId)
-  if (!probe) {
-    probe = questClient
-      .session(projectId)
-      .then(() => true)
-      .catch(() => false)
-    questProjectProbeCache.set(projectId, probe)
+  const cachedProbe = questProjectProbeCache.get(projectId)
+  if (cachedProbe) {
+    return cachedProbe
   }
+  const probe = questClient
+    .session(projectId)
+    .then(() => true)
+    .catch(() => false)
+  questProjectProbeCache.set(projectId, probe)
   return probe
 }

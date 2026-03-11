@@ -4,9 +4,11 @@ import json
 import time
 from hashlib import sha256
 from hmac import new as hmac_new
+from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+from ..shared import append_jsonl, ensure_dir, utc_now
 from .base import BaseConnectorBridge, BridgeWebhookResult
 
 
@@ -294,6 +296,24 @@ class WhatsAppConnectorBridge(BaseConnectorBridge):
         }
 
     def deliver_direct(self, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+        transport = str(config.get("transport") or "").strip().lower()
+        session_dir = str(config.get("session_dir") or "").strip()
+        if transport == "local_session" and session_dir:
+            root = ensure_dir(Path(session_dir).expanduser())
+            outbox_path = root / "outbox.jsonl"
+            record = {
+                "created_at": utc_now(),
+                "transport": "local_session",
+                "payload": self.format_outbound(payload, config),
+                "normalized_payload": payload,
+            }
+            append_jsonl(outbox_path, record)
+            return {
+                "ok": True,
+                "queued": True,
+                "transport": "whatsapp-local-session",
+                "outbox_path": str(outbox_path),
+            }
         provider = str(config.get("provider") or "relay").strip().lower()
         if provider != "meta":
             return None

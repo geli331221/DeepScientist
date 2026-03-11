@@ -83,6 +83,12 @@ def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, python
         assert "items" in node_traces
         explorer = _get_json(f"http://127.0.0.1:20901/api/quests/{quest_id}/explorer")
         assert explorer["view"]["mode"] == "live"
+        search = _get_json(
+            f"http://127.0.0.1:20901/api/quests/{quest_id}/search?q={quote('daemon api quest')}&limit=10"
+        )
+        assert search["quest_id"] == quest_id
+        assert search["items"]
+        assert any(item["path"] == "brief.md" for item in search["items"])
         graph = _get_json(f"http://127.0.0.1:20901/api/quests/{quest_id}/graph")
         assert "lines" in graph
         branches = _get_json(f"http://127.0.0.1:20901/api/quests/{quest_id}/git/branches")
@@ -248,6 +254,13 @@ def test_router_matches_spa_project_paths() -> None:
 
     assert route_name == "spa_root"
     assert params["spa_path"] == "projects/q-123456"
+
+
+def test_router_matches_quest_search_path() -> None:
+    route_name, params = match_route("GET", "/api/quests/q-123456/search")
+
+    assert route_name == "quest_search"
+    assert params["quest_id"] == "q-123456"
 
 
 def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(temp_home: Path) -> None:

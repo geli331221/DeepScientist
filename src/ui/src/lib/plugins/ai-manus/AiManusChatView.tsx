@@ -63,7 +63,12 @@ import {
   type SessionStatus,
   type SessionAgentSummary,
 } from '@/lib/api/sessions'
-import { isQuestSessionId, resolveQuestResumeToken } from '@/lib/api/quest-session-compat'
+import {
+  buildQuestSessionId,
+  isQuestSessionId,
+  resolveQuestResumeToken,
+  shouldUseQuestSessionCompat,
+} from '@/lib/api/quest-session-compat'
 import { useTabsStore } from '@/lib/stores/tabs'
 import { useFileTreeStore } from '@/lib/stores/file-tree'
 import { useFileContentStore } from '@/lib/stores/file-content'
@@ -2496,6 +2501,9 @@ export function AiManusChatView({
           return
         }
 
+        if ((latest?.events?.length ?? 0) === 0) {
+          skipRestoreRef.current = true
+        }
         setSessionIdForSurface(projectId, sessionSurface, latestId)
         console.info('[CopilotAudit][entry] adopt latest session', {
           projectId,
@@ -2991,13 +2999,20 @@ export function AiManusChatView({
         const draftActive = Boolean(draftSessionIdRef.current)
         const currentSessionId = sessionIdRef.current
         const shouldAdopt = Boolean(options?.adopt) && !draftActive
+        const shouldSkipRestore = orderedEvents.length === 0
         if (shouldAdopt) {
+          if (shouldSkipRestore) {
+            skipRestoreRef.current = true
+          }
           if (currentSessionId !== latestId) {
             setSessionIdForSurface(projectId, sessionSurface, latestId)
           } else if (!isRestoring) {
             requestRestore()
           }
         } else if (!currentSessionId && !draftActive) {
+          if (shouldSkipRestore) {
+            skipRestoreRef.current = true
+          }
           setSessionIdForSurface(projectId, sessionSurface, latestId)
         }
 
@@ -4490,6 +4505,31 @@ export function AiManusChatView({
     }
 
     const openToolPanelOnCreate = options?.openToolPanel !== false
+    if (await shouldUseQuestSessionCompat(projectId)) {
+      const questSessionId = buildQuestSessionId(projectId)
+      debugLog('ensure:quest:adopt', { sessionId: questSessionId })
+      skipRestoreRef.current = true
+      setDraftSessionId(null)
+      setSessionIdForSurface(projectId, sessionSurface, questSessionId)
+      setLastEventId(questSessionId, null)
+      upsertSession(
+        questSessionId,
+        {
+          title: 'New Chat',
+          status: 'pending',
+          latest_message: null,
+          latest_message_at: Math.floor(Date.now() / 1000),
+          updated_at: Math.floor(Date.now() / 1000),
+          is_active: false,
+        },
+        { forceTop: true }
+      )
+      triggerSessionHighlight(questSessionId)
+      if (openToolPanelOnCreate) {
+        setToolPanelOpen(true)
+      }
+      return questSessionId
+    }
     debugLog('ensure:create:start')
     const createPromise = createSession(projectId)
       .then((created) => {
@@ -4632,6 +4672,17 @@ export function AiManusChatView({
       defaultAgent: defaultAgentOverride,
     })
     const displayText = resolution.displayMessage.trim()
+    if (debugEnabled) {
+      console.info('[CopilotAudit][submit] start', {
+        projectId,
+        sessionId: sessionIdRef.current,
+        inputLength: inputMessage.length,
+        displayLength: displayText.length,
+        readOnlyMode,
+        isRestoring: isRestoringRef.current,
+        pendingRun,
+      })
+    }
     if (!displayText || readOnlyMode) return
     const agentMessage = resolution.agentMessage.trim()
     if (resolution.matched && !agentMessage) {
@@ -4707,6 +4758,13 @@ export function AiManusChatView({
     setPendingRun(true)
     setSessionActive(true)
     const resolvedSessionId = await ensureSession()
+    if (debugEnabled) {
+      console.info('[CopilotAudit][submit] ensureSession resolved', {
+        projectId,
+        requestedSessionId: sessionIdRef.current,
+        resolvedSessionId,
+      })
+    }
     if (!resolvedSessionId) {
       setPendingRun(false)
       setSessionActive(false)
@@ -4783,6 +4841,14 @@ export function AiManusChatView({
       ? { context: contextSnapshot, ...metadataWithRecentFiles }
       : metadataWithRecentFiles
     try {
+      if (debugEnabled) {
+        console.info('[CopilotAudit][submit] sendMessage', {
+          projectId,
+          sessionId: resolvedSessionId,
+          messageLength: sendText.length,
+          attachmentCount: preparedAttachments.length,
+        })
+      }
       await sendMessage({
         sessionId: resolvedSessionId,
         message: sendText,
@@ -7822,6 +7888,17 @@ export function AiManusChatView({
           }
         }
       }
+      if (isQuestSessionId(sessionId) && !forceRestore && !fullHistoryRequestRef.current) {
+        debugLog('restore:skip', { sessionId, reason: 'quest_cache_replay' })
+        setIsRestoring(false)
+        isRestoringRef.current = false
+        if (restoringSessionIdRef.current === sessionId) {
+          restoringSessionIdRef.current = null
+        }
+        return () => {
+          active = false
+        }
+      }
     }
 
     const restore = async () => {
@@ -8965,7 +9042,7 @@ export function AiManusChatView({
             sessionId={sessionId}
             ensureSession={ensureSession}
             readOnly={readOnlyMode}
-            inputDisabled={Boolean(questionPrompt) || Boolean(clarifyPrompt) || cliInputLocked}
+            inputDisabled={isRestoring || Boolean(questionPrompt) || Boolean(clarifyPrompt) || cliInputLocked}
             compact={options.compact}
             placeholder={options.placeholder}
             containerClassName={options.containerClassName}
@@ -9008,7 +9085,7 @@ export function AiManusChatView({
           sessionId={sessionId}
           ensureSession={ensureSession}
           readOnly={readOnlyMode}
-          inputDisabled={Boolean(questionPrompt) || Boolean(clarifyPrompt) || cliInputLocked}
+          inputDisabled={isRestoring || Boolean(questionPrompt) || Boolean(clarifyPrompt) || cliInputLocked}
           compact={options.compact}
           rows={options.rows}
           placeholder={options.placeholder}

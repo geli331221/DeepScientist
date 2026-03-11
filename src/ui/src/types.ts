@@ -85,14 +85,33 @@ export interface ConnectorSnapshot {
   name: string
   display_mode?: string
   mode?: string
+  transport?: string
   relay_url?: string | null
   main_chat_id?: string | null
   last_conversation_id?: string | null
   enabled?: boolean
+  connection_state?: string
+  auth_state?: string
   inbox_count?: number
   outbox_count?: number
   ignored_count?: number
   binding_count?: number
+  target_count?: number
+  default_target?: ConnectorTargetSnapshot | null
+  discovered_targets?: ConnectorTargetSnapshot[]
+}
+
+export interface ConnectorTargetSnapshot {
+  conversation_id: string
+  connector?: string
+  chat_type: string
+  chat_id: string
+  label?: string | null
+  source?: string | null
+  sources?: string[]
+  quest_id?: string | null
+  updated_at?: string | null
+  is_default?: boolean
 }
 
 export interface ConfigFileEntry {

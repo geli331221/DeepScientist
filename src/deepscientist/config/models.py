@@ -105,6 +105,7 @@ def default_connectors() -> dict:
         },
         "qq": {
             "enabled": False,
+            "transport": "gateway_direct",
             "app_id": None,
             "app_secret": None,
             "app_secret_env": "QQ_APP_SECRET",
@@ -117,6 +118,7 @@ def default_connectors() -> dict:
         },
         "telegram": {
             "enabled": False,
+            "transport": "polling",
             "mode": "relay",
             "bot_name": "DeepScientist",
             "command_prefix": "/",
@@ -137,6 +139,7 @@ def default_connectors() -> dict:
         },
         "discord": {
             "enabled": False,
+            "transport": "gateway",
             "mode": "relay",
             "bot_name": "DeepScientist",
             "command_prefix": "/",
@@ -159,6 +162,7 @@ def default_connectors() -> dict:
         },
         "slack": {
             "enabled": False,
+            "transport": "socket_mode",
             "mode": "relay",
             "bot_name": "DeepScientist",
             "command_prefix": "/",
@@ -182,6 +186,7 @@ def default_connectors() -> dict:
         },
         "feishu": {
             "enabled": False,
+            "transport": "long_connection",
             "mode": "relay",
             "bot_name": "DeepScientist",
             "command_prefix": "/",
@@ -206,9 +211,12 @@ def default_connectors() -> dict:
         },
         "whatsapp": {
             "enabled": False,
+            "transport": "local_session",
             "mode": "relay",
             "bot_name": "DeepScientist",
             "command_prefix": "/",
+            "auth_method": "qr_browser",
+            "session_dir": "~/.deepscientist/connectors/whatsapp",
             "provider": "relay",
             "access_token": None,
             "access_token_env": "WHATSAPP_ACCESS_TOKEN",

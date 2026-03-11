@@ -13,6 +13,7 @@ authors = [
 ]
 dependencies = [
   "cryptography>=42,<46",
+  "lark-oapi>=1.5,<2",
   "mcp>=1.19,<2",
   "Pillow>=10,<12",
   "PyYAML>=6,<7",

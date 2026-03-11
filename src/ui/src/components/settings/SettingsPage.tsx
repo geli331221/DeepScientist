@@ -35,7 +35,10 @@ const CONFIG_META = {
   },
   connectors: {
     label: { en: 'Connectors', zh: '连接器' },
-    hint: { en: 'QQ gateway bindings, external connector routes, and delivery targets.', zh: 'QQ gateway 绑定、外部连接器路由与投递目标。' },
+    hint: {
+      en: 'Native connector transports, discovered runtime targets, and legacy callback fallbacks.',
+      zh: '原生连接器传输方式、运行时发现目标，以及旧式回调兜底配置。',
+    },
   },
   plugins: {
     label: { en: 'Extensions', zh: '扩展' },

@@ -150,6 +150,10 @@ def test_qq_direct_message_starts_in_help_mode_and_auto_binds_to_newest_quest(
     connector_statuses = {item["name"]: item for item in app.handlers.connectors()}
     assert connector_statuses["qq"]["main_chat_id"] == "user-2"
     assert connector_statuses["qq"]["last_conversation_id"] == "qq:direct:user-2"
+    assert connector_statuses["qq"]["transport"] == "gateway_direct"
+    assert connector_statuses["qq"]["connection_state"] == "ready"
+    assert connector_statuses["qq"]["default_target"]["conversation_id"] == "qq:direct:user-2"
+    assert any(item["conversation_id"] == "qq:direct:user-2" for item in connector_statuses["qq"]["discovered_targets"])
     assert any(item["text"].startswith("已自动检测并保存当前 QQ openid") for item in deliveries)
     assert any(latest_id in item["text"] for item in deliveries)
 

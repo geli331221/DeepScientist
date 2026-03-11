@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from ..connector_runtime import infer_connector_transport
 from ..shared import read_json, read_text, read_yaml, run_command, sha256_text, utc_now, which, write_text, write_yaml
 from .models import (
     CONFIG_NAMES,
@@ -215,8 +216,8 @@ This page edits `~/DeepScientist/config/connectors.yaml` directly.
 - connect Telegram, Discord, Slack, Feishu, WhatsApp, or QQ
 - choose one preferred connector for proactive artifact updates
 - decide whether artifact updates fan out or stay focused
-- choose whether a connector sends through a `relay_url` bridge
-- or let the daemon use direct provider HTTP when supported
+- prefer local or gateway-based transports that do not require public callbacks
+- keep legacy webhook or relay settings only as a fallback path
 - keep all secrets in one visible place
 
 ## Recommended order
@@ -227,7 +228,16 @@ This page edits `~/DeepScientist/config/connectors.yaml` directly.
 4. click **Test**
 5. save the file only after the test result looks healthy
 
-## Bridge routes
+## Preferred transports
+
+- Telegram: `polling`
+- Slack: `socket_mode`
+- Discord: `gateway`
+- Feishu: `long_connection`
+- WhatsApp: `local_session`
+- QQ: `gateway_direct`
+
+## Legacy fallback routes
 
 - `POST /api/bridges/telegram/webhook`
 - `POST /api/bridges/slack/webhook`
@@ -241,36 +251,37 @@ This page edits `~/DeepScientist/config/connectors.yaml` directly.
 ### Telegram
 
 - set `bot_token`
-- optional: set `webhook_secret`
-- direct send test uses `getMe`
+- prefer `transport: polling`
+- use webhook fields only in the legacy section
+- readiness test uses `getMe`
 
 ### Slack
 
 - set `bot_token`
-- set `signing_secret`
-- direct send test uses `auth.test`
+- for no-callback mode also set `app_token`
+- prefer `transport: socket_mode`
+- readiness test uses `auth.test`
 
 ### Discord
 
-- set `bot_token` for outbound REST
-- inbound chat normally still comes from a gateway bridge
-- if you use a bridge sidecar, set `relay_auth_token`
+- set `bot_token`
+- prefer `transport: gateway`
+- keep interaction callback fields only for legacy compatibility
 
 ### Feishu
 
 - set `app_id`
 - set `app_secret`
-- optional: set `verification_token`
+- prefer `transport: long_connection`
+- keep verification or encrypt keys only for legacy webhook fallback
 - test checks whether tenant token exchange succeeds
 
 ### WhatsApp
 
-- for Meta Cloud API set:
-  - `provider: meta`
-  - `access_token`
-  - `phone_number_id`
-  - `verify_token`
-- test uses a safe read request against the configured phone number id
+- prefer `transport: local_session`
+- the local-session path is designed to avoid public callbacks
+- Meta Cloud API fields stay in the legacy section for fallback use
+- current live test can still probe Meta credentials when configured
 
 ### QQ
 
@@ -279,6 +290,7 @@ This page edits `~/DeepScientist/config/connectors.yaml` directly.
 - the daemon auto-detects that user's `openid` and saves it into `main_chat_id`
 - readiness test exchanges `access_token` and probes `/gateway`
 - active send targets use QQ user `openid` or group `group_openid`
+- the settings page also surfaces recently discovered targets from runtime activity
 
 ## Safety
 
@@ -528,7 +540,6 @@ Use **Test** when the file exposes runtime dependencies.
     def _validate_connectors_payload(self, payload: dict) -> dict:
         warnings: list[str] = []
         errors: list[str] = []
-        supported_modes = {"relay"}
         routing = payload.get("_routing") if isinstance(payload.get("_routing"), dict) else {}
         routing_policy = str(routing.get("artifact_delivery_policy") or "primary_plus_local").strip().lower()
         preferred_connector = str(routing.get("primary_connector") or "").strip().lower()
@@ -557,37 +568,66 @@ Use **Test** when the file exposes runtime dependencies.
                 if not self._has_secret(config, "app_secret", "app_secret_env"):
                     errors.append("qq: requires `app_secret` or `app_secret_env` for the built-in gateway direct connector.")
                 continue
-            mode = str(config.get("mode") or "relay").strip().lower()
+            transport = infer_connector_transport(name, config)
+            relay_url = str(config.get("relay_url") or "").strip()
+            public_callback_url = str(config.get("public_callback_url") or "").strip()
 
-            if mode not in supported_modes:
-                errors.append(f"{name}: only `relay` mode is implemented in DeepScientist v1.")
-
-            if not str(config.get("relay_url") or "").strip():
-                warnings.append(f"{name}: `relay_url` is empty, so outbound milestone push will stay local until a relay bridge is configured.")
+            if transport == "relay" and not relay_url:
+                errors.append(f"{name}: `transport: relay` requires `relay_url`.")
 
             policy_validation = self._validate_access_policies(name, config)
             warnings.extend(policy_validation["warnings"])
             errors.extend(policy_validation["errors"])
 
             if name == "telegram":
-                if not self._has_secret(config, "bot_token", "bot_token_env"):
-                    warnings.append("telegram: set `bot_token` or `bot_token_env` so the relay can authenticate with the Telegram Bot API.")
+                has_token = self._has_secret(config, "bot_token", "bot_token_env")
+                if transport in {"polling", "legacy_webhook"} and not has_token:
+                    errors.append("telegram: `transport: polling` or `legacy_webhook` requires `bot_token` or `bot_token_env`.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("telegram: `transport: relay` requires `relay_url`.")
+                elif not has_token and not relay_url:
+                    warnings.append("telegram: set `bot_token` or `bot_token_env` so the connector can authenticate with the Telegram Bot API.")
             elif name == "discord":
-                if not self._has_secret(config, "bot_token", "bot_token_env"):
-                    warnings.append("discord: set `bot_token` or `bot_token_env` for the relay bot.")
+                has_token = self._has_secret(config, "bot_token", "bot_token_env")
+                if transport == "gateway" and not has_token:
+                    errors.append("discord: `transport: gateway` requires `bot_token` or `bot_token_env`.")
+                elif transport == "legacy_interactions":
+                    if not has_token:
+                        errors.append("discord: `transport: legacy_interactions` requires `bot_token` or `bot_token_env`.")
+                    if public_callback_url or str(config.get("public_interactions_url") or "").strip():
+                        if not self._has_secret(config, "public_key", "public_key_env"):
+                            errors.append("discord: interaction callback mode requires `public_key` or `public_key_env`.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("discord: `transport: relay` requires `relay_url`.")
                 if not str(config.get("application_id") or "").strip():
-                    warnings.append("discord: `application_id` is recommended for slash commands and interaction setup.")
+                    warnings.append("discord: `application_id` is recommended for richer routing and future slash command support.")
             elif name == "slack":
-                if not self._has_secret(config, "bot_token", "bot_token_env"):
-                    warnings.append("slack: set `bot_token` or `bot_token_env` for the bot user token.")
-                if not self._has_secret(config, "signing_secret", "signing_secret_env"):
-                    warnings.append("slack: set `signing_secret` or `signing_secret_env` for request verification in the bridge.")
+                has_bot_token = self._has_secret(config, "bot_token", "bot_token_env")
+                has_app_token = self._has_secret(config, "app_token", "app_token_env")
+                has_signing_secret = self._has_secret(config, "signing_secret", "signing_secret_env")
+                if transport == "socket_mode":
+                    if not has_bot_token:
+                        errors.append("slack: `transport: socket_mode` requires `bot_token` or `bot_token_env`.")
+                    if not has_app_token:
+                        errors.append("slack: `transport: socket_mode` requires `app_token` or `app_token_env`.")
+                elif transport == "legacy_events_api":
+                    if not has_bot_token:
+                        errors.append("slack: `transport: legacy_events_api` requires `bot_token` or `bot_token_env`.")
+                    if public_callback_url and not has_signing_secret:
+                        errors.append("slack: callback-based setup requires `signing_secret` or `signing_secret_env`.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("slack: `transport: relay` requires `relay_url`.")
             elif name == "feishu":
-                if not str(config.get("app_id") or "").strip():
-                    warnings.append("feishu: set `app_id` to match the Lark/Feishu app configuration.")
-                if not self._has_secret(config, "app_secret", "app_secret_env"):
-                    warnings.append("feishu: set `app_secret` or `app_secret_env` for the relay or bridge.")
-                if str(config.get("public_callback_url") or "").strip() and not self._has_secret(
+                has_app_id = bool(str(config.get("app_id") or "").strip())
+                has_app_secret = self._has_secret(config, "app_secret", "app_secret_env")
+                if transport in {"long_connection", "legacy_webhook"}:
+                    if not has_app_id:
+                        errors.append("feishu: `transport: long_connection` requires `app_id`.")
+                    if not has_app_secret:
+                        errors.append("feishu: `transport: long_connection` requires `app_secret` or `app_secret_env`.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("feishu: `transport: relay` requires `relay_url`.")
+                if public_callback_url and not self._has_secret(
                     config,
                     "verification_token",
                     "verification_token_env",
@@ -595,9 +635,15 @@ Use **Test** when the file exposes runtime dependencies.
                     errors.append("feishu: webhook-style bridge configuration requires `verification_token` or `verification_token_env`.")
             elif name == "whatsapp":
                 provider = str(config.get("provider") or "relay").strip().lower()
-                if provider not in {"relay", "meta"}:
-                    errors.append(f"whatsapp: unsupported provider `{provider}`. Supported providers: meta, relay.")
-                if provider == "meta":
+                if transport == "local_session":
+                    if not str(config.get("session_dir") or "").strip():
+                        warnings.append("whatsapp: `transport: local_session` should set `session_dir` for local auth state.")
+                elif transport == "relay":
+                    if not relay_url:
+                        errors.append("whatsapp: `transport: relay` requires `relay_url`.")
+                elif transport == "legacy_meta_cloud":
+                    if provider not in {"relay", "meta"}:
+                        errors.append(f"whatsapp: unsupported provider `{provider}`. Supported providers: meta, relay.")
                     if not self._has_secret(config, "access_token", "access_token_env"):
                         errors.append("whatsapp: `provider: meta` requires `access_token` or `access_token_env`.")
                     if not str(config.get("phone_number_id") or "").strip():
@@ -642,33 +688,38 @@ Use **Test** when the file exposes runtime dependencies.
 
     def _test_single_connector(self, name: str, config: dict, *, live: bool, delivery_target: dict[str, object] | None = None) -> dict:
         relay_url = str(config.get("relay_url") or "").strip()
+        transport = infer_connector_transport(name, config)
         warnings: list[str] = []
         errors: list[str] = []
         details: dict[str, object] = {
             "mode": "gateway-direct" if name == "qq" else config.get("mode", "relay"),
+            "transport": transport,
         }
-        if name != "qq":
-            details["relay_url"] = relay_url or None
-        if relay_url and name != "qq":
+        if name != "qq" and relay_url:
+            details["relay_url"] = relay_url
+        if relay_url and name != "qq" and transport == "relay":
             warnings.append("Configured with relay_url. The live test checks local prerequisites, not the external bridge health.")
 
         try:
             if name == "telegram":
                 token = self._secret(config, "bot_token", "bot_token_env")
-                details["transport"] = "telegram-http" if token else "relay"
-                if live and token:
+                if transport in {"polling", "legacy_webhook"} and live and token:
                     payload = self._http_json(f"https://api.telegram.org/bot{token}/getMe")
                     if not payload.get("ok", False):
                         errors.append("Telegram getMe did not return ok=true.")
                     else:
                         details["identity"] = (payload.get("result") or {}).get("username")
-                elif not token and not relay_url:
-                    errors.append("Telegram requires `bot_token` for direct HTTP or `relay_url` for bridge delivery.")
+                elif transport in {"polling", "legacy_webhook"} and not token:
+                    errors.append("Telegram requires `bot_token` for polling or webhook-style direct access.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("Telegram requires `relay_url` when `transport: relay` is selected.")
             elif name == "slack":
                 token = self._secret(config, "bot_token", "bot_token_env")
+                app_token = self._secret(config, "app_token", "app_token_env")
                 signing_secret = self._secret(config, "signing_secret", "signing_secret_env")
-                details["transport"] = "slack-http" if token else "relay"
-                if not signing_secret:
+                if transport == "socket_mode" and not app_token:
+                    errors.append("Slack Socket Mode requires `app_token` or `app_token_env`.")
+                if transport == "legacy_events_api" and not signing_secret:
                     warnings.append("Slack signing_secret is empty; inbound verification will be skipped.")
                 if live and token:
                     payload = self._http_json("https://slack.com/api/auth.test", method="POST", headers={"Authorization": f"Bearer {token}"})
@@ -676,23 +727,25 @@ Use **Test** when the file exposes runtime dependencies.
                         errors.append(str(payload.get("error") or "Slack auth.test failed."))
                     else:
                         details["identity"] = payload.get("user")
-                elif not token and not relay_url:
-                    errors.append("Slack requires `bot_token` for direct HTTP or `relay_url` for bridge delivery.")
+                elif transport in {"socket_mode", "legacy_events_api"} and not token:
+                    errors.append("Slack requires `bot_token` for native runtime access.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("Slack requires `relay_url` when `transport: relay` is selected.")
             elif name == "discord":
                 token = self._secret(config, "bot_token", "bot_token_env")
-                details["transport"] = "discord-http" if token else "relay"
                 if live and token:
                     payload = self._http_json("https://discord.com/api/v10/users/@me", headers={"Authorization": f"Bot {token}"})
                     if "id" not in payload:
                         errors.append(str(payload.get("message") or "Discord identity check failed."))
                     else:
                         details["identity"] = payload.get("username")
-                elif not token and not relay_url:
-                    warnings.append("Discord chat ingress usually still needs a gateway bridge or sidecar.")
+                elif transport in {"gateway", "legacy_interactions"} and not token:
+                    errors.append("Discord requires `bot_token` for gateway or legacy interaction access.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("Discord requires `relay_url` when `transport: relay` is selected.")
             elif name == "feishu":
                 app_id = str(config.get("app_id") or "").strip()
                 app_secret = self._secret(config, "app_secret", "app_secret_env")
-                details["transport"] = "feishu-http" if app_id and app_secret else "relay"
                 if live and app_id and app_secret:
                     payload = self._http_json(
                         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -702,15 +755,23 @@ Use **Test** when the file exposes runtime dependencies.
                     )
                     if not payload.get("tenant_access_token"):
                         errors.append(str(payload.get("msg") or "Feishu tenant token exchange failed."))
-                elif not (app_id and app_secret) and not relay_url:
-                    errors.append("Feishu requires `app_id` + `app_secret` for direct HTTP or `relay_url` for bridge delivery.")
+                elif transport in {"long_connection", "legacy_webhook"} and not (app_id and app_secret):
+                    errors.append("Feishu requires `app_id` + `app_secret` for long-connection or legacy webhook access.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("Feishu requires `relay_url` when `transport: relay` is selected.")
             elif name == "whatsapp":
                 provider = str(config.get("provider") or "relay").strip().lower()
                 details["provider"] = provider
                 token = self._secret(config, "access_token", "access_token_env")
                 phone_number_id = str(config.get("phone_number_id") or "").strip()
-                details["transport"] = "whatsapp-http" if provider == "meta" and token and phone_number_id else "relay"
-                if live and provider == "meta" and token and phone_number_id:
+                if transport == "local_session":
+                    session_dir = str(config.get("session_dir") or "").strip()
+                    details["session_dir"] = session_dir or None
+                    if session_dir:
+                        details["session_dir_exists"] = Path(session_dir).expanduser().exists()
+                    if not session_dir:
+                        warnings.append("WhatsApp local-session mode still needs a local `session_dir` for auth state.")
+                elif live and provider == "meta" and token and phone_number_id:
                     api_base_url = str(config.get("api_base_url") or "https://graph.facebook.com").rstrip("/")
                     api_version = str(config.get("api_version") or "v21.0").strip()
                     payload = self._http_json(
@@ -721,12 +782,14 @@ Use **Test** when the file exposes runtime dependencies.
                         errors.append(str(payload["error"].get("message") or "WhatsApp phone number probe failed."))
                     else:
                         details["identity"] = payload.get("display_phone_number")
-                elif provider == "meta" and not relay_url and not (token and phone_number_id):
-                    errors.append("WhatsApp Meta requires `access_token` + `phone_number_id`, or use `relay_url`.")
+                elif transport == "legacy_meta_cloud" and not (token and phone_number_id):
+                    errors.append("WhatsApp Meta Cloud fallback requires `access_token` + `phone_number_id`.")
+                elif transport == "relay" and not relay_url:
+                    errors.append("WhatsApp requires `relay_url` when `transport: relay` is selected.")
             elif name == "qq":
                 app_id = str(config.get("app_id") or "").strip()
                 app_secret = self._secret(config, "app_secret", "app_secret_env")
-                details["transport"] = "qq-gateway-direct" if app_id and app_secret else None
+                details["transport"] = "gateway_direct"
                 if not app_id or not app_secret:
                     errors.append("QQ requires `app_id` + `app_secret` for the built-in gateway direct connector.")
                 elif live:
@@ -761,7 +824,7 @@ Use **Test** when the file exposes runtime dependencies.
             chat_type = str(delivery_target.get("chat_type") or "direct").strip().lower()
             chat_id = str(delivery_target.get("chat_id") or "").strip()
             default_chat_id = str(config.get("main_chat_id") or "").strip() if name == "qq" else ""
-            if not default_chat_id and name == "qq":
+            if not default_chat_id:
                 default_chat_id = self._connector_recent_chat_id(name, chat_type)
             if not chat_id and default_chat_id:
                 chat_id = default_chat_id
@@ -816,16 +879,14 @@ Use **Test** when the file exposes runtime dependencies.
         }
 
     def _connector_recent_chat_id(self, connector_name: str, chat_type: str) -> str:
-        if connector_name != "qq":
-            return ""
-        state = read_json(self.home / "logs" / "connectors" / "qq" / "state.json", {})
+        state = read_json(self.home / "logs" / "connectors" / connector_name / "state.json", {})
         if not isinstance(state, dict):
             return ""
         conversation_id = str(state.get("last_conversation_id") or "").strip()
         parts = conversation_id.split(":", 2)
         if len(parts) != 3:
             return ""
-        if parts[0] != "qq" or parts[1] != chat_type:
+        if parts[0] != connector_name or parts[1] != chat_type:
             return ""
         return parts[2]
 
@@ -865,6 +926,11 @@ Use **Test** when the file exposes runtime dependencies.
                 if connector_name == "qq":
                     for legacy_key in ("mode", "relay_url", "relay_auth_token", "public_callback_url", "webhook_verify_signature"):
                         sanitized_payload.pop(legacy_key, None)
+                    sanitized_payload["transport"] = "gateway_direct"
+                elif "transport" not in sanitized_payload:
+                    inferred_transport = infer_connector_transport(connector_name, {**base, **sanitized_payload})
+                    if inferred_transport:
+                        sanitized_payload["transport"] = inferred_transport
                 base.update(sanitized_payload)
                 normalized[connector_name] = base
             return normalized
