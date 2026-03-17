@@ -134,28 +134,6 @@ export interface CliLogManifestResponse {
   offset: number
 }
 
-export interface CliServerShareUser {
-  id: string
-  user_id: string
-  email: string
-  name: string
-  permission: 'view' | 'edit' | 'admin'
-  edit_granularity?: { allowTerminalInput?: boolean; allowFileEdit?: boolean } | null
-  expires_at?: string | null
-  shared_at: string
-  last_access_at?: string | null
-}
-
-export interface CliServerShareListResponse {
-  users: CliServerShareUser[]
-}
-
-export interface CliNotebookImportResponse {
-  notebook_id: string
-  read_only: boolean
-  success: boolean
-}
-
 export interface CliSessionSnapshot {
   id: string
   server_id: string

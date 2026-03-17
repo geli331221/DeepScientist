@@ -54,6 +54,7 @@ export function OrbitLogoStatus({
   resetKey,
   sizePx,
   size = 'sm',
+  animated = true,
 }: {
   compact?: boolean
   className?: string
@@ -62,6 +63,7 @@ export function OrbitLogoStatus({
   resetKey?: string
   sizePx?: number
   size?: 'sm' | 'lg'
+  animated?: boolean
 }) {
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme)
   const [label, setLabel] = useState('')
@@ -89,6 +91,7 @@ export function OrbitLogoStatus({
   const haloSpeed = compact ? '9s' : '7s'
   const haloThickness = compact ? 1 : 1.5
   const haloSpread = compact ? 4 : 6
+  const shouldAnimate = animated && !prefersReducedMotion
   const normalizedResetKey = useMemo(() => {
     if (typeof resetKey === 'string' || typeof resetKey === 'number') {
       return String(resetKey)
@@ -174,7 +177,7 @@ export function OrbitLogoStatus({
   }, [])
 
   const startAnimation = useCallback(() => {
-    if (rafRef.current || prefersReducedMotion) return
+    if (rafRef.current || !shouldAnimate) return
     lastTimeRef.current = performance.now()
     accumulatorRef.current = 0
     const tick = (now: number) => {
@@ -223,7 +226,7 @@ export function OrbitLogoStatus({
       if (loaded >= images.length && !cancelled) {
         readyRef.current = true
         drawFrame(frameRef.current)
-        if (!prefersReducedMotion) {
+        if (shouldAnimate) {
           startAnimation()
         }
       }
@@ -243,10 +246,10 @@ export function OrbitLogoStatus({
         img.onerror = null
       })
     }
-  }, [drawFrame, orbitFrames, prefersReducedMotion, startAnimation, stopAnimation])
+  }, [drawFrame, orbitFrames, shouldAnimate, startAnimation, stopAnimation])
 
   useEffect(() => {
-    if (prefersReducedMotion) {
+    if (!shouldAnimate) {
       stopAnimation()
       frameRef.current = 0
       drawFrame(0)
@@ -256,7 +259,7 @@ export function OrbitLogoStatus({
       startAnimation()
     }
     return stopAnimation
-  }, [drawFrame, prefersReducedMotion, startAnimation, stopAnimation])
+  }, [drawFrame, shouldAnimate, startAnimation, stopAnimation])
 
   useEffect(() => {
     frameRef.current = 0
@@ -289,7 +292,7 @@ export function OrbitLogoStatus({
         speed={haloSpeed}
         thickness={haloThickness}
         spread={haloSpread}
-        data-reduced-motion={prefersReducedMotion ? 'true' : 'false'}
+        data-reduced-motion={!shouldAnimate ? 'true' : 'false'}
       >
         <div
           className="ai-manus-orbit-logo"

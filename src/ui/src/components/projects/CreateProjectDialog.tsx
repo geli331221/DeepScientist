@@ -1,7 +1,10 @@
-import { BookmarkPlus, CircleHelp, Lock, RotateCcw, Sparkles } from 'lucide-react'
+import { ArrowUpRight, BookmarkPlus, Bot, CircleHelp, Lock, RotateCcw, Settings2, Sparkles } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import { OverlayDialog } from '@/components/home/OverlayDialog'
+import { connectorCatalog } from '@/components/settings/connectorCatalog'
+import { AnimatedCheckbox } from '@/components/ui/animated-checkbox'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,28 +12,31 @@ import { Textarea } from '@/components/ui/textarea'
 import { client } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import {
-  applyStartResearchContractPreset,
+  applyStartResearchIntensityPreset,
   compileStartResearchPrompt,
   defaultStartResearchTemplate,
-  detectStartResearchContractPreset,
-  deriveQuestRepoId,
-  listStartResearchContractPresets,
+  detectStartResearchIntensity,
   loadStartResearchHistory,
   loadStartResearchTemplate,
+  listStartResearchIntensityPresets,
+  resolveStartResearchContractFields,
   saveStartResearchDraft,
   saveStartResearchTemplate,
   slugifyQuestRepo,
-  type StartResearchContractPresetId,
+  type CustomProfile,
+  type DecisionPolicy,
+  type LaunchMode,
+  type ResearchIntensity,
   type StartResearchTemplate,
   type StartResearchTemplateEntry,
 } from '@/lib/startResearch'
 import { cn } from '@/lib/utils'
-import type { BaselineRegistryEntry } from '@/types'
+import type { BaselineRegistryEntry, ConnectorRecentConversation, ConnectorSnapshot, ConnectorTargetSnapshot } from '@/types'
 
 const copy = {
   en: {
     title: 'Start Research',
-    body: 'Configure kickoff context on the left, or edit the final PI prompt directly on the right.',
+    body: 'Fill the brief, review the kickoff prompt, then create the quest.',
     formTitle: 'Context Form',
     formHint: 'Each field adds concrete context for the first research round.',
     preview: 'Prompt preview',
@@ -40,28 +46,80 @@ const copy = {
     manualBody: 'Use “Restore form editing” to regenerate the prompt from the left form and unlock inputs.',
     restore: 'Restore form editing',
     template: 'Saved startup template',
+    newTemplate: 'New blank form',
     templateHint: 'Reuse a previous startup template when the same research shape appears again.',
     noTemplates: 'No saved templates yet',
     useTemplate: 'Use template',
+    latestDraft: 'latest draft',
     questTarget: 'Quest target',
     targetHint: 'This launch creates a new quest repository and seeds the first PI-facing request.',
     targetMode: 'Quest repository',
     targetModeValue: 'Create new quest',
     targetRunner: 'Runner',
     targetRunnerValue: 'Codex / local daemon',
+    connectorDeliveryLabel: 'Connector delivery',
+    connectorDeliveryHelp:
+      'Optional. Pick one enabled connector target to receive progress for this new quest immediately. Leave it empty to keep the default automatic binding behavior.',
+    connectorDeliveryHint: 'At most one connector can be selected. Click again to clear the selection.',
+    connectorSettingsAction: 'Open connector settings',
+    connectorEmptyTitle: 'No enabled connector yet',
+    connectorEmptyBody:
+      'If you want milestone updates outside the web workspace, configure at least one connector first. This is recommended before starting research.',
+    connectorUnavailableTitle: 'No selectable connector target yet',
+    connectorUnavailableBody:
+      'Enabled connectors exist, but no active target is available yet. Send one message to that connector first, or set a default target in Settings.',
+    connectorAutoModeLabel: 'No manual selection',
+    connectorAutoModeBody: 'Keep the current automatic binding behavior during quest creation.',
+    connectorSummaryLabel: 'Connector',
+    connectorSummaryAuto: 'Automatic',
+    connectorSelectedHint: 'This target will be rebound to the new quest on create.',
+    connectorSourceDefault: 'Default target',
+    connectorSourceRecent: 'Recent conversation',
+    connectorSourceLast: 'Latest conversation',
+    connectorSourceDiscovered: 'Discovered target',
+    connectorSourceUnavailable: 'Waiting for first message',
     basics: 'Core research brief',
     references: 'Baseline & references',
     policy: 'Research contract',
-    contractProfiles: 'Launch profiles',
-    contractProfilesHint: 'Apply one built-in research contract, then fine-tune the fields below if needed.',
-    contractProfilesCustomHint: 'Current selections no longer match a built-in launch profile.',
+    launchModeLabel: 'Launch mode',
+    launchModeHelp:
+      'Standard starts from the ordinary research loop. Custom is for continuing existing state, rebuttal / revision, or a user-defined brief.',
+    customProfileLabel: 'Custom profile',
+    customProfileHelp:
+      'Only shown in custom mode. Use it to tell the agent whether this quest should first audit existing state, handle rebuttal work, or follow a freeform brief.',
+    entryStateSummaryLabel: 'Existing state summary',
+    entryStateSummaryHelp:
+      'Briefly describe what already exists, such as a trusted baseline, finished main runs, analysis results, or a paper draft.',
+    entryStateSummaryPlaceholder:
+      'Example: baseline is already trusted; one main experiment has finished; draft introduction and method sections already exist.',
+    reviewSummaryLabel: 'Review / revision summary',
+    reviewSummaryHelp:
+      'Use this when the quest is driven by reviewer comments, a revision request, or a meta-review.',
+    reviewSummaryPlaceholder:
+      'Example: reviewers asked for stronger ablations, one extra baseline, and a clearer limitation discussion.',
+    customBriefLabel: 'Custom brief',
+    customBriefHelp:
+      'Any extra task-specific instruction that should override the standard full-research launch behavior.',
+    customBriefPlaceholder:
+      'Example: do not rerun the baseline; first normalize existing results, then decide whether supplementary analysis is still needed.',
+    researchIntensityLabel: 'Research intensity',
+    researchIntensityHelp:
+      'Choose how much the first autonomous research round should attempt before reporting back.',
+    decisionPolicyLabel: 'Decision mode',
+    decisionPolicyHelp:
+      'Autonomous means the agent should keep deciding and continue. User-gated means it may pause for a structured decision when continuation truly depends on you.',
+    derivedPolicyTitle: 'Derived execution policy',
+    derivedPolicyHint: 'These fields are inferred automatically from the selected intensity and baseline choice.',
+    derivedPolicyBudgetLabel: 'Round budget',
     objectives: 'Goals',
     titleLabel: 'Quest title',
     titlePlaceholder: 'A short human-readable research title',
     titleHelp: 'This is the display title shown in the workspace and quest cards.',
-    repoLabel: 'Quest repository id',
-    repoPlaceholder: 'auto-generated-from-title',
-    repoHelp: 'This becomes the quest folder name under `~/DeepScientist/quests/`. You can customize it.',
+    repoLabel: 'Quest ID',
+    repoPlaceholder: 'Default: next sequential id such as 001, 002, 003',
+    repoHelp: 'By default runtime allocates the next sequential quest id. You can override it manually when needed.',
+    repoLoading: 'Loading next quest id…',
+    repoAutoAssigned: 'Assigned by runtime on create',
     goalLabel: 'Primary research request',
     goalPlaceholder: 'State the core scientific question, target paper, hypothesis, and what success would look like.',
     goalHelp: 'This should describe the actual problem to solve, not implementation details.',
@@ -83,16 +141,14 @@ const copy = {
     objectivesLabel: 'Goals',
     objectivesPlaceholder: 'Describe what this quest should achieve in the first meaningful research cycle.',
     objectivesHelp: 'Use short bullet-like lines such as establish baseline, choose direction, or produce an analysis-ready result.',
-    scopeLabel: 'Scope',
-    scopeHelp: 'Choose how far the first research round is allowed to go.',
-    baselineModeLabel: 'Baseline policy',
-    baselineModeHelp: 'Choose what to do when the baseline is missing, partial, or difficult to restore.',
-    resourcePolicyLabel: 'Resource policy',
-    resourcePolicyHelp: 'This controls how cautious or aggressive the first round should be with compute and time.',
-    timeBudgetLabel: 'Time budget per round (hours)',
-    timeBudgetHelp: 'This is the expected time budget for one research round, not the whole life of the quest.',
-    gitStrategyLabel: 'Git strategy',
-    gitStrategyHelp: 'This tells the agent how boldly to branch and how carefully to integrate results.',
+    researchPaperLabel: 'Research paper',
+    researchPaperHelp:
+      'Default on. Keep this enabled when the quest must continue into analysis, outline, drafting, and paper bundle work. Turn it off when the quest should pursue the strongest justified algorithmic result only.',
+    researchPaperEnabled: 'Paper required',
+    researchPaperEnabledBody: 'Keep paper-oriented analysis and writing in scope. A strong run alone is not the endpoint.',
+    researchPaperDisabled: 'Algorithm-first mode',
+    researchPaperDisabledBody: 'Skip default paper drafting and keep iterating toward the strongest justified method.',
+    deliveryModeLabel: 'Delivery mode',
     languageLabel: 'User language',
     languageHelp: 'The kickoff prompt and later communication should prefer this language by default.',
     promptRequired: 'Prompt preview cannot be empty.',
@@ -100,6 +156,35 @@ const copy = {
     footer: 'Create quest immediately after review.',
     create: 'Create quest',
     cancel: 'Cancel',
+    intensityOptions: {
+      light: {
+        title: 'Light baseline pass',
+        meta: 'Baseline only · Conservative · 8h',
+        body: 'Keep the first round tight. Build or verify a trustworthy baseline and stop instead of overcommitting.',
+      },
+      balanced: {
+        title: 'Balanced direction probe',
+        meta: 'Baseline + direction · Balanced · 24h',
+        body: 'Secure the baseline, then test one justified direction while still controlling cost and uncertainty.',
+      },
+      sprint: {
+        title: 'Research sprint',
+        meta: 'Full research · Aggressive · 48h',
+        body: 'Use a larger first round to move through baseline, implementation, and analysis-ready evidence faster.',
+      },
+    },
+    decisionPolicyOptions: {
+      autonomous: {
+        title: 'Autonomous',
+        meta: 'Default',
+        body: 'Do not hand ordinary route choices back to the user. Keep going, and report with threaded milestone/progress updates.',
+      },
+      user_gated: {
+        title: 'User-gated',
+        meta: 'Blocking decisions allowed',
+        body: 'If continuation truly depends on preference or approval, the agent may raise a structured decision request and wait.',
+      },
+    },
     scopeOptions: {
       baseline_only: 'Baseline only — stop after a strong reusable baseline is established.',
       baseline_plus_direction: 'Baseline + direction — secure baseline and test one justified direction.',
@@ -121,27 +206,19 @@ const copy = {
       semantic_head_plus_controlled_integration: 'Semantic head + controlled integration — keep a cleaner main line and merge more selectively.',
       manual_integration_only: 'Manual integration only — avoid automatic integration and require explicit merge decisions.',
     },
-    contractPresetOptions: {
-      safe_baseline: {
-        title: 'Safe baseline audit',
-        meta: 'Baseline only · Conservative · 8h',
-        body: 'Protect the first round. If the baseline is weak or missing, stop and report instead of forcing the route.',
-      },
-      direction_probe: {
-        title: 'Balanced direction probe',
-        meta: 'Baseline + direction · Balanced · 24h',
-        body: 'Build a trustworthy baseline, then test one justified direction without overcommitting resources.',
-      },
-      full_sprint: {
-        title: 'Full research sprint',
-        meta: 'Full research · Aggressive · 48h',
-        body: 'Use a larger first round to reach baseline, implementation, and analysis-ready evidence faster.',
-      },
+    launchModeOptions: {
+      standard: 'Standard — start from the ordinary research graph.',
+      custom: 'Custom — continue existing state, rebuttal/revision, or a user-defined brief.',
+    },
+    customProfileOptions: {
+      continue_existing_state: 'Continue existing state — first audit baselines, results, drafts, and current quest assets.',
+      revision_rebuttal: 'Revision / rebuttal — first interpret reviews, then route extra experiments and writing updates.',
+      freeform: 'Freeform — follow the custom brief and use only the skills actually needed.',
     },
   },
   zh: {
     title: 'Start Research',
-    body: '左侧配置研究启动上下文，右侧是最终发给 PI 的完整 kickoff prompt。',
+    body: '填写研究简述，检查 kickoff prompt，然后创建 quest。',
     formTitle: '上下文表单',
     formHint: '每一项都在为第一轮研究提供清晰、可执行的上下文。',
     preview: 'Prompt 预览',
@@ -151,28 +228,79 @@ const copy = {
     manualBody: '点击“恢复表单驱动”后，会重新根据左侧表单生成 prompt，并解除锁定。',
     restore: '恢复表单驱动',
     template: '已保存的启动模板',
+    newTemplate: '新建空白表单',
     templateHint: '当研究形态相近时，可以快速复用过去的启动模板。',
     noTemplates: '还没有已保存模板',
     useTemplate: '使用模板',
+    latestDraft: '最近草稿',
     questTarget: 'Quest 目标',
     targetHint: '当前启动会创建一个新的 quest 仓库，并写入第一条面向 PI 的启动请求。',
     targetMode: 'Quest 仓库',
     targetModeValue: '创建新 quest',
     targetRunner: 'Runner',
     targetRunnerValue: 'Codex / 本地 daemon',
+    connectorDeliveryLabel: '连接器投递',
+    connectorDeliveryHelp:
+      '可选。手动选择一个已启用 connector 的目标会话，让新 quest 创建后立即把进展发到这里；留空则保持默认自动绑定行为。',
+    connectorDeliveryHint: '最多选择 1 个；再次点击已选中的卡片即可取消。',
+    connectorSettingsAction: '打开 Connector 设置',
+    connectorEmptyTitle: '还没有启用的 connector',
+    connectorEmptyBody:
+      '如果你希望在网页之外接收里程碑更新，建议先配置至少一个 connector，再启动研究。',
+    connectorUnavailableTitle: '还没有可选的 connector 目标',
+    connectorUnavailableBody:
+      '已有启用的 connector，但当前还没有可用目标。请先给对应 connector 发一条消息，或在 Settings 中设置默认目标。',
+    connectorAutoModeLabel: '不手动指定',
+    connectorAutoModeBody: '创建 quest 时保持当前默认的自动绑定行为。',
+    connectorSummaryLabel: '连接器',
+    connectorSummaryAuto: '自动',
+    connectorSelectedHint: '创建后会把这个目标会话重新绑定到新 quest。',
+    connectorSourceDefault: '默认目标',
+    connectorSourceRecent: '最近会话',
+    connectorSourceLast: '最新会话',
+    connectorSourceDiscovered: '已发现目标',
+    connectorSourceUnavailable: '等待第一条消息',
     basics: '核心研究简述',
     references: 'Baseline 与参考',
     policy: '研究合同',
-    contractProfiles: '启动配置',
-    contractProfilesHint: '先套用一个内置研究合同，再按需微调下面的字段。',
-    contractProfilesCustomHint: '当前选择已经偏离内置启动配置，属于自定义合同。',
+    launchModeLabel: '启动模式',
+    launchModeHelp:
+      'Standard 表示按普通科研主线启动；Custom 用于继续已有状态、处理 rebuttal / revision，或执行自定义研究任务。',
+    customProfileLabel: '自定义档位',
+    customProfileHelp:
+      '仅在 Custom 模式下显示。用来告诉 agent 这是继续已有状态、处理审稿回复，还是一个自由定制任务。',
+    entryStateSummaryLabel: '已有状态摘要',
+    entryStateSummaryHelp:
+      '简要写清当前已经有什么，例如可信 baseline、主实验结果、分析结果、论文草稿等。',
+    entryStateSummaryPlaceholder:
+      '例如：baseline 已可信；一个主实验已完成；引言和方法草稿已存在。',
+    reviewSummaryLabel: '审稿 / 修改摘要',
+    reviewSummaryHelp:
+      '当 quest 由 reviewer comments、revision request 或 meta-review 驱动时，在这里概括主要要求。',
+    reviewSummaryPlaceholder:
+      '例如：reviewer 要求补更强的 ablation、增加一个 baseline、并澄清 limitation。',
+    customBriefLabel: '自定义说明',
+    customBriefHelp:
+      '任何需要覆盖标准 full research 启动方式的额外任务说明，都可以写在这里。',
+    customBriefPlaceholder:
+      '例如：不要重新跑 baseline；先整理现有结果，再决定是否需要额外分析实验。',
+    researchIntensityLabel: '研究投入强度',
+    researchIntensityHelp: '只需决定第一轮自治研究准备投入到什么程度，其余执行策略会自动推导。',
+    decisionPolicyLabel: '决策模式',
+    decisionPolicyHelp:
+      'Autonomous 表示 agent 默认自行判断并继续推进；User-gated 表示只有确实依赖你的偏好或批准时，才允许暂停并发起结构化决策请求。',
+    derivedPolicyTitle: '自动推导的执行策略',
+    derivedPolicyHint: '这些字段会根据研究强度和是否选中已有 baseline 自动生成，无需手动逐项配置。',
+    derivedPolicyBudgetLabel: '每轮预算',
     objectives: '目标',
     titleLabel: '课题标题',
     titlePlaceholder: '一个简洁易读的研究标题',
     titleHelp: '这是工作区和 quest 卡片中展示给用户看的标题。',
-    repoLabel: 'Quest 仓库 id',
-    repoPlaceholder: '默认会根据标题自动生成',
-    repoHelp: '这会成为 `~/DeepScientist/quests/` 下的 quest 文件夹名，你可以手动定制。',
+    repoLabel: 'Quest ID',
+    repoPlaceholder: '默认使用下一个顺序编号，例如 001、002、003',
+    repoHelp: '默认由 runtime 分配下一个顺序 quest id；如有需要你也可以手动覆盖。',
+    repoLoading: '正在加载下一个 quest id…',
+    repoAutoAssigned: '创建时由 runtime 分配',
     goalLabel: '核心研究请求',
     goalPlaceholder: '清楚说明科学问题、目标论文、核心假设，以及什么结果算成功。',
     goalHelp: '这里应该描述真正要解决的问题，而不是过早写实现细节。',
@@ -193,16 +321,14 @@ const copy = {
     objectivesLabel: '目标',
     objectivesPlaceholder: '描述这一轮研究需要达成什么，例如建立 baseline、筛选方向、得到可分析结果等。',
     objectivesHelp: '建议按短句逐行写明，例如“建立可信 baseline”“判断是否值得实现某方向”。',
-    scopeLabel: '研究范围',
-    scopeHelp: '决定第一轮研究最多允许推进到什么程度。',
-    baselineModeLabel: 'Baseline 策略',
-    baselineModeHelp: '决定 baseline 缺失、不完整或很难恢复时应该如何处理。',
-    resourcePolicyLabel: '资源策略',
-    resourcePolicyHelp: '决定第一轮研究在算力、时间与风险上是保守还是激进。',
-    timeBudgetLabel: '每一轮研究的时间预算（小时）',
-    timeBudgetHelp: '这里指的是一次研究 round 的预期耗时，不是整个 quest 生命周期的总耗时。',
-    gitStrategyLabel: 'Git 策略',
-    gitStrategyHelp: '告诉 agent 应该多积极地分支，以及多谨慎地做结果集成。',
+    researchPaperLabel: '研究论文',
+    researchPaperHelp:
+      '默认开启。若本次 quest 必须继续推进到分析、写作大纲、草稿与 paper bundle，请保持开启；若只追求最强且有依据的算法结果，可关闭。',
+    researchPaperEnabled: '需要研究论文',
+    researchPaperEnabledBody: '保持论文导向的分析与写作流程。单次较强实验结果本身不构成终点。',
+    researchPaperDisabled: '仅追求最佳算法',
+    researchPaperDisabledBody: '默认不进入论文写作，重点持续迭代并追求更强、证据更扎实的方法结果。',
+    deliveryModeLabel: '交付模式',
     languageLabel: '用户语言',
     languageHelp: '默认希望 kickoff prompt 与后续交流优先使用的语言。',
     promptRequired: 'Prompt 预览不能为空。',
@@ -210,6 +336,35 @@ const copy = {
     footer: '确认后会立即创建 quest。',
     create: '创建 quest',
     cancel: '取消',
+    intensityOptions: {
+      light: {
+        title: '轻量基线轮',
+        meta: '仅 baseline · 保守 · 8 小时',
+        body: '把第一轮收紧，优先建立或验证可信 baseline；证据不足时直接停止并汇报。',
+      },
+      balanced: {
+        title: '平衡方向试探',
+        meta: 'baseline + 方向 · 平衡 · 24 小时',
+        body: '先建立可信 baseline，再在受控预算内验证一个有依据的改进方向。',
+      },
+      sprint: {
+        title: '研究冲刺轮',
+        meta: '完整研究 · 激进 · 48 小时',
+        body: '给第一轮更大的预算，尽快推进到 baseline、实现与分析准备就绪。',
+      },
+    },
+    decisionPolicyOptions: {
+      autonomous: {
+        title: 'Autonomous',
+        meta: '默认',
+        body: '普通路线选择不再交给用户，agent 需要自己判断并继续，只通过进度或里程碑持续汇报。',
+      },
+      user_gated: {
+        title: 'User-gated',
+        meta: '允许阻塞决策',
+        body: '只有在继续推进确实依赖用户偏好或批准时，agent 才可以发起结构化决策请求并等待。',
+      },
+    },
     scopeOptions: {
       baseline_only: '仅 baseline —— 建立一个可信且可复用的 baseline 后即停止本轮。',
       baseline_plus_direction: 'baseline + 方向 —— 先建立 baseline，再验证一个有依据的改进方向。',
@@ -231,22 +386,14 @@ const copy = {
       semantic_head_plus_controlled_integration: '语义主线 + 受控集成 —— 保持更干净的主线，只合并经过控制的结果。',
       manual_integration_only: '仅手动集成 —— 避免自动集成，所有合并都需要显式决策。',
     },
-    contractPresetOptions: {
-      safe_baseline: {
-        title: '安全基线审计',
-        meta: '仅 baseline · 保守 · 8 小时',
-        body: '把第一轮收紧。如果 baseline 证据不足，就停止并汇报，而不是强行推进。',
-      },
-      direction_probe: {
-        title: '平衡方向试探',
-        meta: 'baseline + 方向 · 平衡 · 24 小时',
-        body: '先建立可信 baseline，再在受控预算内验证一个有依据的改进方向。',
-      },
-      full_sprint: {
-        title: '完整研究冲刺',
-        meta: '完整研究 · 激进 · 48 小时',
-        body: '用更大的首轮预算，尽快推进到 baseline、实现与分析准备就绪。',
-      },
+    launchModeOptions: {
+      standard: 'Standard —— 按普通科研图谱启动。',
+      custom: 'Custom —— 继续已有状态、处理 rebuttal/revision，或执行用户自定义任务。',
+    },
+    customProfileOptions: {
+      continue_existing_state: '继续已有状态 —— 先审计 baseline、结果、草稿和现有 quest 资产。',
+      revision_rebuttal: '审稿修改 / rebuttal —— 先解析 review，再决定补实验和改文。',
+      freeform: '自由模式 —— 以自定义 brief 为主，只打开真正需要的 skills。',
     },
   },
 } as const
@@ -256,6 +403,117 @@ const selectClassName =
 
 const panelClass =
   'rounded-xl border border-[rgba(45,42,38,0.09)] bg-[rgba(255,255,255,0.76)] shadow-[0_12px_30px_-24px_rgba(45,42,38,0.32)] backdrop-blur-xl dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(255,255,255,0.82)]'
+
+const connectorCatalogByName = new Map(connectorCatalog.map((entry) => [entry.name, entry]))
+
+type StartConnectorChoice = {
+  name: string
+  label: string
+  subtitle: string
+  transport: string
+  connectionState: string
+  conversationId: string | null
+  targetLabel: string
+  sourceKind: 'default' | 'recent' | 'last' | 'discovered' | 'unavailable'
+}
+
+function titleCaseConnector(name: string) {
+  const normalized = String(name || '').trim()
+  if (!normalized) return 'Connector'
+  if (normalized.toLowerCase() === 'qq') return 'QQ'
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function parseConversationLabel(value?: string | null) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const parts = raw.split(':', 3)
+  if (parts.length !== 3) return raw
+  const [, chatType, chatId] = parts
+  if (!chatType || !chatId) return raw
+  return `${chatType} · ${chatId}`
+}
+
+function targetSnapshotLabel(target?: ConnectorTargetSnapshot | null) {
+  if (!target) return ''
+  return String(target.label || '').trim() || `${target.chat_type} · ${target.chat_id}`
+}
+
+function recentConversationLabel(item?: ConnectorRecentConversation | null) {
+  if (!item) return ''
+  return String(item.label || '').trim() || `${item.chat_type} · ${item.chat_id}`
+}
+
+function resolveStartConnectorChoice(snapshot: ConnectorSnapshot): StartConnectorChoice {
+  const catalogEntry = connectorCatalogByName.get(snapshot.name as (typeof connectorCatalog)[number]['name'])
+  const recentConversation = Array.isArray(snapshot.recent_conversations) ? snapshot.recent_conversations[0] : null
+  const discoveredTarget = Array.isArray(snapshot.discovered_targets) ? snapshot.discovered_targets[0] : null
+  const defaultTarget = snapshot.default_target || null
+  const lastConversationId = String(snapshot.last_conversation_id || '').trim() || null
+
+  if (defaultTarget?.conversation_id) {
+    return {
+      name: snapshot.name,
+      label: catalogEntry?.label || titleCaseConnector(snapshot.name),
+      subtitle: catalogEntry?.subtitle || '',
+      transport: String(snapshot.transport || snapshot.display_mode || snapshot.mode || '').trim(),
+      connectionState: String(snapshot.connection_state || '').trim(),
+      conversationId: defaultTarget.conversation_id,
+      targetLabel: targetSnapshotLabel(defaultTarget),
+      sourceKind: 'default',
+    }
+  }
+
+  if (recentConversation?.conversation_id) {
+    return {
+      name: snapshot.name,
+      label: catalogEntry?.label || titleCaseConnector(snapshot.name),
+      subtitle: catalogEntry?.subtitle || '',
+      transport: String(snapshot.transport || snapshot.display_mode || snapshot.mode || '').trim(),
+      connectionState: String(snapshot.connection_state || '').trim(),
+      conversationId: recentConversation.conversation_id,
+      targetLabel: recentConversationLabel(recentConversation),
+      sourceKind: 'recent',
+    }
+  }
+
+  if (lastConversationId) {
+    return {
+      name: snapshot.name,
+      label: catalogEntry?.label || titleCaseConnector(snapshot.name),
+      subtitle: catalogEntry?.subtitle || '',
+      transport: String(snapshot.transport || snapshot.display_mode || snapshot.mode || '').trim(),
+      connectionState: String(snapshot.connection_state || '').trim(),
+      conversationId: lastConversationId,
+      targetLabel: parseConversationLabel(lastConversationId),
+      sourceKind: 'last',
+    }
+  }
+
+  if (discoveredTarget?.conversation_id) {
+    return {
+      name: snapshot.name,
+      label: catalogEntry?.label || titleCaseConnector(snapshot.name),
+      subtitle: catalogEntry?.subtitle || '',
+      transport: String(snapshot.transport || snapshot.display_mode || snapshot.mode || '').trim(),
+      connectionState: String(snapshot.connection_state || '').trim(),
+      conversationId: discoveredTarget.conversation_id,
+      targetLabel: targetSnapshotLabel(discoveredTarget),
+      sourceKind: 'discovered',
+    }
+  }
+
+  return {
+    name: snapshot.name,
+    label: catalogEntry?.label || titleCaseConnector(snapshot.name),
+    subtitle: catalogEntry?.subtitle || '',
+    transport: String(snapshot.transport || snapshot.display_mode || snapshot.mode || '').trim(),
+    connectionState: String(snapshot.connection_state || '').trim(),
+    conversationId: null,
+    targetLabel: '',
+    sourceKind: 'unavailable',
+  }
+}
 
 function FieldHelp({
   text,
@@ -386,6 +644,174 @@ function ChoiceField<T extends string>({
   )
 }
 
+function ConnectorChoiceField({
+  label,
+  help,
+  hint,
+  items,
+  value,
+  loading = false,
+  error,
+  emptyTitle,
+  emptyBody,
+  unavailableTitle,
+  unavailableBody,
+  settingsActionLabel,
+  autoModeLabel,
+  autoModeBody,
+  selectedHint,
+  sourceLabels,
+  onOpenSettings,
+  onChange,
+}: {
+  label: string
+  help?: string
+  hint?: string
+  items: StartConnectorChoice[]
+  value: string | null
+  loading?: boolean
+  error?: string | null
+  emptyTitle: string
+  emptyBody: string
+  unavailableTitle: string
+  unavailableBody: string
+  settingsActionLabel: string
+  autoModeLabel: string
+  autoModeBody: string
+  selectedHint: string
+  sourceLabels: Record<StartConnectorChoice['sourceKind'], string>
+  onOpenSettings: () => void
+  onChange: (next: string | null) => void
+}) {
+  const enabledItems = items
+  const selectableItems = enabledItems.filter((item) => Boolean(item.conversationId))
+  const hasUnavailable = enabledItems.some((item) => !item.conversationId)
+
+  return (
+    <InlineField label={label} help={help} hint={hint}>
+      {loading ? (
+        <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/60 px-3 py-3 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:border-[rgba(45,42,38,0.08)] dark:bg-white/70 dark:text-[rgba(86,82,77,0.82)]">
+          Loading connectors…
+        </div>
+      ) : enabledItems.length === 0 ? (
+        <div className="rounded-[16px] border border-dashed border-[rgba(45,42,38,0.12)] bg-white/52 px-4 py-4 dark:border-[rgba(45,42,38,0.12)] dark:bg-white/64">
+          <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+            {emptyTitle}
+          </div>
+          <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
+            {emptyBody}
+          </div>
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-[rgba(45,42,38,0.1)] bg-white/82 px-3 py-1.5 text-[11px] font-medium text-[rgba(38,36,33,0.95)] transition hover:bg-white dark:border-[rgba(45,42,38,0.1)] dark:bg-white/88"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            {settingsActionLabel}
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {enabledItems.map((item) => {
+              const active = Boolean(item.conversationId) && item.conversationId === value
+              const available = Boolean(item.conversationId)
+              const catalogEntry = connectorCatalogByName.get(item.name as (typeof connectorCatalog)[number]['name'])
+              const Icon = catalogEntry?.icon || Bot
+
+              return (
+                <button
+                  key={item.name}
+                  type="button"
+                  disabled={!available}
+                  onClick={() => onChange(active ? null : item.conversationId)}
+                  className={cn(
+                    'relative min-h-[132px] rounded-[18px] border px-4 py-4 text-left transition',
+                    'disabled:cursor-not-allowed disabled:opacity-60',
+                    active
+                      ? 'border-[rgba(126,77,42,0.34)] bg-[rgba(126,77,42,0.08)] shadow-[0_14px_26px_-22px_rgba(90,56,35,0.55)]'
+                      : 'border-[rgba(45,42,38,0.08)] bg-white/62 hover:border-[rgba(45,42,38,0.14)] hover:bg-white/84 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/72 dark:hover:border-[rgba(45,42,38,0.14)] dark:hover:bg-white/88'
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'absolute right-3 top-3 flex h-6 w-6 items-center justify-center rounded-full border transition',
+                      active
+                        ? 'border-[rgba(126,77,42,0.78)] bg-[rgba(126,77,42,0.12)] text-[rgba(126,77,42,0.92)]'
+                        : 'border-[rgba(107,103,97,0.34)] bg-white/72 text-transparent dark:bg-white/82'
+                    )}
+                    aria-hidden
+                  >
+                    {active ? <ArrowUpRight className="h-3.5 w-3.5" /> : null}
+                  </span>
+
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/82 text-[rgba(56,52,47,0.9)] dark:border-[rgba(45,42,38,0.08)] dark:bg-white/88">
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                        {item.label}
+                      </div>
+                      <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
+                        {item.transport || item.connectionState || 'connector'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-[11px] font-medium text-[rgba(56,52,47,0.9)] dark:text-[rgba(56,52,47,0.9)]">
+                      {available ? item.targetLabel : sourceLabels.unavailable}
+                    </div>
+                    <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
+                      {sourceLabels[item.sourceKind]}
+                    </div>
+                    {active ? (
+                      <div className="mt-3 text-[11px] leading-5 text-[rgba(86,82,77,0.9)] dark:text-[rgba(86,82,77,0.9)]">
+                        {selectedHint}
+                      </div>
+                    ) : null}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/60 px-3 py-3 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/70">
+            <div className="text-[11px] font-medium text-[rgba(56,52,47,0.9)] dark:text-[rgba(56,52,47,0.9)]">
+              {value ? enabledItems.find((item) => item.conversationId === value)?.label || autoModeLabel : autoModeLabel}
+            </div>
+            <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
+              {value ? selectedHint : autoModeBody}
+            </div>
+          </div>
+
+          {hasUnavailable && selectableItems.length === 0 ? (
+            <div className="rounded-[14px] border border-dashed border-[rgba(45,42,38,0.12)] bg-white/52 px-4 py-4 dark:border-[rgba(45,42,38,0.12)] dark:bg-white/64">
+              <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {unavailableTitle}
+              </div>
+              <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
+                {unavailableBody}
+              </div>
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-[rgba(45,42,38,0.1)] bg-white/82 px-3 py-1.5 text-[11px] font-medium text-[rgba(38,36,33,0.95)] transition hover:bg-white dark:border-[rgba(45,42,38,0.1)] dark:bg-white/88"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                {settingsActionLabel}
+              </button>
+            </div>
+          ) : null}
+
+          {error ? <div className="text-[11px] leading-5 text-[#9a1b1b]">{error}</div> : null}
+        </div>
+      )}
+    </InlineField>
+  )
+}
+
 function SectionCard({
   title,
   children,
@@ -398,10 +824,10 @@ function SectionCard({
   return (
     <div
       className={cn(
-        'rounded-xl border p-3',
+        'rounded-[18px] border p-3 sm:rounded-xl',
         muted
-          ? 'border-[rgba(45,42,38,0.08)] bg-[rgba(244,239,233,0.62)] dark:border-[rgba(45,42,38,0.08)] dark:bg-[rgba(244,239,233,0.72)]'
-          : panelClass
+          ? 'border-[rgba(45,42,38,0.08)] bg-[rgba(244,239,233,0.56)] dark:border-[rgba(45,42,38,0.08)] dark:bg-[rgba(244,239,233,0.66)] sm:bg-[rgba(244,239,233,0.62)] sm:dark:bg-[rgba(244,239,233,0.72)]'
+          : 'border-[rgba(45,42,38,0.08)] bg-white/72 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/82 sm:shadow-[0_12px_30px_-24px_rgba(45,42,38,0.32)] sm:backdrop-blur-xl'
       )}
     >
       <div className="text-sm font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{title}</div>
@@ -496,88 +922,81 @@ export function CreateProjectDialog({
     title: string
     goal: string
     quest_id?: string
+    preferred_connector_conversation_id?: string
     requested_baseline_ref?: { baseline_id: string; variant_id?: string | null } | null
     startup_contract?: Record<string, unknown> | null
   }) => Promise<void>
 }) {
+  const navigate = useNavigate()
   const { locale } = useI18n()
   const t = copy[locale]
   const [form, setForm] = useState<StartResearchTemplate>(defaultStartResearchTemplate(locale))
   const [promptDraft, setPromptDraft] = useState('')
   const [manualOverride, setManualOverride] = useState(false)
+  const [questIdManualOverride, setQuestIdManualOverride] = useState(false)
+  const [suggestedQuestId, setSuggestedQuestId] = useState('')
+  const [suggestedQuestIdLoading, setSuggestedQuestIdLoading] = useState(false)
   const [templates, setTemplates] = useState<StartResearchTemplateEntry[]>([])
   const [selectedTemplateId, setSelectedTemplateId] = useState('__latest__')
   const [baselineEntries, setBaselineEntries] = useState<BaselineRegistryEntry[]>([])
   const [baselineEntriesLoading, setBaselineEntriesLoading] = useState(false)
   const [baselineEntriesError, setBaselineEntriesError] = useState<string | null>(null)
+  const [connectors, setConnectors] = useState<ConnectorSnapshot[]>([])
+  const [connectorsLoading, setConnectorsLoading] = useState(false)
+  const [connectorsError, setConnectorsError] = useState<string | null>(null)
+  const [selectedConnectorConversationId, setSelectedConnectorConversationId] = useState<string | null>(null)
 
-  const activeContractPresetId = useMemo(
-    () => detectStartResearchContractPreset(form),
-    [form.baseline_mode, form.git_strategy, form.resource_policy, form.scope, form.time_budget_hours]
+  const activeResearchIntensity = useMemo(
+    () => detectStartResearchIntensity(form),
+    [form.baseline_id, form.research_intensity]
   )
 
-  const contractPresetItems = useMemo(
+  const intensityItems = useMemo(
     () =>
-      listStartResearchContractPresets().map((preset) => ({
+      listStartResearchIntensityPresets().map((preset) => ({
         value: preset.id,
-        title: t.contractPresetOptions[preset.id].title,
-        meta: t.contractPresetOptions[preset.id].meta,
-        description: t.contractPresetOptions[preset.id].body,
+        title: t.intensityOptions[preset.id].title,
+        meta: t.intensityOptions[preset.id].meta,
+        description: t.intensityOptions[preset.id].body,
       })),
     [t]
   )
 
-  const scopeItems = useMemo(
+  const decisionPolicyItems = useMemo(
     () =>
-      ([
-        ['baseline_only', t.scopeOptions.baseline_only],
-        ['baseline_plus_direction', t.scopeOptions.baseline_plus_direction],
-        ['full_research', t.scopeOptions.full_research],
-      ] as const).map(([value, text]) => ({
+      (['autonomous', 'user_gated'] as const).map((value) => ({
         value,
-        ...splitOptionCopy(text),
+        title: t.decisionPolicyOptions[value].title,
+        meta: t.decisionPolicyOptions[value].meta,
+        description: t.decisionPolicyOptions[value].body,
       })),
     [t]
   )
 
-  const baselineModeItems = useMemo(
-    () =>
-      ([
-        ['existing', t.baselineModeOptions.existing],
-        ['restore_from_url', t.baselineModeOptions.restore_from_url],
-        ['allow_degraded_minimal_reproduction', t.baselineModeOptions.allow_degraded_minimal_reproduction],
-        ['stop_if_insufficient', t.baselineModeOptions.stop_if_insufficient],
-      ] as const).map(([value, text]) => ({
-        value,
-        ...splitOptionCopy(text),
-      })),
-    [t]
+  const derivedContract = useMemo(
+    () => resolveStartResearchContractFields(form),
+    [form.baseline_id, form.research_intensity]
   )
 
-  const resourcePolicyItems = useMemo(
-    () =>
-      ([
-        ['conservative', t.resourcePolicyOptions.conservative],
-        ['balanced', t.resourcePolicyOptions.balanced],
-        ['aggressive', t.resourcePolicyOptions.aggressive],
-      ] as const).map(([value, text]) => ({
-        value,
-        ...splitOptionCopy(text),
-      })),
-    [t]
+  const derivedScopeCopy = useMemo(
+    () => splitOptionCopy(t.scopeOptions[derivedContract.scope]),
+    [derivedContract.scope, t]
   )
-
-  const gitStrategyItems = useMemo(
-    () =>
-      ([
-        ['branch_per_analysis_then_paper', t.gitStrategyOptions.branch_per_analysis_then_paper],
-        ['semantic_head_plus_controlled_integration', t.gitStrategyOptions.semantic_head_plus_controlled_integration],
-        ['manual_integration_only', t.gitStrategyOptions.manual_integration_only],
-      ] as const).map(([value, text]) => ({
-        value,
-        ...splitOptionCopy(text),
-      })),
-    [t]
+  const derivedBaselineModeCopy = useMemo(
+    () => splitOptionCopy(t.baselineModeOptions[derivedContract.baseline_mode]),
+    [derivedContract.baseline_mode, t]
+  )
+  const derivedResourcePolicyCopy = useMemo(
+    () => splitOptionCopy(t.resourcePolicyOptions[derivedContract.resource_policy]),
+    [derivedContract.resource_policy, t]
+  )
+  const derivedGitStrategyCopy = useMemo(
+    () => splitOptionCopy(t.gitStrategyOptions[derivedContract.git_strategy]),
+    [derivedContract.git_strategy, t]
+  )
+  const launchModeCopy = useMemo(
+    () => splitOptionCopy(t.launchModeOptions[form.launch_mode]),
+    [form.launch_mode, t]
   )
 
   useEffect(() => {
@@ -592,11 +1011,14 @@ export function CreateProjectDialog({
     }
     setForm({
       ...withSeed,
-      quest_id: withSeed.quest_id || deriveQuestRepoId(withSeed),
+      quest_id: '',
     })
     setTemplates(loadStartResearchHistory())
     setSelectedTemplateId('__latest__')
     setManualOverride(false)
+    setQuestIdManualOverride(false)
+    setSuggestedQuestId('')
+    setSelectedConnectorConversationId(null)
   }, [initialGoal, locale, open])
 
   const setField = <K extends keyof StartResearchTemplate>(
@@ -605,22 +1027,72 @@ export function CreateProjectDialog({
   ) => {
     setForm((current) => {
       const next = { ...current, [key]: value }
-      if (key === 'title' && !current.quest_id) {
-        next.quest_id = deriveQuestRepoId({
-          title: String(value),
-          goal: current.goal,
-        })
-      }
-      if (key === 'goal' && !current.quest_id) {
-        next.quest_id = deriveQuestRepoId({
-          title: current.title,
-          goal: String(value),
-        })
-      }
       saveStartResearchDraft(next)
       return next
     })
   }
+
+  useEffect(() => {
+    if (!open) return
+    let active = true
+    setSuggestedQuestIdLoading(true)
+    void client
+      .nextQuestId()
+      .then((payload) => {
+        if (!active) return
+        const nextQuestId = String(payload?.quest_id || '').trim()
+        setSuggestedQuestId(nextQuestId)
+      })
+      .catch(() => {
+        if (!active) return
+        setSuggestedQuestId('')
+      })
+      .finally(() => {
+        if (active) setSuggestedQuestIdLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    let active = true
+    setConnectorsLoading(true)
+    setConnectorsError(null)
+    void client
+      .connectors()
+      .then((payload) => {
+        if (!active) return
+        const items = Array.isArray(payload) ? payload.filter((item) => item.name !== 'local' && item.enabled) : []
+        setConnectors(items)
+      })
+      .catch((caught) => {
+        if (!active) return
+        setConnectors([])
+        setConnectorsError(caught instanceof Error ? caught.message : 'Failed to load connectors.')
+      })
+      .finally(() => {
+        if (active) setConnectorsLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || questIdManualOverride) return
+    if (!suggestedQuestId) return
+    setForm((current) => {
+      if (current.quest_id === suggestedQuestId) {
+        return current
+      }
+      return {
+        ...current,
+        quest_id: suggestedQuestId,
+      }
+    })
+  }, [open, questIdManualOverride, suggestedQuestId])
 
   useEffect(() => {
     if (!open) return
@@ -656,6 +1128,32 @@ export function CreateProjectDialog({
     return baselineEntries.find((entry) => entry.baseline_id === baselineId) ?? null
   }, [baselineEntries, form.baseline_id])
 
+  const displayedQuestId = useMemo(() => {
+    const current = String(form.quest_id || '').trim()
+    if (current) return current
+    return suggestedQuestId
+  }, [form.quest_id, suggestedQuestId])
+
+  const connectorChoices = useMemo(
+    () =>
+      connectors
+        .map((item) => resolveStartConnectorChoice(item))
+        .sort((left, right) => left.label.localeCompare(right.label)),
+    [connectors]
+  )
+
+  const selectedConnectorChoice = useMemo(
+    () => connectorChoices.find((item) => item.conversationId === selectedConnectorConversationId) || null,
+    [connectorChoices, selectedConnectorConversationId]
+  )
+
+  useEffect(() => {
+    if (!selectedConnectorConversationId) return
+    if (!connectorChoices.some((item) => item.conversationId === selectedConnectorConversationId)) {
+      setSelectedConnectorConversationId(null)
+    }
+  }, [connectorChoices, selectedConnectorConversationId])
+
   useEffect(() => {
     if (!open || manualOverride) return
     const baselineId = form.baseline_id?.trim()
@@ -690,14 +1188,6 @@ export function CreateProjectDialog({
     open,
   ])
 
-  useEffect(() => {
-    if (!open || manualOverride) return
-    if (!form.baseline_id?.trim()) return
-    if (form.baseline_mode !== 'existing') {
-      setField('baseline_mode', 'existing')
-    }
-  }, [form.baseline_id, form.baseline_mode, manualOverride, open])
-
   const compiledPromptPreview = useMemo(() => compileStartResearchPrompt(form), [form])
 
   useEffect(() => {
@@ -725,14 +1215,25 @@ export function CreateProjectDialog({
 
   const handleTemplateChange = (templateId: string) => {
     setSelectedTemplateId(templateId)
+    if (templateId === '__new__') {
+      const cleared = {
+        ...defaultStartResearchTemplate(locale),
+        quest_id: form.quest_id,
+      }
+      setManualOverride(false)
+      saveStartResearchDraft(cleared)
+      setForm(cleared)
+      return
+    }
     if (templateId === '__latest__') {
       const latest = loadStartResearchTemplate(locale)
       setManualOverride(false)
+      setQuestIdManualOverride(false)
       setForm({
         ...latest,
         goal: initialGoal || latest.goal,
         user_language: locale,
-        quest_id: latest.quest_id || deriveQuestRepoId(latest),
+        quest_id: suggestedQuestId || '',
       })
       return
     }
@@ -741,9 +1242,10 @@ export function CreateProjectDialog({
       return
     }
     setManualOverride(false)
+    setQuestIdManualOverride(false)
     setForm({
       title: next.title,
-      quest_id: next.quest_id || deriveQuestRepoId(next),
+      quest_id: suggestedQuestId || '',
       goal: next.goal,
       baseline_id: next.baseline_id,
       baseline_variant_id: next.baseline_variant_id || '',
@@ -751,21 +1253,35 @@ export function CreateProjectDialog({
       paper_urls: next.paper_urls,
       runtime_constraints: next.runtime_constraints,
       objectives: next.objectives,
-      scope: next.scope,
-      baseline_mode: next.baseline_mode,
-      resource_policy: next.resource_policy,
-      time_budget_hours: next.time_budget_hours,
-      git_strategy: next.git_strategy,
+      need_research_paper: next.need_research_paper,
+      research_intensity: next.research_intensity,
+      decision_policy: next.decision_policy,
+      launch_mode: next.launch_mode,
+      custom_profile: next.custom_profile,
+      entry_state_summary: next.entry_state_summary,
+      review_summary: next.review_summary,
+      custom_brief: next.custom_brief,
       user_language: locale,
     })
   }
 
-  const applyContractPreset = (presetId: StartResearchContractPresetId) => {
+  const applyResearchIntensity = (presetId: ResearchIntensity) => {
     setForm((current) => {
-      const next = applyStartResearchContractPreset(current, presetId)
+      const next = applyStartResearchIntensityPreset(current, presetId)
       saveStartResearchDraft(next)
       return next
     })
+  }
+
+  const handleQuestIdChange = (value: string) => {
+    const nextQuestId = slugifyQuestRepo(value)
+    setQuestIdManualOverride(Boolean(nextQuestId) && nextQuestId !== suggestedQuestId)
+    setField('quest_id', nextQuestId)
+  }
+
+  const handleOpenConnectorSettings = () => {
+    onClose()
+    navigate('/settings/connectors', { state: { configName: 'connectors' } })
   }
 
   const handleCreate = async () => {
@@ -784,24 +1300,34 @@ export function CreateProjectDialog({
           variant_id: baselineVariantId || null,
         }
       : null
-    const timeBudget = Number(saved.time_budget_hours)
+    const derivedFields = resolveStartResearchContractFields(saved)
+    const timeBudget = Number(derivedFields.time_budget_hours)
     const startupContract = {
-      schema_version: 1,
+      schema_version: 3,
       user_language: saved.user_language,
-      scope: saved.scope,
-      baseline_mode: saved.baseline_mode,
-      resource_policy: saved.resource_policy,
+      need_research_paper: saved.need_research_paper,
+      research_intensity: saved.research_intensity,
+      decision_policy: saved.decision_policy,
+      launch_mode: saved.launch_mode,
+      custom_profile: saved.custom_profile,
+      scope: derivedFields.scope,
+      baseline_mode: derivedFields.baseline_mode,
+      resource_policy: derivedFields.resource_policy,
       time_budget_hours: Number.isFinite(timeBudget) && timeBudget > 0 ? timeBudget : null,
-      git_strategy: saved.git_strategy,
+      git_strategy: derivedFields.git_strategy,
       runtime_constraints: saved.runtime_constraints,
       objectives: sanitizeLines(saved.objectives),
       baseline_urls: sanitizeLines(saved.baseline_urls),
       paper_urls: sanitizeLines(saved.paper_urls),
+      entry_state_summary: saved.entry_state_summary,
+      review_summary: saved.review_summary,
+      custom_brief: saved.custom_brief,
     }
     await onCreate({
       title: saved.title,
       goal: finalPrompt,
-      quest_id: saved.quest_id || undefined,
+      quest_id: questIdManualOverride ? saved.quest_id || undefined : undefined,
+      preferred_connector_conversation_id: selectedConnectorConversationId || undefined,
       requested_baseline_ref: requestedBaselineRef,
       startup_contract: startupContract,
     })
@@ -813,16 +1339,24 @@ export function CreateProjectDialog({
       title={t.title}
       description={t.body}
       onClose={onClose}
-      className="h-[92vh] max-w-[92vw] rounded-[30px]"
+      className="h-[94svh] max-w-[96vw] rounded-[26px] sm:h-[92vh] sm:max-w-[92vw] sm:rounded-[30px]"
     >
-      <div className="grid h-full min-h-0 gap-4 overflow-hidden p-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:p-5">
-        <div className={cn(panelClass, 'flex min-h-0 flex-col overflow-hidden')}>
-          <div className="shrink-0 border-b border-[rgba(45,42,38,0.08)] px-4 py-4 dark:border-[rgba(45,42,38,0.08)]">
-            <div className="text-sm font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{t.formTitle}</div>
-            <div className="mt-1 text-xs text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.formHint}</div>
+      <div className="feed-scrollbar flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3 sm:gap-4 sm:p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:overflow-hidden lg:p-5">
+        <div
+          className={cn(
+            'flex flex-none flex-col overflow-visible lg:min-h-0 lg:flex-auto lg:overflow-hidden lg:rounded-xl lg:border lg:border-[rgba(45,42,38,0.09)] lg:bg-[rgba(255,255,255,0.76)] lg:shadow-[0_10px_26px_-22px_rgba(45,42,38,0.26)] lg:backdrop-blur-xl dark:lg:border-[rgba(45,42,38,0.09)] dark:lg:bg-[rgba(255,255,255,0.82)]'
+          )}
+        >
+          <div className="shrink-0 px-1 py-1 lg:border-b lg:border-[rgba(45,42,38,0.08)] lg:px-4 lg:py-4 dark:lg:border-[rgba(45,42,38,0.08)]">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[rgba(107,103,97,0.8)] dark:text-[rgba(107,103,97,0.8)] lg:text-sm lg:normal-case lg:tracking-normal lg:text-[rgba(38,36,33,0.95)]">
+              {t.formTitle}
+            </div>
+            <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)] lg:text-xs">
+              {t.formHint}
+            </div>
           </div>
 
-          <div className="feed-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
+          <div className="px-0 py-1 sm:px-0 sm:py-1 lg:feed-scrollbar lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:p-4">
             <div className="flex min-h-full flex-col gap-4">
               {manualOverride ? (
                 <div className="rounded-lg border border-[#c4a066]/50 bg-[#c4a066]/10 px-3 py-2 text-xs text-[rgba(56,49,35,0.92)]">
@@ -843,7 +1377,8 @@ export function CreateProjectDialog({
                       className={cn(selectClassName, 'min-w-0 flex-1')}
                       disabled={manualOverride}
                     >
-                      <option value="__latest__">{t.useTemplate}: latest draft</option>
+                      <option value="__new__">{t.newTemplate}</option>
+                      <option value="__latest__">{t.useTemplate}: {t.latestDraft}</option>
                       {templates.length === 0 ? <option value="__empty__">{t.noTemplates}</option> : null}
                       {templates.map((item) => (
                         <option key={item.id} value={item.id}>
@@ -870,6 +1405,32 @@ export function CreateProjectDialog({
                     <div className="mt-1 text-sm font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{t.targetRunnerValue}</div>
                   </div>
                 </div>
+                <ConnectorChoiceField
+                  label={t.connectorDeliveryLabel}
+                  help={t.connectorDeliveryHelp}
+                  hint={t.connectorDeliveryHint}
+                  items={connectorChoices}
+                  value={selectedConnectorConversationId}
+                  loading={connectorsLoading}
+                  error={connectorsError}
+                  emptyTitle={t.connectorEmptyTitle}
+                  emptyBody={t.connectorEmptyBody}
+                  unavailableTitle={t.connectorUnavailableTitle}
+                  unavailableBody={t.connectorUnavailableBody}
+                  settingsActionLabel={t.connectorSettingsAction}
+                  autoModeLabel={t.connectorAutoModeLabel}
+                  autoModeBody={t.connectorAutoModeBody}
+                  selectedHint={t.connectorSelectedHint}
+                  sourceLabels={{
+                    default: t.connectorSourceDefault,
+                    recent: t.connectorSourceRecent,
+                    last: t.connectorSourceLast,
+                    discovered: t.connectorSourceDiscovered,
+                    unavailable: t.connectorSourceUnavailable,
+                  }}
+                  onOpenSettings={handleOpenConnectorSettings}
+                  onChange={setSelectedConnectorConversationId}
+                />
               </SectionCard>
 
               <SectionCard title={t.basics}>
@@ -885,9 +1446,9 @@ export function CreateProjectDialog({
 
                 <InlineField label={t.repoLabel} help={t.repoHelp}>
                   <Input
-                    value={form.quest_id}
-                    onChange={(event) => setField('quest_id', slugifyQuestRepo(event.target.value))}
-                    placeholder={t.repoPlaceholder}
+                    value={displayedQuestId}
+                    onChange={(event) => handleQuestIdChange(event.target.value)}
+                    placeholder={suggestedQuestIdLoading ? t.repoLoading : suggestedQuestId || t.repoPlaceholder}
                     className="rounded-[10px] border-[rgba(45,42,38,0.09)] bg-white/75 text-xs dark:border-[rgba(45,42,38,0.09)] dark:bg-white/78"
                     disabled={manualOverride}
                   />
@@ -906,7 +1467,7 @@ export function CreateProjectDialog({
               </SectionCard>
 
               <SectionCard title={t.references}>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3">
                   <InlineField label={t.baselineRoot} help={t.baselineRootHelp}>
                     <div className="space-y-2">
                       <select
@@ -974,18 +1535,18 @@ export function CreateProjectDialog({
                       ) : null}
                     </div>
                   </InlineField>
-                  <InlineField label={t.languageLabel} help={t.languageHelp}>
-                    <select
-                      value={form.user_language}
-                      onChange={(event) => setField('user_language', event.target.value as StartResearchTemplate['user_language'])}
-                      className={selectClassName}
-                      disabled={manualOverride}
-                    >
-                      <option value="zh">中文</option>
-                      <option value="en">English</option>
-                    </select>
-                  </InlineField>
                 </div>
+                <InlineField label={t.languageLabel} help={t.languageHelp}>
+                  <select
+                    value={form.user_language}
+                    onChange={(event) => setField('user_language', event.target.value as StartResearchTemplate['user_language'])}
+                    className={selectClassName}
+                    disabled={manualOverride}
+                  >
+                    <option value="zh">中文</option>
+                    <option value="en">English</option>
+                  </select>
+                </InlineField>
                 <InlineField label={t.baselineUrls} help={t.baselineUrlsHelp}>
                   <Textarea
                     value={form.baseline_urls}
@@ -1007,65 +1568,146 @@ export function CreateProjectDialog({
               </SectionCard>
 
               <SectionCard title={t.policy}>
-                <ChoiceField
-                  label={t.contractProfiles}
-                  help={t.contractProfilesHint}
-                  hint={t.contractProfilesHint}
-                  value={activeContractPresetId}
-                  items={contractPresetItems}
-                  onChange={applyContractPreset}
-                  disabled={manualOverride}
-                />
-                {!activeContractPresetId ? (
-                  <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-[rgba(244,239,233,0.52)] px-3 py-2 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:border-[rgba(45,42,38,0.08)] dark:bg-[rgba(244,239,233,0.62)] dark:text-[rgba(86,82,77,0.82)]">
-                    {t.contractProfilesCustomHint}
-                  </div>
+                <InlineField label={t.launchModeLabel} help={t.launchModeHelp} hint={t.launchModeHelp}>
+                  <select
+                    value={form.launch_mode}
+                    onChange={(event) => setField('launch_mode', event.target.value as LaunchMode)}
+                    className={selectClassName}
+                    disabled={manualOverride}
+                  >
+                    <option value="standard">{t.launchModeOptions.standard}</option>
+                    <option value="custom">{t.launchModeOptions.custom}</option>
+                  </select>
+                </InlineField>
+                {form.launch_mode === 'custom' ? (
+                  <>
+                    <InlineField label={t.customProfileLabel} help={t.customProfileHelp} hint={t.customProfileHelp}>
+                      <select
+                        value={form.custom_profile}
+                        onChange={(event) => setField('custom_profile', event.target.value as CustomProfile)}
+                        className={selectClassName}
+                        disabled={manualOverride}
+                      >
+                        <option value="continue_existing_state">{t.customProfileOptions.continue_existing_state}</option>
+                        <option value="revision_rebuttal">{t.customProfileOptions.revision_rebuttal}</option>
+                        <option value="freeform">{t.customProfileOptions.freeform}</option>
+                      </select>
+                    </InlineField>
+                    <InlineField label={t.entryStateSummaryLabel} help={t.entryStateSummaryHelp}>
+                      <Textarea
+                        value={form.entry_state_summary}
+                        onChange={(event) => setField('entry_state_summary', event.target.value)}
+                        placeholder={t.entryStateSummaryPlaceholder}
+                        className="min-h-[92px] rounded-[10px] border-[rgba(45,42,38,0.09)] bg-white/75 text-xs leading-5 dark:border-[rgba(45,42,38,0.09)] dark:bg-white/78"
+                        disabled={manualOverride}
+                      />
+                    </InlineField>
+                    {form.custom_profile === 'revision_rebuttal' ? (
+                      <InlineField label={t.reviewSummaryLabel} help={t.reviewSummaryHelp}>
+                        <Textarea
+                          value={form.review_summary}
+                          onChange={(event) => setField('review_summary', event.target.value)}
+                          placeholder={t.reviewSummaryPlaceholder}
+                          className="min-h-[92px] rounded-[10px] border-[rgba(45,42,38,0.09)] bg-white/75 text-xs leading-5 dark:border-[rgba(45,42,38,0.09)] dark:bg-white/78"
+                          disabled={manualOverride}
+                        />
+                      </InlineField>
+                    ) : null}
+                    <InlineField label={t.customBriefLabel} help={t.customBriefHelp}>
+                      <Textarea
+                        value={form.custom_brief}
+                        onChange={(event) => setField('custom_brief', event.target.value)}
+                        placeholder={t.customBriefPlaceholder}
+                        className="min-h-[92px] rounded-[10px] border-[rgba(45,42,38,0.09)] bg-white/75 text-xs leading-5 dark:border-[rgba(45,42,38,0.09)] dark:bg-white/78"
+                        disabled={manualOverride}
+                      />
+                    </InlineField>
+                  </>
                 ) : null}
                 <ChoiceField
-                  label={t.scopeLabel}
-                  help={t.scopeHelp}
-                  hint={t.scopeHelp}
-                  value={form.scope}
-                  items={scopeItems}
-                  onChange={(value) => setField('scope', value)}
+                  label={t.researchIntensityLabel}
+                  help={t.researchIntensityHelp}
+                  hint={t.researchIntensityHelp}
+                  value={activeResearchIntensity}
+                  items={intensityItems}
+                  onChange={applyResearchIntensity}
                   disabled={manualOverride}
                 />
                 <ChoiceField
-                  label={t.baselineModeLabel}
-                  help={t.baselineModeHelp}
-                  hint={t.baselineModeHelp}
-                  value={form.baseline_mode}
-                  items={baselineModeItems}
-                  onChange={(value) => setField('baseline_mode', value)}
-                  disabled={manualOverride || Boolean(form.baseline_id?.trim())}
-                />
-                <ChoiceField
-                  label={t.resourcePolicyLabel}
-                  help={t.resourcePolicyHelp}
-                  hint={t.resourcePolicyHelp}
-                  value={form.resource_policy}
-                  items={resourcePolicyItems}
-                  onChange={(value) => setField('resource_policy', value)}
+                  label={t.decisionPolicyLabel}
+                  help={t.decisionPolicyHelp}
+                  hint={t.decisionPolicyHelp}
+                  value={form.decision_policy}
+                  items={decisionPolicyItems}
+                  onChange={(value) => setField('decision_policy', value as DecisionPolicy)}
                   disabled={manualOverride}
                 />
-                <ChoiceField
-                  label={t.gitStrategyLabel}
-                  help={t.gitStrategyHelp}
-                  hint={t.gitStrategyHelp}
-                  value={form.git_strategy}
-                  items={gitStrategyItems}
-                  onChange={(value) => setField('git_strategy', value)}
-                  disabled={manualOverride}
-                />
-                <InlineField label={t.timeBudgetLabel} help={t.timeBudgetHelp} hint={t.timeBudgetHelp}>
-                  <Input
-                    value={form.time_budget_hours}
-                    onChange={(event) => setField('time_budget_hours', event.target.value)}
-                    placeholder="24"
-                    className="rounded-[10px] border-[rgba(45,42,38,0.09)] bg-white/75 text-xs dark:border-[rgba(45,42,38,0.09)] dark:bg-white/78"
-                    disabled={manualOverride}
-                  />
+                <InlineField label={t.researchPaperLabel} help={t.researchPaperHelp} hint={t.researchPaperHelp}>
+                  <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-3 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                          {form.need_research_paper ? t.researchPaperEnabled : t.researchPaperDisabled}
+                        </div>
+                        <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
+                          {form.need_research_paper ? t.researchPaperEnabledBody : t.researchPaperDisabledBody}
+                        </div>
+                      </div>
+                      <AnimatedCheckbox
+                        checked={form.need_research_paper}
+                        onChange={(checked) => setField('need_research_paper', checked)}
+                        disabled={manualOverride}
+                        size="md"
+                        className="shrink-0"
+                      />
+                    </div>
+                  </div>
                 </InlineField>
+                <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-[rgba(244,239,233,0.52)] px-3 py-3 dark:border-[rgba(45,42,38,0.08)] dark:bg-[rgba(244,239,233,0.62)]">
+                  <div className="text-[11px] font-medium text-[rgba(75,73,69,0.78)] dark:text-[rgba(75,73,69,0.78)]">
+                    {t.derivedPolicyTitle}
+                  </div>
+                  <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
+                    {t.derivedPolicyHint}
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="rounded-[12px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-2 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
+                        {derivedScopeCopy.title}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-5 text-[rgba(56,52,47,0.9)] dark:text-[rgba(56,52,47,0.9)]">
+                        {derivedScopeCopy.description}
+                      </div>
+                    </div>
+                    <div className="rounded-[12px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-2 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
+                        {derivedBaselineModeCopy.title}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-5 text-[rgba(56,52,47,0.9)] dark:text-[rgba(56,52,47,0.9)]">
+                        {derivedBaselineModeCopy.description}
+                      </div>
+                    </div>
+                    <div className="rounded-[12px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-2 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
+                        {derivedResourcePolicyCopy.title}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-5 text-[rgba(56,52,47,0.9)] dark:text-[rgba(56,52,47,0.9)]">
+                        {derivedResourcePolicyCopy.description}
+                      </div>
+                    </div>
+                    <div className="rounded-[12px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-2 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
+                        {t.derivedPolicyBudgetLabel}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-5 text-[rgba(56,52,47,0.9)] dark:text-[rgba(56,52,47,0.9)]">
+                        {derivedContract.time_budget_hours}h · {derivedGitStrategyCopy.title}
+                      </div>
+                      <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
+                        {derivedGitStrategyCopy.description}
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <InlineField label={t.runtimeConstraintsLabel} help={t.runtimeConstraintsHelp}>
                   <Textarea
                     value={form.runtime_constraints}
@@ -1092,29 +1734,64 @@ export function CreateProjectDialog({
           </div>
         </div>
 
-        <div className={cn(panelClass, 'flex min-h-0 flex-col overflow-hidden p-4')}>
-          <div className="mb-3 flex shrink-0 flex-wrap items-start justify-between gap-2">
+        <div
+          className={cn(
+            'flex flex-none flex-col overflow-visible p-0 sm:p-0 lg:min-h-0 lg:flex-auto lg:overflow-hidden lg:rounded-xl lg:border lg:border-[rgba(45,42,38,0.09)] lg:bg-[rgba(255,255,255,0.76)] lg:p-4 lg:shadow-[0_10px_26px_-22px_rgba(45,42,38,0.26)] lg:backdrop-blur-xl dark:lg:border-[rgba(45,42,38,0.09)] dark:lg:bg-[rgba(255,255,255,0.82)]'
+          )}
+        >
+          <div className="mb-2 flex shrink-0 flex-wrap items-start justify-between gap-2 px-1 lg:mb-3 lg:px-0">
             <div>
-              <div className="text-sm font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{t.preview}</div>
-              <div className="mt-1 text-xs text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.previewBody}</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[rgba(107,103,97,0.8)] dark:text-[rgba(107,103,97,0.8)] lg:text-sm lg:normal-case lg:tracking-normal lg:text-[rgba(38,36,33,0.95)]">
+                {t.preview}
+              </div>
+              <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)] lg:text-xs">
+                {t.previewBody}
+              </div>
             </div>
             {manualOverride ? (
               <Badge className="rounded-full px-2.5 py-1 text-[10px] uppercase tracking-wide">{t.manual}</Badge>
             ) : null}
           </div>
 
-          <div className="mb-3 shrink-0 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div className="mb-3 shrink-0 grid grid-cols-2 gap-2 px-1 sm:grid-cols-3 lg:px-0 xl:grid-cols-6">
             <div className="rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
               <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.repoLabel}</div>
-              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{form.quest_id || deriveQuestRepoId(form) || 'auto-generated'}</div>
+              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {displayedQuestId || (suggestedQuestIdLoading ? t.repoLoading : t.repoAutoAssigned)}
+              </div>
             </div>
             <div className="rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
-              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.scopeLabel}</div>
-              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{form.scope.replaceAll('_', ' ')}</div>
+              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.researchIntensityLabel}</div>
+              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {t.intensityOptions[activeResearchIntensity].title}
+              </div>
             </div>
             <div className="rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
-              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.timeBudgetLabel}</div>
-              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{form.time_budget_hours ? `${form.time_budget_hours}h` : '—'}</div>
+              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.connectorSummaryLabel}</div>
+              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {selectedConnectorChoice?.label || t.connectorSummaryAuto}
+              </div>
+              <div className="mt-1 text-[10px] leading-4 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
+                {selectedConnectorChoice?.targetLabel || t.connectorAutoModeBody}
+              </div>
+            </div>
+            <div className="hidden rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] sm:block dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
+              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.decisionPolicyLabel}</div>
+              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {t.decisionPolicyOptions[form.decision_policy].title}
+              </div>
+            </div>
+            <div className="hidden rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] sm:block dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
+              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.deliveryModeLabel}</div>
+              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {form.need_research_paper ? t.researchPaperEnabled : t.researchPaperDisabled}
+              </div>
+            </div>
+            <div className="hidden rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] sm:block dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
+              <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.launchModeLabel}</div>
+              <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                {launchModeCopy.title}
+              </div>
             </div>
           </div>
 
@@ -1122,31 +1799,40 @@ export function CreateProjectDialog({
             aria-label={t.preview}
             value={promptDraft}
             onChange={(event) => handlePromptChange(event.target.value)}
-            className="feed-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain resize-none rounded-xl border border-[rgba(45,42,38,0.09)] bg-white/65 p-3 font-mono text-xs leading-5 text-[rgba(38,36,33,0.95)] outline-none dark:border-[rgba(45,42,38,0.09)] dark:bg-white/78 dark:text-[rgba(38,36,33,0.95)]"
+            className="feed-scrollbar min-h-[28svh] flex-1 overflow-y-auto overscroll-contain resize-none rounded-[18px] border border-[rgba(45,42,38,0.09)] bg-white/72 p-3 font-mono text-xs leading-5 text-[rgba(38,36,33,0.95)] outline-none dark:border-[rgba(45,42,38,0.09)] dark:bg-white/82 dark:text-[rgba(38,36,33,0.95)] sm:min-h-[34svh] lg:min-h-0"
           />
 
-          <div className="mt-2 flex shrink-0 items-center justify-between gap-2 text-[11px] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
+          <div className="mt-2 flex shrink-0 flex-col items-start justify-between gap-1 px-1 text-[11px] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)] sm:flex-row sm:items-center sm:gap-2 lg:px-0">
             <span>{t.footer}</span>
             <span>{promptDraft.length}</span>
           </div>
 
-          {promptRequired ? <div className="mt-2 shrink-0 text-xs text-[#9a1b1b]">{t.promptRequired}</div> : null}
-          {error ? <div className="mt-2 shrink-0 text-xs text-[#9a1b1b]">{error}</div> : null}
+          {promptRequired ? <div className="mt-2 shrink-0 px-1 text-xs text-[#9a1b1b] lg:px-0">{t.promptRequired}</div> : null}
+          {error ? <div className="mt-2 shrink-0 px-1 text-xs text-[#9a1b1b] lg:px-0">{error}</div> : null}
 
-          <div className="mt-3 flex shrink-0 items-center justify-between gap-3">
+          <div className="mt-3 flex shrink-0 flex-col gap-3 px-1 sm:flex-row sm:items-center sm:justify-between lg:px-0">
             <div className="inline-flex items-center gap-2 text-[11px] text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">
               <BookmarkPlus className="h-3.5 w-3.5" />
               <span>{templates.length} template(s)</span>
             </div>
-            <div className="flex items-center gap-3">
-              <Button variant="secondary" disabled={!manualOverride || loading} onClick={handleRestore}>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
+              <Button
+                variant="secondary"
+                disabled={!manualOverride || loading}
+                onClick={handleRestore}
+                className="w-full sm:w-auto"
+              >
                 <RotateCcw className="h-4 w-4" />
                 {t.restore}
               </Button>
-              <Button variant="ghost" onClick={onClose}>
+              <Button variant="ghost" onClick={onClose} className="w-full sm:w-auto">
                 {t.cancel}
               </Button>
-              <Button onClick={() => void handleCreate()} disabled={loading || goalRequired || promptRequired}>
+              <Button
+                onClick={() => void handleCreate()}
+                disabled={loading || goalRequired || promptRequired}
+                className="w-full sm:w-auto"
+              >
                 <Sparkles className="h-4 w-4" />
                 {loading ? '…' : t.create}
               </Button>

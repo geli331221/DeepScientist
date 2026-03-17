@@ -8,11 +8,6 @@ jest.mock('@/lib/stores/tabs', () => ({
   useActiveTab: () => activeTab,
 }))
 
-jest.mock('@/lib/share-session', () => ({
-  isShareViewForProject: () => false,
-  getShareSessionMeta: () => null,
-}))
-
 const cliStoreState = {
   servers: [],
   projectId: null,

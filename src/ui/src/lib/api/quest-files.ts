@@ -98,6 +98,10 @@ function encodeQuestDirId(projectId: string, path: string) {
   return `${QUEST_DIR_PREFIX}${projectId}::${encodePath(path)}`
 }
 
+export function buildQuestDirectoryId(projectId: string, path: string) {
+  return encodeQuestDirId(projectId, path)
+}
+
 export function isQuestNodeId(fileId: string) {
   return fileId.startsWith(QUEST_FILE_PREFIX) || fileId.startsWith(QUEST_DIR_PREFIX)
 }
@@ -189,6 +193,7 @@ export function flattenQuestExplorerPayload(
         id,
         name: node.name,
         type: 'folder',
+        folder_kind: node.folder_kind,
         parent_id: currentParentPath ? encodeQuestDirId(projectId, currentParentPath) : null,
         path: node.path,
         created_at: createdAt,
@@ -285,6 +290,10 @@ function resolveQuestDocumentPath(document: OpenDocumentPayload): string | null 
   }
   if (document.document_id.startsWith('path::')) {
     const candidate = document.document_id.slice('path::'.length).trim()
+    return candidate || null
+  }
+  if (document.document_id.startsWith('questpath::')) {
+    const candidate = document.document_id.slice('questpath::'.length).trim()
     return candidate || null
   }
   return null

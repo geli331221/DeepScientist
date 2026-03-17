@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, unquote
 from ...acp import OptionalACPBridge, build_session_descriptor, build_session_update, get_acp_bridge_status
 from ...bash_exec.service import DEFAULT_TERMINAL_SESSION_ID
 from ...gitops import commit_detail, compare_refs, diff_file_between_refs, diff_file_for_commit, export_git_graph, list_branch_canvas, log_ref_history
+from ...memory import MemoryService
+from ...quest import QuestService
 from ...shared import generate_id, read_text, resolve_within, sha256_text, utc_now
 from ...runners import RunRequest
 
@@ -18,6 +20,12 @@ from ...runners import RunRequest
 class ApiHandlers:
     def __init__(self, app: "DaemonApp") -> None:
         self.app = app
+
+    def _fresh_quest_service(self) -> QuestService:
+        return QuestService(self.app.home, skill_installer=self.app.skill_installer)
+
+    def _fresh_memory_service(self) -> MemoryService:
+        return MemoryService(self.app.home)
 
     def root(self) -> tuple[int, dict, str]:
         dist_root = self._ui_dist_root()
@@ -186,7 +194,7 @@ npm --prefix src/ui run build</pre>
         return get_acp_bridge_status().as_dict()
 
     def connectors(self) -> list[dict]:
-        return [channel.status() for channel in self.app.channels.values()]
+        return self.app.list_connector_statuses()
 
     def baselines(self) -> list[dict]:
         return self.app.artifact_service.baselines.list_entries()
@@ -216,13 +224,23 @@ npm --prefix src/ui run build</pre>
     def quests(self) -> list[dict]:
         return self.app.quest_service.list_quests()
 
+    def quest_next_id(self) -> dict:
+        return {
+            "quest_id": self.app.quest_service.preview_next_numeric_quest_id(),
+        }
+
     def quest_create(self, body: dict) -> dict:
         goal = body.get("goal", "").strip()
         title = body.get("title", "").strip() or None
         quest_id = body.get("quest_id", "").strip() or None
         source = body.get("source", "").strip() or "web"
+        preferred_connector_conversation_id = (
+            str(body.get("preferred_connector_conversation_id") or "").strip() or None
+        )
         requested_baseline_ref = body.get("requested_baseline_ref")
         startup_contract = body.get("startup_contract")
+        auto_start = body.get("auto_start") is True
+        initial_message = str(body.get("initial_message") or "").strip()
         if not goal:
             return {"ok": False, "message": "Quest goal is required."}
         try:
@@ -231,6 +249,7 @@ npm --prefix src/ui run build</pre>
                 title=title,
                 quest_id=quest_id,
                 source=source,
+                preferred_connector_conversation_id=preferred_connector_conversation_id,
                 requested_baseline_ref=requested_baseline_ref if isinstance(requested_baseline_ref, dict) else None,
                 startup_contract=startup_contract if isinstance(startup_contract, dict) else None,
             )
@@ -240,7 +259,16 @@ npm --prefix src/ui run build</pre>
             return 400, {"ok": False, "message": str(exc)}
         except RuntimeError as exc:
             return 409, {"ok": False, "message": str(exc)}
-        return {"ok": True, "snapshot": snapshot}
+        payload: dict[str, object] = {"ok": True, "snapshot": snapshot}
+        if auto_start:
+            startup = self.app.submit_user_message(
+                snapshot["quest_id"],
+                text=initial_message or goal,
+                source=source,
+            )
+            payload["startup"] = startup
+            payload["snapshot"] = self.app.quest_service.snapshot(snapshot["quest_id"])
+        return payload
 
     def quest_baseline_binding(self, quest_id: str, body: dict) -> dict | tuple[int, dict]:
         baseline_id = str(body.get("baseline_id") or "").strip()
@@ -355,7 +383,7 @@ npm --prefix src/ui run build</pre>
         return self.app.update_quest_binding(quest_id, conversation_id, force=force)
 
     def quest_session(self, quest_id: str) -> dict:
-        snapshot = self.app.quest_service.snapshot(quest_id)
+        snapshot = self.app.quest_service.snapshot_fast(quest_id)
         return {
             "ok": True,
             "quest_id": quest_id,
@@ -371,7 +399,7 @@ npm --prefix src/ui run build</pre>
         tail = tail_raw in {"1", "true", "yes", "on"}
         format_name = ((query.get("format") or ["both"])[0] or "both").lower()
         session_id = ((query.get("session_id") or [f"quest:{quest_id}"])[0] or f"quest:{quest_id}")
-        payload = self.app.quest_service.events(quest_id, after=after, limit=limit, tail=tail)
+        payload = self._fresh_quest_service().events(quest_id, after=after, limit=limit, tail=tail)
         if format_name in {"acp", "both"}:
             payload["acp_updates"] = [
                 build_session_update(
@@ -553,6 +581,33 @@ npm --prefix src/ui run build</pre>
             return 400, {"ok": False, "message": str(exc)}
         return result
 
+    def terminal_attach(self, quest_id: str, session_id: str, body: dict | None = None) -> dict | tuple[int, dict]:
+        _unused = body or {}
+        quest_root = self.app.quest_service._quest_root(quest_id)
+        try:
+            session = self.app.bash_exec_service.get_session(quest_root, session_id)
+        except FileNotFoundError:
+            return 404, {"ok": False, "message": f"Unknown terminal session `{session_id}`."}
+        if str(session.get("kind") or "").lower() != "terminal":
+            return 400, {"ok": False, "message": "not_terminal_session"}
+        if str(session.get("status") or "").lower() in {"completed", "failed", "terminated"}:
+            return 409, {"ok": False, "message": "terminal_session_inactive", "session": session}
+        try:
+            token = self.app.bash_exec_service.issue_terminal_attach_token(quest_root, session_id)
+        except ValueError as exc:
+            return 409, {"ok": False, "message": str(exc), "session": session}
+        attach_port = self.app._terminal_attach_port
+        if not attach_port:
+            return 503, {"ok": False, "message": "terminal_attach_server_unavailable", "session": session}
+        return {
+            "ok": True,
+            "port": attach_port,
+            "path": "/terminal/attach",
+            "token": token["token"],
+            "expires_at": token["expires_at"],
+            "session": session,
+        }
+
     def terminal_restore(self, quest_id: str, session_id: str, path: str) -> dict | tuple[int, dict]:
         query = self.parse_query(path)
         commands_raw = ((query.get("commands") or ["10"])[0] or "10").strip()
@@ -622,16 +677,48 @@ npm --prefix src/ui run build</pre>
             selection_type=selection_type,
         )
 
+    def stage_view(self, quest_id: str, body: dict) -> dict:
+        return self.app.quest_service.stage_view(quest_id, selection=body)
+
     def graph(self, quest_id: str) -> dict:
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return export_git_graph(quest_root, quest_root / "artifacts" / "graphs")
 
     def metrics_timeline(self, quest_id: str) -> dict:
         return self.app.quest_service.metrics_timeline(quest_id)
 
     def git_branches(self, quest_id: str) -> dict:
-        quest_root = self.app.quest_service._quest_root(quest_id)
-        return list_branch_canvas(quest_root, quest_id=quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
+        payload = list_branch_canvas(quest_root, quest_id=quest_id)
+        try:
+            branch_summary = self.app.artifact_service.list_research_branches(quest_root)
+        except Exception:
+            branch_summary = {"branches": []}
+        branch_summary_by_name = {
+            str(item.get("branch_name") or "").strip(): item
+            for item in (branch_summary.get("branches") or [])
+            if str(item.get("branch_name") or "").strip()
+        }
+        for node in payload.get("nodes", []):
+            ref = str(node.get("ref") or "").strip()
+            if not ref:
+                continue
+            summary = branch_summary_by_name.get(ref)
+            if not isinstance(summary, dict):
+                continue
+            node["branch_no"] = summary.get("branch_no")
+            node["idea_title"] = summary.get("idea_title")
+            node["idea_problem"] = summary.get("idea_problem")
+            node["next_target"] = summary.get("next_target")
+            node["lineage_intent"] = summary.get("lineage_intent")
+            node["parent_branch"] = summary.get("parent_branch")
+            node["foundation_ref"] = summary.get("foundation_ref")
+            node["foundation_reason"] = summary.get("foundation_reason")
+            node["idea_md_path"] = summary.get("idea_md_path")
+            node["idea_draft_path"] = summary.get("idea_draft_path")
+            node["latest_main_experiment"] = summary.get("latest_main_experiment")
+            node["experiment_count"] = summary.get("experiment_count")
+        return payload
 
     def git_log(self, quest_id: str, path: str) -> dict:
         query = self.parse_query(path)
@@ -644,7 +731,7 @@ npm --prefix src/ui run build</pre>
             limit = max(1, min(int(limit_raw), 100))
         except ValueError:
             limit = 30
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return log_ref_history(quest_root, ref=ref, base=base, limit=limit)
 
     def git_compare(self, quest_id: str, path: str) -> dict:
@@ -653,7 +740,7 @@ npm --prefix src/ui run build</pre>
         head = ((query.get("head") or [""])[0] or "").strip()
         if not base or not head:
             return {"ok": False, "message": "`base` and `head` are required."}
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return compare_refs(quest_root, base=base, head=head)
 
     def git_commit(self, quest_id: str, path: str) -> dict:
@@ -661,7 +748,7 @@ npm --prefix src/ui run build</pre>
         sha = ((query.get("sha") or [""])[0] or "").strip()
         if not sha:
             return {"ok": False, "message": "`sha` is required."}
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return commit_detail(quest_root, sha=sha)
 
     def git_diff_file(self, quest_id: str, path: str) -> dict:
@@ -671,7 +758,7 @@ npm --prefix src/ui run build</pre>
         file_path = ((query.get("path") or [""])[0] or "").strip()
         if not base or not head or not file_path:
             return {"ok": False, "message": "`base`, `head`, and `path` are required."}
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return diff_file_between_refs(quest_root, base=base, head=head, path=file_path)
 
     def git_commit_file(self, quest_id: str, path: str) -> dict:
@@ -680,7 +767,7 @@ npm --prefix src/ui run build</pre>
         file_path = ((query.get("path") or [""])[0] or "").strip()
         if not sha or not file_path:
             return {"ok": False, "message": "`sha` and `path` are required."}
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return diff_file_for_commit(quest_root, sha=sha, path=file_path)
 
     def graph_asset(self, quest_id: str, kind: str) -> tuple[int, dict, bytes]:
@@ -690,7 +777,7 @@ npm --prefix src/ui run build</pre>
         if not raw_path:
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
 
-        quest_root = self.app.quest_service._quest_root(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
         raw_file = Path(str(raw_path))
         if raw_file.is_absolute():
             try:
@@ -711,9 +798,10 @@ npm --prefix src/ui run build</pre>
         return self.app.quest_service.snapshot(quest_id).get("recent_runs", [])
 
     def quest_memory(self, quest_id: str) -> list[dict]:
-        return self.app.memory_service.list_cards(
+        quest_service = self._fresh_quest_service()
+        return self._fresh_memory_service().list_cards(
             scope="quest",
-            quest_root=self.app.quest_service._quest_root(quest_id),
+            quest_root=quest_service._quest_root(quest_id),
         )
 
     def documents(self, quest_id: str) -> list[dict]:
@@ -723,7 +811,13 @@ npm --prefix src/ui run build</pre>
         query = self.parse_query(path)
         revision = ((query.get("revision") or [""])[0] or "").strip() or None
         mode = ((query.get("mode") or [""])[0] or "").strip() or None
-        return self.app.quest_service.explorer(quest_id, revision=revision, mode=mode)
+        profile = ((query.get("profile") or [""])[0] or "").strip() or None
+        return self.app.quest_service.explorer(
+            quest_id,
+            revision=revision,
+            mode=mode,
+            profile=profile,
+        )
 
     def quest_search(self, quest_id: str, path: str) -> dict:
         query = self.parse_query(path)
@@ -735,21 +829,22 @@ npm --prefix src/ui run build</pre>
         return self.app.quest_service.search_files(quest_id, term=term, limit=limit)
 
     def document_asset(self, quest_id: str, path: str) -> tuple[int, dict, bytes]:
+        quest_service = self._fresh_quest_service()
         query = self.parse_query(path)
         document_id = (query.get("document_id") or [""])[0].strip()
         if not document_id:
             return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"`document_id` is required."
         if document_id.startswith("git::"):
-            quest_root = self.app.quest_service._quest_root(quest_id)
-            revision, relative = self.app.quest_service._parse_git_document_id(document_id)
-            if not self.app.quest_service._git_revision_exists(quest_root, revision):
+            quest_root = quest_service._quest_root(quest_id)
+            revision, relative = quest_service._parse_git_document_id(document_id)
+            if not quest_service._git_revision_exists(quest_root, revision):
                 return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
             file_path = Path(relative)
             mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-            content = self.app.quest_service._read_git_bytes(quest_root, revision, relative)
+            content = quest_service._read_git_bytes(quest_root, revision, relative)
             return 200, self._asset_headers(mime_type), content
-        path, _writable, _scope, _source_kind = self.app.quest_service._resolve_document(
-            self.app.quest_service._quest_root(quest_id),
+        path, _writable, _scope, _source_kind = quest_service._resolve_document(
+            quest_service._quest_root(quest_id),
             document_id,
         )
         if not path.exists() or not path.is_file():
@@ -758,7 +853,7 @@ npm --prefix src/ui run build</pre>
         return 200, self._asset_headers(mime_type), path.read_bytes()
 
     def document_open(self, quest_id: str, body: dict) -> dict:
-        return self.app.quest_service.open_document(quest_id, body["document_id"])
+        return self._fresh_quest_service().open_document(quest_id, body["document_id"])
 
     def document_asset_upload(self, quest_id: str, body: dict) -> dict:
         document_id = str(body.get("document_id") or "").strip()
@@ -792,6 +887,57 @@ npm --prefix src/ui run build</pre>
             body["content"],
             previous_revision=body.get("revision"),
         )
+
+    def latex_init(self, project_id: str, body: dict) -> dict:
+        return self.app.latex_service.init_project(
+            project_id,
+            name=body.get("name", ""),
+            parent_id=body.get("parent_id"),
+            template=body.get("template"),
+            compiler=body.get("compiler"),
+        )
+
+    def latex_compile(self, project_id: str, folder_id: str, body: dict) -> dict:
+        return self.app.latex_service.compile(
+            project_id,
+            unquote(folder_id),
+            compiler=body.get("compiler"),
+            main_file_id=body.get("main_file_id"),
+            stop_on_first_error=body.get("stop_on_first_error"),
+            auto=body.get("auto"),
+        )
+
+    def latex_builds(self, project_id: str, folder_id: str, path: str) -> list[dict]:
+        query = self.parse_query(path)
+        limit_raw = ((query.get("limit") or ["10"])[0] or "10").strip()
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            limit = 10
+        return self.app.latex_service.list_builds(project_id, unquote(folder_id), limit=limit)
+
+    def latex_build(self, project_id: str, folder_id: str, build_id: str) -> dict:
+        return self.app.latex_service.get_build(project_id, unquote(folder_id), build_id)
+
+    def latex_build_pdf(self, project_id: str, folder_id: str, build_id: str) -> tuple[int, dict, bytes]:
+        payload, file_name = self.app.latex_service.get_build_pdf(project_id, unquote(folder_id), build_id)
+        headers = {
+            **self._asset_headers("application/pdf"),
+            "Content-Disposition": f'inline; filename="{file_name}"',
+        }
+        return 200, headers, payload
+
+    def latex_build_log(self, project_id: str, folder_id: str, build_id: str) -> tuple[int, dict, bytes]:
+        text = self.app.latex_service.get_build_log_text(project_id, unquote(folder_id), build_id)
+        return 200, self._asset_headers("text/plain; charset=utf-8"), text.encode("utf-8")
+
+    def latex_archive(self, project_id: str, folder_id: str) -> tuple[int, dict, bytes]:
+        payload, file_name = self.app.latex_service.create_sources_archive(project_id, unquote(folder_id))
+        headers = {
+            **self._asset_headers("application/zip"),
+            "Content-Disposition": f'attachment; filename="{file_name}"',
+        }
+        return 200, headers, payload
 
     def chat(self, quest_id: str, body: dict) -> dict:
         text = body.get("text", "").strip()
@@ -1014,6 +1160,9 @@ npm --prefix src/ui run build</pre>
             model=body.get("model") or runner_cfg.get("model", "gpt-5.4"),
             approval_policy=runner_cfg.get("approval_policy", "on-request"),
             sandbox_mode=runner_cfg.get("sandbox_mode", "workspace-write"),
+            turn_reason=body.get("turn_reason") or "user_message",
+            reasoning_effort=body.get("model_reasoning_effort")
+            or runner_cfg.get("model_reasoning_effort", "xhigh"),
         )
         result = runner.run(request)
         if result.output_text:
@@ -1096,6 +1245,17 @@ npm --prefix src/ui run build</pre>
             },
         }
 
+    def docs_asset(self, asset_path: str) -> tuple[int, dict, bytes]:
+        docs_root = self.app.repo_root / "docs"
+        relative = unquote(str(asset_path or "").strip())
+        if not relative:
+            return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
+        path = resolve_within(docs_root, relative)
+        if not path.exists() or not path.is_file():
+            return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return 200, self._asset_headers(mime_type), path.read_bytes()
+
     def config_files(self) -> list[dict]:
         return [
             {
@@ -1164,9 +1324,17 @@ npm --prefix src/ui run build</pre>
         return self.app.config_manager.test_named_text(body["name"], body["content"], live=bool(body.get("live", True)))
 
     def asset(self, asset_path: str) -> tuple[int, dict, bytes]:
-        asset_root = self.app.repo_root / "assets"
-        path = resolve_within(asset_root, asset_path)
-        if not path.exists() or not path.is_file():
+        candidate_roots = [
+            self.app.repo_root / "src" / "ui" / "public" / "assets",
+            self.app.repo_root / "assets",
+        ]
+        path = None
+        for root in candidate_roots:
+            candidate = resolve_within(root, asset_path)
+            if candidate.exists() and candidate.is_file():
+                path = candidate
+                break
+        if path is None:
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return 200, {"Content-Type": mime_type}, path.read_bytes()

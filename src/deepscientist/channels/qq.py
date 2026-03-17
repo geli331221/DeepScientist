@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..connector_runtime import build_discovered_target, merge_discovered_targets
+from ..connector_runtime import build_discovered_target, conversation_identity_key, merge_discovered_targets, parse_conversation_id
 from ..bridges import get_connector_bridge
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, utc_now, write_json
 from .base import BaseChannel
@@ -12,6 +12,8 @@ from .base import BaseChannel
 class QQRelayChannel(BaseChannel):
     name = "qq"
     display_mode = "user_facing_only"
+    recent_conversation_limit = 20
+    recent_event_limit = 12
 
     def __init__(self, home: Path, config: dict[str, Any] | None = None) -> None:
         super().__init__(home)
@@ -26,20 +28,40 @@ class QQRelayChannel(BaseChannel):
     def send(self, payload: dict[str, Any]) -> dict[str, Any]:
         formatted = self._format_outbound(payload)
         record = {"sent_at": utc_now(), **formatted}
-        append_jsonl(self.outbox_path, record)
         try:
             delivery = self._deliver(record)
         except Exception as exc:  # pragma: no cover - defensive transport guard
             delivery = {
                 "ok": False,
+                "queued": False,
                 "error": str(exc),
                 "transport": "qq-http",
             }
-        if delivery is not None:
-            record["delivery"] = delivery
+        if not isinstance(delivery, dict):
+            delivery = {
+                "ok": False,
+                "queued": False,
+                "error": "QQ outbound delivery has no active transport.",
+                "transport": "qq-http",
+            }
+        else:
+            delivery = {
+                **delivery,
+                "ok": bool(delivery.get("ok", False)),
+                "queued": bool(delivery.get("queued", False)),
+                "transport": str(delivery.get("transport") or "qq-http"),
+            }
+        record["delivery"] = delivery
+        append_jsonl(self.outbox_path, record)
+        self._remember_conversation(
+            conversation_id=record.get("conversation_id"),
+            updated_at=str(record.get("sent_at") or utc_now()),
+            source="outbound_delivery",
+            quest_id=str(record.get("quest_id") or "").strip() or None,
+        )
         return {
-            "ok": delivery is None or delivery.get("ok", False),
-            "queued": True,
+            "ok": bool(delivery.get("ok", False)),
+            "queued": bool(delivery.get("queued", False)),
             "channel": self.name,
             "payload": record,
             "delivery": delivery,
@@ -50,15 +72,21 @@ class QQRelayChannel(BaseChannel):
 
     def status(self) -> dict[str, Any]:
         bindings = self.list_bindings()
-        state = read_json(self.state_path, {})
+        state = self._read_state()
         gateway_state = read_json(self.root / "gateway.json", {})
-        last_conversation_id = str((state or {}).get("last_conversation_id") or "").strip() or None
+        gateway_last_conversation_id = (
+            str((gateway_state or {}).get("last_conversation_id") or "").strip() or None
+            if isinstance(gateway_state, dict)
+            else None
+        )
+        last_conversation_id = str((state or {}).get("last_conversation_id") or gateway_last_conversation_id or "").strip() or None
         main_chat_id = str(self.config.get("main_chat_id") or "").strip() or None
         default_conversation_id = (
             f"qq:direct:{main_chat_id}"
             if main_chat_id
             else (last_conversation_id or (bindings[0]["conversation_id"] if bindings else None))
         )
+        recent_conversations = self._recent_conversations(state)
         discovered_targets = merge_discovered_targets(
             [
                 build_discovered_target(
@@ -66,11 +94,22 @@ class QQRelayChannel(BaseChannel):
                     source="saved_main_chat",
                     is_default=bool(main_chat_id),
                 ),
+                *[
+                    build_discovered_target(
+                        item.get("conversation_id"),
+                        source=str(item.get("source") or "recent_activity"),
+                        is_default=item.get("conversation_id") == default_conversation_id,
+                        label=str(item.get("label") or "").strip() or None,
+                        quest_id=str(item.get("quest_id") or "").strip() or None,
+                        updated_at=str(item.get("updated_at") or "").strip() or None,
+                    )
+                    for item in recent_conversations
+                ],
                 build_discovered_target(
-                    last_conversation_id,
+                    gateway_last_conversation_id,
                     source="recent_runtime_activity",
-                    is_default=last_conversation_id == default_conversation_id,
-                    updated_at=str((state or {}).get("updated_at") or "").strip() or None,
+                    is_default=gateway_last_conversation_id == default_conversation_id,
+                    updated_at=str((gateway_state or {}).get("updated_at") or "").strip() or None,
                 ),
                 *[
                     build_discovered_target(
@@ -113,6 +152,8 @@ class QQRelayChannel(BaseChannel):
             "ignored_count": len(read_jsonl(self.ignored_path)),
             "binding_count": len(bindings),
             "bindings": bindings,
+            "recent_conversations": recent_conversations,
+            "recent_events": self._recent_events(),
             "target_count": len(discovered_targets),
             "default_target": default_target,
             "discovered_targets": discovered_targets,
@@ -124,11 +165,15 @@ class QQRelayChannel(BaseChannel):
             append_jsonl(self.ignored_path, {"received_at": utc_now(), **normalized})
             return {"ok": True, "accepted": False, "normalized": normalized}
         append_jsonl(self.inbox_path, {"received_at": utc_now(), **normalized})
-        state = read_json(self.state_path, {})
-        state["last_message_id"] = normalized.get("message_id")
-        state["last_conversation_id"] = normalized.get("conversation_id")
-        state["updated_at"] = utc_now()
-        write_json(self.state_path, state)
+        self._remember_conversation(
+            conversation_id=normalized.get("conversation_id"),
+            updated_at=str(normalized.get("created_at") or utc_now()),
+            source="recent_inbound",
+            sender_id=str(normalized.get("sender_id") or "").strip() or None,
+            sender_name=str(normalized.get("sender_name") or "").strip() or None,
+            quest_id=str(normalized.get("quest_id") or "").strip() or None,
+            message_id=str(normalized.get("message_id") or "").strip() or None,
+        )
         return {"ok": True, "accepted": True, "normalized": normalized}
 
     def normalize_inbound(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -180,6 +225,7 @@ class QQRelayChannel(BaseChannel):
         chat_key = group_id if chat_type == "group" else direct_id
         conversation_id = str(payload.get("conversation_id") or data.get("conversation_id") or f"qq:{chat_type}:{chat_key or 'unknown'}")
         message_id = str(payload.get("message_id") or data.get("message_id") or data.get("id") or generate_id("qqmsg"))
+        attachments = self._normalize_inbound_attachments(payload.get("attachments") or data.get("attachments"))
 
         mentioned = bool(
             payload.get("mentioned")
@@ -214,6 +260,7 @@ class QQRelayChannel(BaseChannel):
             "sender_name": sender_name,
             "mentioned": mentioned,
             "is_command": is_command,
+            "attachments": attachments,
             "created_at": utc_now(),
             "raw_event": payload,
         }
@@ -227,6 +274,12 @@ class QQRelayChannel(BaseChannel):
         }
         bindings["bindings"] = binding_map
         write_json(self.bindings_path, bindings)
+        self._remember_conversation(
+            conversation_id=conversation_id,
+            updated_at=str(binding_map[conversation_id].get("updated_at") or utc_now()),
+            source="quest_binding",
+            quest_id=quest_id,
+        )
         return binding_map[conversation_id]
 
     def unbind_conversation(self, conversation_id: str, *, quest_id: str | None = None) -> bool:
@@ -299,12 +352,15 @@ class QQRelayChannel(BaseChannel):
                 fragments.append(f"Reason: {reason}")
             text = "\n".join(fragments)
         attachments = self._normalize_attachments(payload.get("attachments"))
+        conversation_id = str(payload.get("conversation_id") or "").strip()
         return {
-            "conversation_id": payload.get("conversation_id"),
-            "reply_to_message_id": payload.get("reply_to_message_id"),
+            "conversation_id": conversation_id,
+            "reply_to_message_id": payload.get("reply_to_message_id") or self._reply_to_message_id_for(conversation_id),
             "kind": kind,
             "text": text,
             "attachments": attachments,
+            "surface_actions": [dict(item) for item in (payload.get("surface_actions") or []) if isinstance(item, dict)],
+            "connector_hints": dict(payload.get("connector_hints")) if isinstance(payload.get("connector_hints"), dict) else {},
             "quest_id": payload.get("quest_id"),
             "quest_root": payload.get("quest_root"),
             "importance": payload.get("importance"),
@@ -323,11 +379,228 @@ class QQRelayChannel(BaseChannel):
                 attachments.append(dict(item))
         return attachments
 
+    @staticmethod
+    def _normalize_inbound_attachments(value: Any) -> list[dict[str, Any]]:
+        attachments: list[dict[str, Any]] = []
+        if not isinstance(value, list):
+            return attachments
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            normalized = {
+                "kind": str(item.get("kind") or item.get("content_type") or "remote").strip() or "remote",
+                "name": str(item.get("filename") or item.get("file_name") or item.get("name") or "").strip() or None,
+                "content_type": str(item.get("content_type") or item.get("mime_type") or "").strip() or None,
+                "url": str(item.get("url") or item.get("download_url") or "").strip() or None,
+                "size_bytes": item.get("size") if isinstance(item.get("size"), int) else item.get("size_bytes"),
+                "attachment_id": str(item.get("id") or item.get("attachment_id") or "").strip() or None,
+            }
+            extras = {
+                key: value
+                for key, value in item.items()
+                if key
+                not in {
+                    "kind",
+                    "content_type",
+                    "mime_type",
+                    "filename",
+                    "file_name",
+                    "name",
+                    "url",
+                    "download_url",
+                    "size",
+                    "size_bytes",
+                    "id",
+                    "attachment_id",
+                }
+            }
+            if extras:
+                normalized["raw"] = extras
+            attachments.append({key: value for key, value in normalized.items() if value is not None})
+        return attachments
+
     def _deliver(self, record: dict[str, Any]) -> dict[str, Any] | None:
         bridge = get_connector_bridge(self.name)
         if bridge is not None:
             return bridge.deliver(record, self.config)
         return None
+
+    def _read_state(self) -> dict[str, Any]:
+        payload = read_json(self.state_path, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_state(self, payload: dict[str, Any]) -> None:
+        write_json(self.state_path, payload)
+
+    def _recent_conversations(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        items = state.get("recent_conversations")
+        if not isinstance(items, list):
+            return []
+        merged: dict[str, dict[str, Any]] = {}
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            conversation_id = str(raw.get("conversation_id") or "").strip()
+            if not conversation_id:
+                continue
+            identity = conversation_identity_key(conversation_id)
+            existing = merged.get(identity)
+            current = dict(raw)
+            if existing is None:
+                merged[identity] = current
+                continue
+            if str(current.get("updated_at") or "") >= str(existing.get("updated_at") or ""):
+                merged[identity] = {**existing, **current}
+            else:
+                merged[identity] = {**current, **existing}
+        ordered = sorted(
+            merged.values(),
+            key=lambda item: (str(item.get("updated_at") or ""), str(item.get("conversation_id") or "")),
+            reverse=True,
+        )
+        return ordered[: self.recent_conversation_limit]
+
+    def _remember_conversation(
+        self,
+        *,
+        conversation_id: Any,
+        updated_at: str,
+        source: str,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        quest_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        entry = self._build_recent_conversation_entry(
+            conversation_id=conversation_id,
+            updated_at=updated_at,
+            source=source,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            quest_id=quest_id,
+            message_id=message_id,
+        )
+        if entry is None:
+            return
+        state = self._read_state()
+        state["last_conversation_id"] = entry["conversation_id"]
+        if message_id:
+            state["last_message_id"] = message_id
+        state["updated_at"] = updated_at
+        state["recent_conversations"] = self._recent_conversations(
+            {
+                "recent_conversations": [entry, *list(state.get("recent_conversations") or [])],
+            }
+        )
+        self._write_state(state)
+
+    def _build_recent_conversation_entry(
+        self,
+        *,
+        conversation_id: Any,
+        updated_at: str,
+        source: str,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        quest_id: str | None = None,
+        message_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        parsed = parse_conversation_id(conversation_id)
+        if parsed is None:
+            return None
+        payload: dict[str, Any] = {
+            **parsed,
+            "label": self._conversation_label(
+                chat_type=parsed["chat_type"],
+                chat_id=parsed["chat_id"],
+                sender_name=sender_name,
+            ),
+            "updated_at": updated_at,
+            "source": source,
+        }
+        if sender_id:
+            payload["sender_id"] = sender_id
+        if sender_name:
+            payload["sender_name"] = sender_name
+        if quest_id:
+            payload["quest_id"] = quest_id
+        if message_id:
+            payload["message_id"] = message_id
+        return payload
+
+    @staticmethod
+    def _conversation_label(*, chat_type: str, chat_id: str, sender_name: str | None = None) -> str:
+        if sender_name and str(chat_type or "").strip().lower() == "direct":
+            return f"{sender_name} · {chat_id}"
+        return f"{chat_type} · {chat_id}"
+
+    def _recent_events(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for record in read_jsonl(self.inbox_path)[-self.recent_event_limit :]:
+            event = self._build_recent_event("inbound", record)
+            if event is not None:
+                events.append(event)
+        for record in read_jsonl(self.outbox_path)[-self.recent_event_limit :]:
+            event = self._build_recent_event("outbound", record)
+            if event is not None:
+                events.append(event)
+        for record in read_jsonl(self.ignored_path)[-self.recent_event_limit :]:
+            event = self._build_recent_event("ignored", record)
+            if event is not None:
+                events.append(event)
+        events.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("conversation_id") or "")), reverse=True)
+        return events[: self.recent_event_limit]
+
+    def _reply_to_message_id_for(self, conversation_id: str) -> str | None:
+        normalized = str(conversation_id or "").strip()
+        if not normalized:
+            return None
+        identity = conversation_identity_key(normalized)
+        state = self._read_state()
+        for item in self._recent_conversations(state):
+            if conversation_identity_key(str(item.get("conversation_id") or "").strip()) != identity:
+                continue
+            message_id = str(item.get("message_id") or "").strip()
+            if message_id:
+                return message_id
+        return None
+
+    def _build_recent_event(self, event_type: str, record: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(record, dict):
+            return None
+        conversation_id = str(record.get("conversation_id") or "").strip()
+        parsed = parse_conversation_id(conversation_id) if conversation_id else None
+        delivery = record.get("delivery") if isinstance(record.get("delivery"), dict) else {}
+        chat_type = str((parsed or {}).get("chat_type") or record.get("chat_type") or "direct")
+        chat_id = str((parsed or {}).get("chat_id") or record.get("chat_id") or "unknown")
+        return {
+            "event_type": event_type,
+            "created_at": str(record.get("received_at") or record.get("sent_at") or record.get("created_at") or record.get("updated_at") or utc_now()),
+            "conversation_id": conversation_id or None,
+            "chat_type": chat_type,
+            "chat_id": chat_id,
+            "label": self._conversation_label(
+                chat_type=chat_type,
+                chat_id=chat_id,
+                sender_name=str(record.get("sender_name") or "").strip() or None,
+            ),
+            "kind": str(record.get("kind") or "").strip() or None,
+            "message": self._event_preview(
+                str(record.get("text") or record.get("message") or record.get("raw_text") or "").strip()
+            )
+            or None,
+            "reason": str(record.get("reason") or "").strip() or None,
+            "ok": bool(delivery.get("ok", False)) if event_type == "outbound" else None,
+            "queued": bool(delivery.get("queued", False)) if event_type == "outbound" else None,
+            "transport": str(delivery.get("transport") or "").strip() or None,
+        }
+
+    @staticmethod
+    def _event_preview(text: str, *, limit: int = 140) -> str:
+        normalized = " ".join(str(text or "").split())
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[: max(limit - 1, 0)].rstrip()}…"
 
     def _connection_state(self, *, main_chat_id: str | None, last_conversation_id: str | None) -> str:
         if not bool(self.config.get("enabled", False)):

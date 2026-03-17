@@ -224,6 +224,12 @@ def test_git_branch_canvas_reads_artifacts_from_worktrees(temp_home: Path) -> No
     analysis_branch = campaign["slices"][0]["branch"]
 
     assert nodes[idea["branch"]]["branch_kind"] == "idea"
+    assert nodes[idea["branch"]]["branch_no"] == "001"
+    assert nodes[idea["branch"]]["idea_title"] == "Adapter route"
+    assert nodes[idea["branch"]]["lineage_intent"] == "continue_line"
+    assert nodes[idea["branch"]]["parent_branch"] == "main"
+    assert nodes[idea["branch"]]["idea_draft_path"].endswith("/draft.md")
+    assert nodes[idea["branch"]]["foundation_ref"]["kind"] == "current_head"
     assert nodes[analysis_branch]["branch_kind"] == "analysis"
     assert nodes[analysis_branch]["latest_metric"]["key"] == "acc"
     assert nodes[analysis_branch]["worktree_root"] == campaign["slices"][0]["worktree_root"]
@@ -301,3 +307,76 @@ def test_git_branch_canvas_marks_breakthrough_and_metrics_timeline(temp_home: Pa
     assert acc_series["points"][0]["value"] == 0.86
     assert acc_series["points"][0]["breakthrough"] is True
     assert acc_series["baselines"][0]["value"] == 0.8
+
+
+def test_git_branch_canvas_parents_follow_up_analysis_to_current_workspace_node(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("canvas current workspace parent quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root)
+
+    parent = artifact.submit_idea(
+        quest_root,
+        title="Parent route",
+        problem="Need a stable node for analysis.",
+        hypothesis="This route will own the follow-up analysis branch.",
+        mechanism="Create the first durable route.",
+        expected_gain="A parent node for the canvas test.",
+        decision_reason="Use this route first.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="run-parent",
+        title="Parent run",
+        hypothesis="The parent route is good enough.",
+        setup="Standard setup.",
+        execution="Executed the main run.",
+        results="Needs one more follow-up experiment.",
+        conclusion="Launch a child analysis branch from this node.",
+        metrics_summary={"acc": 0.84},
+        metric_rows=[{"metric_id": "acc", "value": 0.84}],
+    )
+    head = artifact.submit_idea(
+        quest_root,
+        title="Latest head route",
+        problem="Create a newer head branch.",
+        hypothesis="This becomes the head, but not the active canvas parent.",
+        mechanism="Branch a newer route.",
+        expected_gain="Separate current head from current workspace.",
+        decision_reason="Advance the head branch.",
+    )
+    quest_service.update_research_state(
+        quest_root,
+        active_idea_id=parent["idea_id"],
+        current_workspace_branch=parent["branch"],
+        current_workspace_root=parent["worktree_root"],
+        workspace_mode="idea",
+    )
+
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Follow-up child branch",
+        campaign_goal="Ensure the canvas edge comes from the current workspace node.",
+        slices=[
+            {
+                "slice_id": "follow-up",
+                "title": "Follow-up",
+                "goal": "Create exactly one child analysis branch.",
+                "required_changes": "One isolated follow-up change.",
+                "metric_contract": "Keep the same evaluation contract.",
+            }
+        ],
+    )
+    analysis_branch = campaign["slices"][0]["branch"]
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+
+    assert head["branch"] != parent["branch"]
+    assert nodes[analysis_branch]["parent_ref"] == parent["branch"]
+    assert nodes[analysis_branch]["parent_branch_recorded"] == parent["branch"]

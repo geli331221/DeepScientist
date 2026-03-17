@@ -21,6 +21,7 @@ QUEST_DIRECTORIES = (
     "experiments/main",
     "handoffs",
     "literature",
+    "userfiles",
     "tmp",
     "memory/decisions",
     "memory/episodes",

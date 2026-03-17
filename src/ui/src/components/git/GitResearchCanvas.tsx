@@ -250,6 +250,16 @@ function metricLabel(node: GitBranchNode) {
   return `${metric.key}: ${metric.value}`
 }
 
+function lineageLabel(node: GitBranchNode) {
+  if (node.lineage_intent === 'continue_line') {
+    return 'continue'
+  }
+  if (node.lineage_intent === 'branch_alternative') {
+    return 'alternative'
+  }
+  return null
+}
+
 function FileChangeButton({
   file,
   selected,
@@ -807,6 +817,17 @@ export function GitResearchCanvas({
                   const meta = kindMeta(node.branch_kind)
                   const Icon = meta.icon
                   const metric = metricLabel(node)
+                  const lineage = lineageLabel(node)
+                  const primaryBadgeLabel = node.current
+                    ? 'current'
+                    : node.breakthrough
+                      ? node.breakthrough_level || 'breakthrough'
+                      : meta.label
+                  const summaryLine =
+                    node.subject ||
+                    node.latest_summary ||
+                    metric ||
+                    (node.parent_ref ? `Based on ${node.parent_ref}` : 'No branch summary yet.')
                   return (
                     <button
                       key={node.ref}
@@ -814,7 +835,7 @@ export function GitResearchCanvas({
                       data-node-card="true"
                       onClick={() => void openNode(node)}
                       className={cn(
-                        'absolute rounded-[26px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(243,239,233,0.95))] p-4 text-left shadow-card transition duration-200 hover:-translate-y-0.5 hover:border-black/[0.14] dark:border-white/[0.12] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))]',
+                        'absolute rounded-[24px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(243,239,233,0.95))] p-3.5 text-left shadow-card transition duration-200 hover:-translate-y-0.5 hover:border-black/[0.14] dark:border-white/[0.12] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))]',
                         node.current && 'ring-1 ring-[rgba(143,163,184,0.42)]',
                         node.breakthrough &&
                           'shadow-[0_0_0_1px_rgba(163,135,58,0.18),0_0_0_8px_rgba(163,135,58,0.10),0_18px_42px_-34px_rgba(163,135,58,0.34)]'
@@ -826,10 +847,10 @@ export function GitResearchCanvas({
                         minHeight: node.height,
                       }}
                     >
-                      <div className="mb-3 flex items-start gap-3">
+                      <div className="flex items-start gap-3">
                         <div
                           className={cn(
-                            'flex h-10 w-10 shrink-0 items-center justify-center rounded-[18px] border border-black/10 dark:border-white/[0.12]',
+                            'flex h-9 w-9 shrink-0 items-center justify-center rounded-[16px] border border-black/10 dark:border-white/[0.12]',
                             meta.tone
                           )}
                         >
@@ -838,24 +859,13 @@ export function GitResearchCanvas({
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <div className="truncate text-sm font-semibold text-foreground">{node.ref}</div>
-                            <Badge>{meta.label}</Badge>
-                            {node.current ? <Badge>current</Badge> : null}
-                            {node.breakthrough ? (
-                              <Badge>{node.breakthrough_level || 'breakthrough'}</Badge>
-                            ) : null}
+                            <Badge>{primaryBadgeLabel}</Badge>
+                            {lineage ? <Badge>{lineage}</Badge> : null}
                           </div>
-                          <div className="mt-1 text-xs text-muted-foreground">{node.subject || node.latest_summary || 'No branch summary yet.'}</div>
+                          <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                            {summaryLine}
+                          </div>
                         </div>
-                      </div>
-
-                      <div className="space-y-2 text-xs text-muted-foreground">
-                        <div className="flex flex-wrap gap-2">
-                          <span className="rounded-full bg-black/[0.04] px-2 py-1 dark:bg-white/[0.06]">{node.commit_count || 0} commits</span>
-                          <span className="rounded-full bg-black/[0.04] px-2 py-1 dark:bg-white/[0.06]">↑ {node.ahead || 0}</span>
-                          <span className="rounded-full bg-black/[0.04] px-2 py-1 dark:bg-white/[0.06]">↓ {node.behind || 0}</span>
-                        </div>
-                        {metric ? <div className="text-foreground/80">{metric}</div> : null}
-                        {node.parent_ref ? <div>From `{node.parent_ref}`</div> : null}
                       </div>
                     </button>
                   )
@@ -936,6 +946,7 @@ export function GitResearchCanvas({
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="truncate text-lg font-semibold">{activeNode.ref}</div>
                       <Badge>{kindMeta(activeNode.branch_kind).label}</Badge>
+                      {lineageLabel(activeNode) ? <Badge>{lineageLabel(activeNode)}</Badge> : null}
                       {activeNode.compare_base ? <Badge>base: {activeNode.compare_base}</Badge> : null}
                       {activeNode.current ? <Badge>current</Badge> : null}
                     </div>
@@ -1002,6 +1013,7 @@ export function GitResearchCanvas({
                     <div className="rounded-[24px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(243,239,233,0.96))] p-4 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))]">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge>{kindMeta(activeNode.branch_kind).label}</Badge>
+                        {lineageLabel(activeNode) ? <Badge>{lineageLabel(activeNode)}</Badge> : null}
                         {metricLabel(activeNode) ? <Badge>{metricLabel(activeNode)}</Badge> : null}
                         {activeNode.current ? <Badge>current</Badge> : null}
                       </div>

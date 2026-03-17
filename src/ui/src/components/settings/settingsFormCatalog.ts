@@ -45,7 +45,6 @@ export const configSections: SettingsSection[] = [
         whereToGet: 'Choose the runner id that should execute quests most of the time.',
         options: [
           { label: 'Codex', value: 'codex' },
-          { label: 'Claude', value: 'claude' },
         ],
       },
       {
@@ -234,6 +233,36 @@ export const configSections: SettingsSection[] = [
     ],
   },
   {
+    id: 'bootstrap',
+    title: 'Codex bootstrap',
+    description: 'First-start Codex readiness gate. DeepScientist flips this to ready after the startup hello probe succeeds once.',
+    fields: [
+      {
+        key: 'bootstrap.codex_ready',
+        label: 'Codex ready',
+        kind: 'boolean',
+        description: 'Whether the startup Codex hello probe has already succeeded on this home directory.',
+        whereToGet: 'Keep this false if you want DeepScientist to re-check Codex login on the next daemon start. It flips to true automatically after a successful startup probe.',
+      },
+      {
+        key: 'bootstrap.codex_last_checked_at',
+        label: 'Last checked at',
+        kind: 'text',
+        placeholder: '2026-03-15T10:00:00Z',
+        description: 'Timestamp of the latest startup Codex readiness probe.',
+        whereToGet: 'This is written automatically after each startup probe. You normally do not need to edit it by hand.',
+      },
+      {
+        key: 'bootstrap.codex_last_result.summary',
+        label: 'Last probe summary',
+        kind: 'text',
+        placeholder: 'Codex startup probe completed.',
+        description: 'Short summary of the last startup Codex probe result.',
+        whereToGet: 'DeepScientist writes this automatically. Use it to understand why startup was blocked last time.',
+      },
+    ],
+  },
+  {
     id: 'connector-behavior',
     title: 'Connector policy',
     description: 'Global delivery behavior shared across connector integrations.',
@@ -412,7 +441,7 @@ export const runnerCatalog: RunnerCatalogEntry[] = [
   {
     name: 'claude',
     label: 'Claude',
-    description: 'Reserved secondary runner slot. Keep disabled unless you intentionally wire this path.',
+    description: 'TODO / reserved runner slot. Keep disabled in the current release because it is not runnable yet.',
   },
 ]
 
@@ -449,6 +478,21 @@ export const runnerFields: SettingsField[] = [
     whereToGet: 'Use the model id accepted by the selected runner.',
   },
   {
+    key: 'model_reasoning_effort',
+    label: 'Reasoning effort',
+    kind: 'select',
+    description: 'Default reasoning intensity used by the runner when the request does not override it.',
+    whereToGet: 'Use the effort level accepted by the selected runner; Codex supports up to `xhigh`.',
+    options: [
+      { label: 'Inherit', value: '' },
+      { label: 'Minimal', value: 'minimal' },
+      { label: 'Low', value: 'low' },
+      { label: 'Medium', value: 'medium' },
+      { label: 'High', value: 'high' },
+      { label: 'XHigh', value: 'xhigh' },
+    ],
+  },
+  {
     key: 'approval_policy',
     label: 'Approval policy',
     kind: 'select',
@@ -472,6 +516,45 @@ export const runnerFields: SettingsField[] = [
       { label: 'Workspace write', value: 'workspace-write' },
       { label: 'Danger full access', value: 'danger-full-access' },
     ],
+  },
+  {
+    key: 'retry_on_failure',
+    label: 'Retry on failure',
+    kind: 'boolean',
+    description: 'Automatically retry a failed runner turn instead of immediately ending the quest turn as an error.',
+    whereToGet: 'Keep enabled for Codex so transient CLI or transport failures can recover automatically.',
+  },
+  {
+    key: 'retry_max_attempts',
+    label: 'Max attempts',
+    kind: 'number',
+    placeholder: '5',
+    description: 'Upper bound on total attempts for one quest turn, including the first run.',
+    whereToGet: 'Use a small number; DeepScientist hard-caps this at `5` even if a larger value is entered.',
+  },
+  {
+    key: 'retry_initial_backoff_sec',
+    label: 'Initial backoff (s)',
+    kind: 'number',
+    placeholder: '1',
+    description: 'Delay before the first retry after a failed attempt.',
+    whereToGet: 'Use `1` for normal local recovery; lower it only if you want retries to happen almost immediately.',
+  },
+  {
+    key: 'retry_backoff_multiplier',
+    label: 'Backoff multiplier',
+    kind: 'number',
+    placeholder: '2',
+    description: 'Multiplier applied to each later retry delay to form exponential backoff.',
+    whereToGet: 'Use `2` for 1s → 2s → 4s → 8s style retry spacing.',
+  },
+  {
+    key: 'retry_max_backoff_sec',
+    label: 'Max backoff (s)',
+    kind: 'number',
+    placeholder: '8',
+    description: 'Maximum delay allowed between retries after exponential growth is applied.',
+    whereToGet: 'Use a small ceiling so transient failures recover quickly without stalling the quest for too long.',
   },
   {
     key: 'status',

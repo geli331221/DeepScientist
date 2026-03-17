@@ -220,6 +220,14 @@
   padding: 10px 12px 12px;
 }
 
+.cli-inline-terminal-bare {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
 .cli-inline-terminal-running {
   animation: cliInlineBreath 2.6s ease-in-out infinite;
 }
@@ -305,6 +313,12 @@
   max-height: 120px;
 }
 
+.cli-inline-terminal-bare .cli-inline-terminal-body {
+  height: 148px;
+  max-height: 148px;
+  width: 100%;
+}
+
 .cli-inline-terminal .cli-terminal {
   border-radius: 12px;
 }
@@ -322,6 +336,13 @@
   font-family: var(--cli-font-mono);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.cli-inline-terminal-bare .cli-inline-terminal-read,
+.cli-inline-terminal-bare .cli-inline-terminal-note {
+  height: 148px;
+  max-height: 148px;
+  width: 100%;
 }
 
 .cli-inline-terminal-log {
@@ -342,15 +363,6 @@
   color: rgba(231, 226, 215, 0.65);
 }
 
-.cli-inline-terminal-hint {
-  font-size: 10px;
-  color: rgba(231, 226, 215, 0.6);
-}
-
-.cli-inline-terminal-hint-warning {
-  color: rgba(201, 176, 132, 0.9);
-}
-
 .cli-progress {
   --cli-progress-track: rgba(255, 255, 255, 0.08);
   --cli-progress-bar: linear-gradient(90deg, rgba(201, 176, 132, 0.9), rgba(154, 183, 160, 0.95));
@@ -363,6 +375,10 @@
 
 .cli-progress-inline {
   padding: 2px 4px 0;
+}
+
+.cli-inline-terminal-bare .cli-progress-inline {
+  padding: 0 0 2px;
 }
 
 .cli-progress-panel {

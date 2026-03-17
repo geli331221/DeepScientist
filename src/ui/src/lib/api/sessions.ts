@@ -2,7 +2,6 @@ import axios from 'axios'
 import { apiClient, getApiBaseUrl } from '@/lib/api/client'
 import { getCachedValue, setCachedValue } from '@/lib/api/cache'
 import { supportsProductApis } from '@/lib/runtime/quest-runtime'
-import { getShareSessionToken } from '@/lib/share-session'
 import type { AgentSSEEvent, ChatSurface, ExecutionTarget, PlanEventData } from '@/lib/types/chat-events'
 import {
   createQuestSession,
@@ -342,8 +341,7 @@ export async function getVncUrl(sessionId: string, expireMinutes: number = 15): 
       throw error
     }
     const userToken = window.localStorage.getItem('ds_access_token')
-    const shareToken = getShareSessionToken()
-    const token = userToken || shareToken
+    const token = userToken || null
     const query = token ? `?token=${encodeURIComponent(token)}` : ''
     return `${baseUrl}/api/v1/sessions/${sessionId}/vnc${query}`
   }

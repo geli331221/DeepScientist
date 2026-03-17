@@ -2,6 +2,7 @@
 
 import { AgentCommentBlock } from '@/components/feed/AgentCommentBlock'
 import { McpToolView } from '@/components/chat/toolViews/McpToolView'
+import { deriveMcpIdentity } from '@/lib/mcpIdentity'
 import type { ToolContent } from '@/lib/plugins/ai-manus/types'
 import type { EventMetadata } from '@/lib/types/chat-events'
 import type { AgentComment } from '@/types'
@@ -13,31 +14,6 @@ function parseStructuredValue(value?: string) {
   } catch {
     return null
   }
-}
-
-function resolveMcpIdentity(
-  toolName?: string,
-  mcpServer?: string,
-  mcpTool?: string
-): { server?: string; tool?: string } {
-  const server = typeof mcpServer === 'string' && mcpServer.trim() ? mcpServer.trim() : ''
-  const tool = typeof mcpTool === 'string' && mcpTool.trim() ? mcpTool.trim() : ''
-  if (server || tool) {
-    return {
-      ...(server ? { server } : {}),
-      ...(tool ? { tool } : {}),
-    }
-  }
-  const normalized = (toolName || '').trim().toLowerCase()
-  for (const prefix of ['memory', 'artifact', 'bash_exec']) {
-    if (normalized.startsWith(`${prefix}.`)) {
-      return {
-        server: prefix,
-        tool: normalized.slice(prefix.length + 1),
-      }
-    }
-  }
-  return {}
 }
 
 function unwrapToolResult(value: unknown): unknown {
@@ -85,7 +61,7 @@ export function QuestMcpOperation({
   const resolvedTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now()
   const parsedArgs = parseStructuredValue(args)
   const parsedOutput = unwrapToolResult(parseStructuredValue(output))
-  const resolvedIdentity = resolveMcpIdentity(toolName, mcpServer, mcpTool)
+  const resolvedIdentity = deriveMcpIdentity(toolName, mcpServer, mcpTool)
   const resolvedFunction =
     resolvedIdentity.server && resolvedIdentity.tool
       ? `mcp__${resolvedIdentity.server}__${resolvedIdentity.tool}`
@@ -126,9 +102,9 @@ export function QuestMcpOperation({
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex min-w-0 flex-col gap-2">
       {comment ? <AgentCommentBlock comment={comment} /> : null}
-      <div className="overflow-hidden rounded-[12px]">
+      <div className="min-w-0 overflow-hidden rounded-[12px]">
         <McpToolView
           toolContent={toolContent}
           live={label === 'tool_call'}

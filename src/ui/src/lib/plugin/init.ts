@@ -166,6 +166,28 @@ const latexManifest: UnifiedPluginManifest = {
   },
 };
 
+const gitDiffViewerManifest: UnifiedPluginManifest = {
+  id: "@ds/plugin-git-diff-viewer",
+  name: "Git Diff Viewer",
+  version: "1.0.0",
+  description: "View quest diff files in a centered workspace tab",
+  type: "builtin",
+  frontend: {
+    entry: "plugins/git-diff-viewer/GitDiffViewerPlugin",
+    renderMode: "react",
+    multiInstance: true,
+  },
+  contributes: {
+    tabIcon: "git-compare",
+  },
+  permissions: {
+    frontend: ["project:read", "file:read"],
+  },
+  lifecycle: {
+    activationEvents: ["onCommand:openGitDiff"],
+  },
+};
+
 /**
  * Code Viewer Plugin Manifest
  */
@@ -345,11 +367,6 @@ const markdownViewerManifest: UnifiedPluginManifest = {
         mimeTypes: ["text/markdown", "text/x-markdown"],
         priority: 98,
       },
-      {
-        extensions: [".md", ".markdown"],
-        mimeTypes: ["text/markdown", "text/x-markdown"],
-        priority: 40,
-      },
     ],
   },
   contributes: {},
@@ -463,6 +480,7 @@ export const BUILTIN_PLUGIN_MANIFESTS: UnifiedPluginManifest[] = [
   pdfMarkdownManifest,
   notebookManifest,
   latexManifest,
+  gitDiffViewerManifest,
   codeEditorManifest,
   codeViewerManifest,
   imageViewerManifest,

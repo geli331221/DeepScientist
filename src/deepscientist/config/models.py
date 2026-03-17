@@ -35,7 +35,7 @@ def default_config(home: Path) -> dict:
             "host": "0.0.0.0",
             "port": 20999,
             "auto_open_browser": True,
-            "default_mode": "both",
+            "default_mode": "web",
         },
         "logging": {
             "level": "info",
@@ -52,6 +52,11 @@ def default_config(home: Path) -> dict:
             "sync_global_on_init": True,
             "sync_quest_on_create": True,
             "sync_quest_on_open": True,
+        },
+        "bootstrap": {
+            "codex_ready": False,
+            "codex_last_checked_at": None,
+            "codex_last_result": {},
         },
         "connectors": {
             "auto_ack": True,
@@ -82,8 +87,14 @@ def default_runners() -> dict:
             "binary": "codex",
             "config_dir": "~/.codex",
             "model": "gpt-5.4",
+            "model_reasoning_effort": "xhigh",
             "approval_policy": "on-request",
             "sandbox_mode": "workspace-write",
+            "retry_on_failure": True,
+            "retry_max_attempts": 5,
+            "retry_initial_backoff_sec": 1.0,
+            "retry_backoff_multiplier": 2.0,
+            "retry_max_backoff_sec": 8.0,
             # Increase MCP tool timeout so codex can wait for long `bash_exec(mode='await', ...)`
             # or other durable MCP calls without prematurely timing out.
             # Mirrors DS_2027's `codex.mcp_tool_timeout_sec` default.
@@ -95,6 +106,7 @@ def default_runners() -> dict:
             "binary": "claude",
             "config_dir": "~/.claude",
             "model": "inherit",
+            "model_reasoning_effort": "",
             "env": {},
             "status": "reserved_todo",
         },
@@ -105,7 +117,7 @@ def default_connectors() -> dict:
     return {
         "_routing": {
             "primary_connector": None,
-            "artifact_delivery_policy": "primary_plus_local",
+            "artifact_delivery_policy": "fanout_all",
         },
         "qq": {
             "enabled": False,
@@ -117,8 +129,14 @@ def default_connectors() -> dict:
             "command_prefix": "/",
             "main_chat_id": None,
             "require_at_in_groups": True,
-            "auto_bind_dm_to_active_quest": False,
+            "auto_bind_dm_to_active_quest": True,
             "gateway_restart_on_config_change": True,
+            "auto_send_main_experiment_png": True,
+            "auto_send_analysis_summary_png": True,
+            "auto_send_slice_png": True,
+            "auto_send_paper_pdf": True,
+            "enable_markdown_send": False,
+            "enable_file_upload_experimental": False,
         },
         "telegram": {
             "enabled": False,
@@ -239,6 +257,31 @@ def default_connectors() -> dict:
             "group_allow_from": [],
             "groups": [],
             "auto_bind_dm_to_active_quest": True,
+        },
+        "lingzhu": {
+            "enabled": False,
+            "transport": "openclaw_sse",
+            "local_host": "127.0.0.1",
+            "gateway_port": 18789,
+            "public_base_url": None,
+            "auth_ak": None,
+            "agent_id": "main",
+            "include_metadata": True,
+            "request_timeout_ms": 60000,
+            "system_prompt": "",
+            "default_navigation_mode": "0",
+            "enable_follow_up": True,
+            "follow_up_max_count": 3,
+            "max_image_bytes": 5242880,
+            "session_mode": "per_user",
+            "session_namespace": "lingzhu",
+            "auto_receipt_ack": True,
+            "visible_progress_heartbeat": True,
+            "visible_progress_heartbeat_sec": 10,
+            "debug_logging": False,
+            "debug_log_payloads": False,
+            "debug_log_dir": None,
+            "enable_experimental_native_actions": False,
         },
     }
 

@@ -1,11 +1,12 @@
 import { ChevronRight, FileText, Loader2, Search } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { slugifyHeading, splitFrontmatter, MarkdownDocument } from '@/components/plugins/MarkdownDocument'
+import { slugifyHeading, splitFrontmatter } from '@/components/plugins/MarkdownDocument'
 import { ProjectsAppBar } from '@/components/projects/ProjectsAppBar'
 import type { ConfigDocumentName } from '@/components/settings/SettingsPage'
 import { HintDot } from '@/components/ui/hint-dot'
 import { Input } from '@/components/ui/input'
+import { MarkdownPreview } from './MarkdownPreview'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type { Locale, OpenDocumentPayload, QuestDocument } from '@/types'
@@ -118,8 +119,32 @@ function resolveDocsForLocale(items: QuestDocument[], locale: Locale): { items: 
 }
 
 function pickDefaultDocId(items: QuestDocument[]): string | null {
-  const preferred = items.find((item) => stripLangPrefix(item.document_id || '').endsWith('TUI_USAGE.md'))
+  const preferred = items.find((item) => stripLangPrefix(item.document_id || '').endsWith('00_QUICK_START.md'))
   return preferred?.document_id ?? items[0]?.document_id ?? null
+}
+
+function toDocumentSlug(documentId: string): string {
+  return documentId.replace(/\.(md|markdown|txt)$/i, '')
+}
+
+function findDocumentIdForSlug(items: QuestDocument[], slug?: string | null): string | null {
+  const normalized = String(slug || '')
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+  if (!normalized) {
+    return null
+  }
+  const match = items.find((item) => toDocumentSlug(item.document_id || '') === normalized)
+  return match?.document_id ?? null
+}
+
+function resolveDocsPrefixForDocument(documentId?: string | null): string | null {
+  const normalized = String(documentId || '').trim()
+  if (!normalized) {
+    return null
+  }
+  return Object.values(DOCS_LANG_PREFIX).find((prefix) => normalized.startsWith(prefix)) ?? null
 }
 
 function groupDocs(items: QuestDocument[], options?: { stripPrefix?: string }): GroupedDoc[] {
@@ -146,10 +171,12 @@ function groupDocs(items: QuestDocument[], options?: { stripPrefix?: string }): 
 
 export function DocsPage({
   locale,
+  requestedDocumentSlug = null,
   onOpenSettings,
 }: {
   locale: Locale
-  onOpenSettings: (name?: ConfigDocumentName) => void
+  requestedDocumentSlug?: string | null
+  onOpenSettings: (name?: ConfigDocumentName, hash?: string) => void
 }) {
   const t = copy[locale]
   const [docs, setDocs] = useState<QuestDocument[]>([])
@@ -173,7 +200,14 @@ export function DocsPage({
         if (!mounted) {
           return
         }
-        const localized = resolveDocsForLocale(payload, locale)
+        const requestedDocId = findDocumentIdForSlug(payload, requestedDocumentSlug)
+        const requestedPrefix = resolveDocsPrefixForDocument(requestedDocId)
+        const localized = requestedPrefix
+          ? {
+              items: payload.filter((item) => item.document_id?.startsWith(requestedPrefix)),
+              prefix: requestedPrefix,
+            }
+          : resolveDocsForLocale(payload, locale)
         const nextDocs = localized.items
         setDocsPrefix(localized.prefix)
         setDocs(nextDocs)
@@ -182,6 +216,7 @@ export function DocsPage({
           ? `${localized.prefix}${stripLangPrefix(previousActiveId)}`
           : null
         const firstId =
+          (requestedDocId && nextDocs.some((item) => item.document_id === requestedDocId) ? requestedDocId : null) ??
           (nextCandidateId && nextDocs.some((item) => item.document_id === nextCandidateId) ? nextCandidateId : null) ??
           pickDefaultDocId(nextDocs)
         if (firstId) {
@@ -204,7 +239,7 @@ export function DocsPage({
     return () => {
       mounted = false
     }
-  }, [locale])
+  }, [locale, requestedDocumentSlug])
 
   useEffect(() => {
     const article = articleRef.current
@@ -377,11 +412,10 @@ export function DocsPage({
                 </div>
 
                 <div ref={articleRef} className="min-h-0 py-6">
-                  <MarkdownDocument
-                    content={active.content}
-                    hideFrontmatter
-                    containerClassName="gap-0"
-                    bodyClassName="overflow-visible rounded-none bg-transparent px-0 py-0"
+                  <MarkdownPreview
+                    content={splitFrontmatter(active.content).body || ''}
+                    baseFilePath={active.document_id}
+                    className="markdown-body ds-docs-markdown overflow-visible rounded-none bg-transparent px-0 py-0"
                   />
                 </div>
               </>

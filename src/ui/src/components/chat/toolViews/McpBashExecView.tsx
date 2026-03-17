@@ -131,6 +131,13 @@ function resolvePromptLabel(workdir?: string | null) {
   return normalized || '~'
 }
 
+function isActiveBashStatus(status?: string | null) {
+  const normalized = String(status || '')
+    .trim()
+    .toLowerCase()
+  return ['running', 'calling', 'pending', 'queued', 'starting', 'terminating'].includes(normalized)
+}
+
 const filterMarkerLines = (log: string) => {
   if (!log) return ''
   return log
@@ -140,7 +147,7 @@ const filterMarkerLines = (log: string) => {
     .join('\n')
 }
 
-function BashSessionListView({ toolContent, projectId, sessionId, panelMode }: ToolViewProps) {
+function BashSessionListView({ toolContent, projectId, sessionId, panelMode, chrome }: ToolViewProps) {
   const args = toolContent.args as Record<string, unknown>
   const limit = typeof args?.limit === 'number' ? Math.max(1, Math.min(args.limit, 200)) : 80
   const statusFilter = typeof args?.status === 'string' ? args.status : undefined
@@ -268,6 +275,7 @@ function BashSessionListView({ toolContent, projectId, sessionId, panelMode }: T
           live={selectedSession?.status === 'running' || selectedSession?.status === 'terminating'}
           projectId={projectId}
           panelMode={panelMode}
+          chrome={chrome}
         />
       ) : null}
     </div>
@@ -285,7 +293,14 @@ export function McpBashExecView(props: ToolViewProps) {
   return <McpBashExecSessionView {...props} />
 }
 
-function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }: ToolViewProps) {
+function McpBashExecSessionView({
+  toolContent,
+  projectId,
+  sessionId,
+  panelMode,
+  chrome = 'default',
+  onLiveStateChange,
+}: ToolViewProps) {
   const { addToast } = useToast()
   const args = toolContent.args as Record<string, unknown>
   const command =
@@ -299,6 +314,7 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
   const normalizedMode = rawMode.trim().toLowerCase()
   const mode = normalizedMode === 'create' ? 'await' : normalizedMode || 'detach'
   const isInline = panelMode === 'inline'
+  const showInlineHeader = isInline && chrome !== 'bare'
   const chatScrollState = useChatScrollState()
   const isChatNearBottom = chatScrollState?.isNearBottom ?? true
   const content = toolContent.content as Record<string, unknown> | undefined
@@ -436,6 +452,15 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
   useEffect(() => {
     setProgress(null)
   }, [bashId])
+
+  useEffect(() => {
+    onLiveStateChange?.({
+      status: sessionStatus,
+      exitCode,
+      stopReason,
+      progress,
+    })
+  }, [exitCode, onLiveStateChange, progress, sessionStatus, stopReason])
 
   useEffect(() => {
     const fromResult =
@@ -666,6 +691,21 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
     onProgress: (event) => {
       setProgress(event)
     },
+    onLog: (event) => {
+      hasSnapshotRef.current = true
+      if (snapshotTimerRef.current != null) {
+        window.clearTimeout(snapshotTimerRef.current)
+        snapshotTimerRef.current = null
+      }
+      setLoadingLogs(false)
+      if (typeof event?.seq === 'number') {
+        if (lastSeqRef.current != null && event.seq <= lastSeqRef.current) {
+          return
+        }
+        setLastSeq((prev) => (prev == null || event.seq > prev ? event.seq : prev))
+      }
+      handleLogLine(event.line)
+    },
     onGap: (event) => {
       if (event?.tail_limit) {
         setLogMeta((prev) =>
@@ -712,7 +752,7 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
 
   const statusLabel = sessionStatus ?? (toolContent.status === 'calling' ? 'running' : 'completed')
   const exitCodeLabel = exitCode == null ? '' : ` | exit ${exitCode}`
-  const isRunning = statusLabel === 'running'
+  const isRunning = isActiveBashStatus(statusLabel)
   const statusReason = stopReason && stopReason !== 'none' ? stopReason.replace(/\n/g, ' ') : ''
   const truncatedLabel =
     logTruncated && logMeta?.tailLimit
@@ -736,12 +776,6 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
     workdir,
   ].filter(Boolean)
   const inlineMeta = inlineParts.join(' | ')
-  const truncatedClass = isInline
-    ? 'cli-inline-terminal-hint cli-inline-terminal-hint-warning'
-    : 'text-[11px] text-amber-600'
-  const resolverClass = isInline
-    ? 'cli-inline-terminal-hint'
-    : 'text-[11px] text-[var(--text-tertiary)]'
   const terminalBodyClass = showTerminal
     ? isInline
       ? 'cli-inline-terminal-body'
@@ -755,8 +789,7 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
   const progressPercent = getProgressPercent(progress)
   const progressLabel = formatProgressLabel(progress)
   const progressMeta = formatProgressMeta(progress)
-  const showProgress =
-    progress != null && (progressLabel || progressMeta || progressPercent != null)
+  const showProgress = progress != null
   const progressPercentLabel =
     progressPercent != null ? `${progressPercent.toFixed(1)}%` : 'working'
 
@@ -764,11 +797,11 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
     <div
       className={
         isInline
-          ? `cli-root cli-inline-terminal flex min-h-0 flex-col gap-2${isRunning ? ' cli-inline-terminal-running' : ''}`
+          ? `cli-root cli-inline-terminal flex min-h-0 flex-col gap-2${isRunning ? ' cli-inline-terminal-running' : ''}${chrome === 'bare' ? ' cli-inline-terminal-bare' : ''}`
           : 'cli-root flex h-full min-h-0 flex-col gap-2'
       }
     >
-      {isInline ? (
+      {showInlineHeader ? (
         <div className="cli-inline-terminal-header">
           <div className="cli-inline-terminal-dots" aria-hidden="true">
             <span className="cli-inline-terminal-dot cli-inline-terminal-dot-red" />
@@ -778,7 +811,7 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
           <div className="cli-inline-terminal-title">bash_exec</div>
           <div className="cli-inline-terminal-meta">{inlineMeta || statusLabel}</div>
         </div>
-      ) : (
+      ) : !isInline ? (
         <div className="flex flex-wrap items-center justify-between text-[11px] text-[var(--text-tertiary)]">
           <span className="break-words [overflow-wrap:anywhere]">
             Status: {statusLabel}
@@ -788,7 +821,7 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
             {workdir ? ` | ${workdir}` : ''}
           </span>
         </div>
-      )}
+      ) : null}
       {showProgress ? (
         <div
           className={isInline ? 'cli-progress cli-progress-inline' : 'cli-progress cli-progress-panel'}
@@ -810,9 +843,9 @@ function McpBashExecSessionView({ toolContent, projectId, sessionId, panelMode }
           </div>
         </div>
       ) : null}
-      {truncatedLabel ? <div className={truncatedClass}>{truncatedLabel}</div> : null}
-      {showResolverHint ? (
-        <div className={resolverClass}>
+      {!isInline && truncatedLabel ? <div className="text-[11px] text-amber-600">{truncatedLabel}</div> : null}
+      {!isInline && showResolverHint ? (
+        <div className="text-[11px] text-[var(--text-tertiary)]">
           Waiting for the durable bash session to bind. Output will appear here as soon as the session id is resolved.
         </div>
       ) : null}

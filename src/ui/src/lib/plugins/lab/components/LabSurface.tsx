@@ -11,10 +11,10 @@ import {
   listLabAgents,
   listLabQuests,
   listLabTemplates,
+  type LabQuestSelectionContext,
   type LabOverview,
 } from '@/lib/api/lab'
 import { useLabCopilotStore } from '@/lib/stores/lab-copilot'
-import { getShareSessionMeta, isShareViewForProject } from '@/lib/share-session'
 import { BUILTIN_PLUGINS } from '@/lib/types/plugin'
 import LabCanvasStudio from './LabCanvasStudio'
 import useLabProjectStream from './useLabProjectStream'
@@ -26,6 +26,8 @@ type LabSurfaceProps = {
   readOnly?: boolean
   lockedQuestId?: string | null
   immersiveLockedQuest?: boolean
+  onRefresh?: () => Promise<void> | void
+  onOpenStageSelection?: (selection: LabQuestSelectionContext & { label?: string | null; summary?: string | null }) => void
 }
 
 export default function LabSurface({
@@ -33,6 +35,8 @@ export default function LabSurface({
   readOnly,
   lockedQuestId = null,
   immersiveLockedQuest = false,
+  onRefresh,
+  onOpenStageSelection,
 }: LabSurfaceProps) {
   const queryClient = useQueryClient()
   const setActiveQuest = useLabCopilotStore((state) => state.setActiveQuest)
@@ -41,7 +45,6 @@ export default function LabSurface({
   const cliServers = useCliStore((state) => state.servers)
   const loadCliServers = useCliStore((state) => state.loadServers)
   const cliProjectId = useCliStore((state) => state.projectId)
-  const shareReadOnly = isShareViewForProject(projectId)
   const activeTab = useActiveTab()
   const isLabTabActive = React.useMemo(() => {
     const customData = activeTab?.context?.customData as { projectId?: unknown } | undefined
@@ -76,10 +79,10 @@ export default function LabSurface({
   }, [])
 
   const labStaleTime = 30000
-  const liveRefetchEnabled = Boolean(projectId && !shareReadOnly && isLabTabActive && isPageActive)
+  const liveRefetchEnabled = Boolean(projectId && isLabTabActive && isPageActive)
   // Keep the Lab stream connected while the workspace is visible so global notifications
   // (agent waiting/completed) work even when the Lab tab is not focused.
-  const labStreamEnabled = Boolean(projectId && !shareReadOnly && isPageActive)
+  const labStreamEnabled = Boolean(projectId && isPageActive)
   // "Real-time" UX without SSE: keep lab pages feeling alive while the Lab tab is focused.
   const LIVE_AGENTS_INTERVAL_MS = 5000
   const LIVE_QUESTS_INTERVAL_MS = 10000
@@ -122,20 +125,20 @@ export default function LabSurface({
   const templatesQuery = useQuery({
     queryKey: ['lab-templates', projectId],
     queryFn: () => listLabTemplates(projectId),
-    enabled: Boolean(projectId && !shareReadOnly),
+    enabled: Boolean(projectId),
     staleTime: labStaleTime,
   })
   const agentsQuery = useQuery({
     queryKey: ['lab-agents', projectId],
     queryFn: () => listLabAgents(projectId, { silent: true }),
-    enabled: Boolean(projectId && !shareReadOnly),
+    enabled: Boolean(projectId),
     staleTime: labStaleTime,
     refetchInterval: agentsRefetchInterval,
   })
   const questsQuery = useQuery({
     queryKey: ['lab-quests', projectId],
     queryFn: () => listLabQuests(projectId, { silent: true }),
-    enabled: Boolean(projectId && !shareReadOnly),
+    enabled: Boolean(projectId),
     staleTime: labStaleTime,
     refetchInterval: questsRefetchInterval,
   })
@@ -148,7 +151,7 @@ export default function LabSurface({
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => getProject(projectId),
-    enabled: Boolean(projectId && !shareReadOnly),
+    enabled: Boolean(projectId),
     staleTime: labStaleTime,
   })
 
@@ -165,8 +168,7 @@ export default function LabSurface({
     }, quests[0])
     return latest?.quest_id ?? null
   }, [quests])
-  const shareMeta = shareReadOnly ? getShareSessionMeta() : null
-  const projectName = projectQuery.data?.name ?? shareMeta?.projectName ?? null
+  const projectName = projectQuery.data?.name ?? null
 
   React.useEffect(() => {
     if (lockedQuestId) {
@@ -190,7 +192,8 @@ export default function LabSurface({
         <LabCanvasStudio
           projectId={projectId}
           readOnly={labReadOnly}
-          shareReadOnly={shareReadOnly}
+          onRefresh={onRefresh}
+          onOpenStageSelection={onOpenStageSelection}
           cliStatus={cliStatus}
           labStream={labStream}
           projectName={projectName}

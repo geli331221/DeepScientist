@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react'
-import { Box, Text } from 'ink'
+import { Box, Text, useInput } from 'ink'
 
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { theme } from '../semantic-colors.js'
@@ -13,6 +13,9 @@ type QuestScreenProps = {
   quests: QuestSummary[]
   selectedIndex: number
   availableHeight?: number
+  onMove?: (direction: 1 | -1) => void
+  onConfirm?: () => void
+  onCancel?: () => void
 }
 
 const modeCopy: Record<QuestScreenMode, { title: string; subtitle: string }> = {
@@ -39,6 +42,9 @@ export const QuestScreen: React.FC<QuestScreenProps> = ({
   quests,
   selectedIndex,
   availableHeight,
+  onMove,
+  onConfirm,
+  onCancel,
 }) => {
   const { rows } = useTerminalSize()
   const copy = modeCopy[mode]
@@ -69,6 +75,25 @@ export const QuestScreen: React.FC<QuestScreenProps> = ({
       selectedIndex >= maxItemsToShow ? selectedIndex - maxItemsToShow + 1 : 0
     )
   )
+
+  useInput((input, key) => {
+    const submitRequested = key.return || input === '\r' || input === '\n'
+    if (key.upArrow) {
+      onMove?.(-1)
+      return
+    }
+    if (key.downArrow || key.tab) {
+      onMove?.(1)
+      return
+    }
+    if (submitRequested) {
+      onConfirm?.()
+      return
+    }
+    if (key.escape) {
+      onCancel?.()
+    }
+  })
 
   return (
     <Box flexDirection="column">

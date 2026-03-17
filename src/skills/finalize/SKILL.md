@@ -10,12 +10,17 @@ Use this skill to close or pause a quest responsibly.
 ## Interaction discipline
 
 - Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the latest user instruction bundle before closing or pausing the quest.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` while assembling final evidence, closure notes, or handoff packets.
-- Each progress update must state completed consolidation work, the durable output touched, and the immediate next closure step.
+- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before closing or pausing the quest.
+- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
+- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or an occasional keepalive during truly long work. Do not update by tool-call cadence.
+- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
+- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- If the runtime starts an auto-continue turn with no new user message, keep finalizing from the durable quest state and active requirements instead of replaying the previous user turn.
 - Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
 - For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, wait up to 1 day when feasible, then choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest finalize progress update before assuming the task changed completely.
+- When finalize reaches a real closure state, pause-ready packet, or route-back decision, send one threaded `artifact.interact(kind='milestone', ...)` update that names the recommendation, why it is the right call, and any reopen condition that still matters.
+- True quest completion still requires explicit user approval through the runtime completion flow before calling `artifact.complete_quest(...)`.
 
 ## Stage purpose
 
@@ -54,6 +59,7 @@ Before finalizing, gather:
 - latest decisions and open blockers
 - latest quest documents
 - latest review / proofing / submission state when a paper bundle exists
+- the paper bundle manifest and its referenced paths when the quest has a paper-like deliverable
 
 If finalization reveals that the quest is still too uncertain, route back through `decision` rather than forcing closure.
 
@@ -89,6 +95,7 @@ The finalize stage should usually leave behind:
 
 If the quest produced a paper-style bundle, finalization should also check that the writing stage left behind enough closure evidence, such as:
 
+- selected outline and outline selection records
 - review output
 - proofing output
 - submission or packaging checklist
@@ -108,7 +115,18 @@ State clearly:
 - key deliverables that exist and where they live
 
 Do not only say that evidence exists.
-Name the paths or artifact ids that matter.
+Say clearly what exists and why it matters. Name concrete paths or artifact ids only when the user asks for them or needs them to act.
+When a paper bundle exists, verify the manifest inventory explicitly, including:
+
+- `paper/paper_bundle_manifest.json`
+- referenced `outline_path`
+- referenced `draft_path`
+- referenced `writing_plan_path`
+- referenced `references_path`
+- referenced `claim_evidence_map_path`
+- referenced `compile_report_path`
+- referenced `pdf_path`
+- referenced `latex_root_path`
 
 ### 2. Build the final claim ledger
 
@@ -127,6 +145,19 @@ For each claim, record:
 - whether it is safe to surface in summaries or papers
 
 If a claim was once believed and later weakened, preserve that downgrade history rather than silently deleting it.
+
+Also build a compact belief-change log for the most important claim transitions, such as:
+
+- supported -> partial
+- partial -> unsupported
+- promising route -> abandoned
+- draft-ready -> evidence-gap
+
+For each transition, record:
+
+- what changed
+- which evidence caused the change
+- what the new recommendation is
 
 ### 3. Produce a final limitations and failure section
 

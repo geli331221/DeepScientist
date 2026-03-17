@@ -11,6 +11,10 @@ export type BashProgress = {
   phase?: string | null
   rate?: number | null
   eta?: number | null
+  next_reply_in?: number | null
+  next_check_in?: number | null
+  next_reply_at?: string | null
+  next_check_at?: string | null
   ts?: string | null
   source?: string | null
   extra?: Record<string, unknown> | null

@@ -15,7 +15,8 @@ from ..config import ConfigManager
 from ..gitops import export_git_graph
 from ..prompts import PromptBuilder
 from ..runtime_logs import JsonlLogger
-from ..shared import append_jsonl, ensure_dir, generate_id, read_yaml, utc_now, write_json, write_text
+from ..shared import append_jsonl, ensure_dir, generate_id, read_yaml, resolve_runner_binary, utc_now, write_json, write_text
+from ..web_search import extract_web_search_payload
 from .base import RunRequest, RunResult
 
 
@@ -76,33 +77,8 @@ def _dedupe_texts(values: list[object]) -> list[str]:
     return ordered
 
 
-def _extract_web_search_payload(item: dict[str, Any]) -> dict[str, Any]:
-    action = item.get("action") if isinstance(item.get("action"), dict) else {}
-    raw_queries = action.get("queries") if isinstance(action, dict) else None
-    queries = _dedupe_texts(
-        [
-            *(raw_queries if isinstance(raw_queries, list) else []),
-            action.get("query") if isinstance(action, dict) else "",
-            item.get("query"),
-        ]
-    )
-    query = ""
-    if isinstance(item.get("query"), str) and item.get("query").strip():
-        query = item.get("query").strip()
-    elif queries:
-        query = queries[0]
-    payload: dict[str, Any] = {
-        "query": query,
-        "queries": queries,
-        "action_type": action.get("type") if isinstance(action, dict) else None,
-    }
-    if isinstance(action, dict) and action:
-        payload["action"] = action
-    return payload
-
-
 def _web_search_text_payload(item: dict[str, Any]) -> str:
-    payload = _extract_web_search_payload(item)
+    payload = extract_web_search_payload(item)
     return _compact_text(payload, limit=2400)
 
 
@@ -353,7 +329,7 @@ def _tool_event(
     if item_type == "web_search":
         tool_call_id = _tool_call_id(event, item)
         tool_name = "web_search"
-        search_payload = _extract_web_search_payload(item)
+        search_payload = extract_web_search_payload(item)
         metadata = {"search": search_payload}
         known_tool_names[tool_call_id] = tool_name
         if event_type == "item.started":
@@ -528,6 +504,8 @@ class CodexRunner:
             skill_id=request.skill_id,
             user_message=request.message,
             model=request.model,
+            turn_reason=request.turn_reason,
+            retry_context=request.retry_context,
         )
         write_text(run_root / "prompt.md", prompt)
 
@@ -546,6 +524,7 @@ class CodexRunner:
                 "quest_root": str(request.quest_root),
                 "workspace_root": str(workspace_root),
                 "cwd": str(workspace_root),
+                "turn_reason": request.turn_reason,
             },
         )
 
@@ -556,6 +535,7 @@ class CodexRunner:
         env["DS_QUEST_ROOT"] = str(request.quest_root)
         env["DS_WORKTREE_ROOT"] = str(workspace_root)
         env["DS_RUN_ID"] = request.run_id
+        env["DS_TURN_REASON"] = request.turn_reason
         quest_yaml = read_yaml(request.quest_root / "quest.yaml", {})
         env["DS_ACTIVE_ANCHOR"] = str(quest_yaml.get("active_anchor", "baseline"))
         env["DS_CONVERSATION_ID"] = f"quest:{request.quest_id}"
@@ -773,8 +753,9 @@ class CodexRunner:
 
     def _build_command(self, request: RunRequest, prompt: str) -> list[str]:
         workspace_root = request.worktree_root or request.quest_root
+        resolved_binary = resolve_runner_binary(self.binary, runner_name="codex")
         command = [
-            shutil.which(self.binary) or self.binary,
+            resolved_binary or self.binary,
             "--search",
             "exec",
             "--json",
@@ -786,6 +767,9 @@ class CodexRunner:
         ]
         if request.approval_policy:
             command.extend(["-c", f'approval_policy="{request.approval_policy}"'])
+        reasoning_effort = request.reasoning_effort if request.reasoning_effort is not None else "xhigh"
+        if reasoning_effort:
+            command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
         if request.sandbox_mode:
             command.extend(["--sandbox", request.sandbox_mode])
         command.append("-")

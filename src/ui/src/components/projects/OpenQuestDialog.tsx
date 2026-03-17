@@ -129,7 +129,7 @@ export function OpenQuestDialog({
                       <div className="relative z-[1]">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                           <div className="min-w-0">
-                            <div className="truncate text-base font-semibold tracking-tight">
+                            <div className="truncate text-base font-semibold tracking-tight text-black dark:text-black">
                               {quest.title || quest.quest_id}
                             </div>
                             <div className="mt-1 truncate text-sm text-muted-foreground">

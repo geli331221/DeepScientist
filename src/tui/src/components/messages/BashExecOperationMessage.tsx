@@ -11,6 +11,7 @@ const MAX_VISIBLE_LOG_LINES = 18
 const BASH_CARRIAGE_RETURN_PREFIX = '__DS_BASH_CR__'
 const BASH_PROGRESS_PREFIX = '__DS_PROGRESS__'
 const BASH_STATUS_MARKER_PREFIX = '__DS_BASH_STATUS__'
+const EMPTY_RESULT_PAYLOAD: Record<string, unknown> = Object.freeze({})
 
 type BashExecOperationMessageProps = {
   label: 'tool_call' | 'tool_result'
@@ -131,6 +132,41 @@ const getProgressPercent = (progress?: BashProgress | null) => {
   return null
 }
 
+const formatCountdown = (value?: number | null) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return null
+  }
+  const totalSeconds = Math.round(value)
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`
+  }
+  if (totalSeconds < 3600) {
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+    return `${minutes}m ${seconds}s`
+  }
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  return `${hours}h ${minutes}m`
+}
+
+const formatNextAt = (value?: string | null) => {
+  const text = String(value || '').trim()
+  if (!text) {
+    return null
+  }
+  const date = new Date(text)
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
 const formatProgress = (progress?: BashProgress | null) => {
   if (!progress || typeof progress !== 'object') {
     return null
@@ -161,6 +197,14 @@ const formatProgress = (progress?: BashProgress | null) => {
   }
   if (typeof progress.detail === 'string' && progress.detail.trim()) {
     parts.push(progress.detail.trim())
+  }
+  const nextUpdate = formatCountdown(progress.next_reply_in ?? progress.next_check_in ?? progress.eta)
+  if (nextUpdate) {
+    parts.push(`next update in ${nextUpdate}`)
+  }
+  const nextAt = formatNextAt(progress.next_reply_at ?? progress.next_check_at)
+  if (nextAt) {
+    parts.push(`next ${nextAt}`)
   }
   return parts.filter(Boolean).join(' · ') || null
 }
@@ -239,7 +283,7 @@ export const BashExecOperationMessage: React.FC<BashExecOperationMessageProps> =
 }) => {
   const argsPayload = useMemo(() => parseJsonRecord(args), [args])
   const outputPayload = useMemo(() => parseJsonRecord(output), [output])
-  const resultPayload = outputPayload ?? {}
+  const resultPayload = outputPayload ?? EMPTY_RESULT_PAYLOAD
   const mode = String(argsPayload?.mode || metadata?.mode || 'detach').trim().toLowerCase() || 'detach'
   const command = String(argsPayload?.command || metadata?.command || resultPayload.command || '').trim()
   const workdir = normalizeWorkdir(
@@ -273,7 +317,7 @@ export const BashExecOperationMessage: React.FC<BashExecOperationMessageProps> =
     resultPayload.last_progress && typeof resultPayload.last_progress === 'object'
       ? (resultPayload.last_progress as BashProgress)
       : null
-  const listLines = useMemo(() => buildListLines(resultPayload), [resultPayload])
+  const listLines = useMemo(() => buildListLines(resultPayload), [outputPayload])
   const [bashId, setBashId] = useState(initialBashId)
   const [sessionStatus, setSessionStatus] = useState<BashSessionStatus | null>(initialStatus)
   const [exitCode, setExitCode] = useState<number | null>(

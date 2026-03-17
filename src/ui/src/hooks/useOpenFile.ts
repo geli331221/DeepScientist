@@ -97,6 +97,12 @@ export function useOpenFile() {
     );
   }, []);
 
+  const isMarkdownMimeType = useCallback((mimeType?: string | null): boolean => {
+    if (!mimeType) return false;
+    const normalized = mimeType.toLowerCase();
+    return normalized === "text/markdown" || normalized === "text/x-markdown";
+  }, []);
+
   /**
    * Get the best plugin ID for a file
    */
@@ -107,13 +113,12 @@ export function useOpenFile() {
         return BUILTIN_PLUGINS.NOTEBOOK;
       }
 
+      if (isMarkdownFileName(file.name) || isMarkdownMimeType(file.mimeType)) {
+        return BUILTIN_PLUGINS.NOTEBOOK;
+      }
+
       // Prefer extension-based resolution when MIME type is too generic.
       const extPluginId = getPluginIdFromExtension(file.name);
-
-      // Always trust markdown extensions to avoid bad MIME metadata (e.g. mis-tagged PDFs).
-      if (extPluginId === BUILTIN_PLUGINS.NOTEBOOK && isMarkdownFileName(file.name)) {
-        return extPluginId;
-      }
 
       // Try MIME type first (more reliable when accurate)
       if (file.mimeType) {
@@ -133,7 +138,7 @@ export function useOpenFile() {
       // No plugin found
       return null;
     },
-    [isMarkdownFileName]
+    [isMarkdownFileName, isMarkdownMimeType]
   );
 
   /**

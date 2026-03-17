@@ -17,6 +17,7 @@ def ensure_home_layout(home: Path) -> dict[str, Path]:
     runtime = ensure_dir(home / "runtime")
     ensure_dir(runtime / "venv")
     ensure_dir(runtime / "bundle")
+    ensure_dir(runtime / "tools")
 
     config = ensure_dir(home / "config")
     ensure_dir(config / "baselines")

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 import time
 from hashlib import sha256
 from hmac import new as hmac_new
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from ..shared import append_jsonl, ensure_dir, utc_now
@@ -396,6 +398,8 @@ class DiscordConnectorBridge(BaseConnectorBridge):
 class QQConnectorBridge(BaseConnectorBridge):
     name = "qq"
     _token_cache: dict[str, dict[str, float | str]] = {}
+    _IMAGE_FILE_TYPE = 1
+    _FILE_FILE_TYPE = 4
 
     def parse_webhook(self, *, method: str, headers: dict[str, str], query: dict[str, list[str]], raw_body: bytes, body: dict[str, Any] | None, config: dict[str, Any]) -> BridgeWebhookResult:
         return BridgeWebhookResult(
@@ -412,18 +416,21 @@ class QQConnectorBridge(BaseConnectorBridge):
 
     def format_outbound(self, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         target = self.extract_target(payload.get("conversation_id"))
-        message_body: dict[str, Any] = {
-            "content": self.render_text(payload.get("text"), payload.get("attachments")),
-            "msg_type": 0,
-        }
         reply_to = str(payload.get("reply_to_message_id") or "").strip()
-        if reply_to:
-            message_body["msg_id"] = reply_to
-            message_body["msg_seq"] = max(int(time.time() * 1000) % 65536, 1)
+        requested_render_mode = self._requested_render_mode(payload)
+        render_mode, render_mode_warning = self._effective_render_mode(requested_render_mode, config)
+        native_attachments, residual_attachments, attachment_issues = self._partition_native_attachments(payload.get("attachments"), config)
+        text = self.render_text(payload.get("text"), residual_attachments)
         return {
             "chat_type": target["chat_type"],
             "chat_id": target["chat_id"],
-            "body": message_body,
+            "reply_to_message_id": reply_to or None,
+            "requested_render_mode": requested_render_mode,
+            "render_mode": render_mode,
+            "render_mode_warning": render_mode_warning,
+            "text": text,
+            "native_attachments": native_attachments,
+            "attachment_issues": attachment_issues,
         }
 
     def deliver_direct(self, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
@@ -437,17 +444,289 @@ class QQConnectorBridge(BaseConnectorBridge):
         if chat_type not in {"direct", "group"} or not chat_id:
             return None
         access_token = self._access_token(app_id, app_secret)
-        endpoint = (
+        reply_to = str(formatted.get("reply_to_message_id") or "").strip() or None
+        text = str(formatted.get("text") or "").strip()
+        render_mode = str(formatted.get("render_mode") or "plain").strip().lower()
+        native_attachments = [dict(item) for item in (formatted.get("native_attachments") or []) if isinstance(item, dict)]
+        attachment_issues = [dict(item) for item in (formatted.get("attachment_issues") or []) if isinstance(item, dict)]
+        parts: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        if str(formatted.get("render_mode_warning") or "").strip():
+            warnings.append(str(formatted.get("render_mode_warning")).strip())
+        for issue in attachment_issues:
+            error = str(issue.get("error") or "").strip()
+            if error:
+                warnings.append(error)
+        if text or not native_attachments:
+            text_result = self._send_text_message(
+                access_token=access_token,
+                chat_type=chat_type,
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=reply_to,
+                render_mode=render_mode,
+            )
+            parts.append({"part": "text", "render_mode": render_mode, **text_result})
+        for index, attachment in enumerate(native_attachments, start=1):
+            media_kind = str(attachment.get("qq_media_kind") or "file").strip()
+            media_result = self._send_media_attachment(
+                access_token=access_token,
+                chat_type=chat_type,
+                chat_id=chat_id,
+                attachment=attachment,
+                reply_to_message_id=reply_to,
+            )
+            parts.append(
+                {
+                    "part": f"attachment_{index}",
+                    "media_kind": media_kind,
+                    "path": attachment.get("path"),
+                    "url": attachment.get("url"),
+                    **media_result,
+                }
+            )
+        succeeded = [item for item in parts if bool(item.get("ok", False))]
+        failed = [item for item in parts if not bool(item.get("ok", False))]
+        error_messages = [str(item.get("error") or "").strip() for item in failed if str(item.get("error") or "").strip()]
+        error_messages.extend(warnings)
+        last_success = succeeded[-1] if succeeded else {}
+        return {
+            "ok": bool(succeeded),
+            "queued": False,
+            "partial": bool(succeeded and (failed or warnings)),
+            "transport": "qq-http",
+            "status_code": last_success.get("status_code") or (failed[-1].get("status_code") if failed else None),
+            "message_id": last_success.get("message_id"),
+            "response": str(last_success.get("response") or "").strip()[:500] or None,
+            "parts": parts,
+            "warnings": warnings,
+            "error": "; ".join(error_messages) if error_messages else None,
+        }
+
+    @staticmethod
+    def _requested_render_mode(payload: dict[str, Any]) -> str:
+        connector_hints = payload.get("connector_hints") if isinstance(payload.get("connector_hints"), dict) else {}
+        qq_hints = connector_hints.get("qq") if isinstance(connector_hints.get("qq"), dict) else {}
+        requested = str(qq_hints.get("render_mode") or "auto").strip().lower()
+        return requested if requested in {"auto", "plain", "markdown"} else "auto"
+
+    @staticmethod
+    def _effective_render_mode(requested: str, config: dict[str, Any]) -> tuple[str, str | None]:
+        markdown_enabled = bool(config.get("enable_markdown_send", False))
+        if requested == "markdown" and not markdown_enabled:
+            return "plain", "QQ markdown send was requested, but `enable_markdown_send` is disabled."
+        if requested == "markdown":
+            return "markdown", None
+        return "plain", None
+
+    @classmethod
+    def _partition_native_attachments(
+        cls,
+        attachments: Any,
+        config: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        native_enabled = bool(config.get("enable_file_upload_experimental", False))
+        native_items: list[dict[str, Any]] = []
+        residual_items: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(attachments if isinstance(attachments, list) else [], start=1):
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(raw_item)
+            if str(item.get("path_error") or "").strip():
+                issues.append(
+                    {
+                        "attachment_index": index,
+                        "error": f"attachment {index}: path resolution failed for {item.get('path')}",
+                    }
+                )
+                continue
+            connector_delivery = item.get("connector_delivery") if isinstance(item.get("connector_delivery"), dict) else {}
+            qq_delivery = connector_delivery.get("qq") if isinstance(connector_delivery.get("qq"), dict) else {}
+            media_kind = str(qq_delivery.get("media_kind") or "").strip().lower()
+            if media_kind not in {"image", "file"}:
+                residual_items.append(item)
+                continue
+            if not native_enabled:
+                issues.append(
+                    {
+                        "attachment_index": index,
+                        "error": (
+                            f"attachment {index}: QQ native media send is disabled by "
+                            "`enable_file_upload_experimental`."
+                        ),
+                    }
+                )
+                continue
+            source_path = str(item.get("path") or "").strip()
+            source_url = str(item.get("url") or "").strip()
+            if not source_path and not source_url:
+                issues.append(
+                    {
+                        "attachment_index": index,
+                        "error": f"attachment {index}: QQ {media_kind} send requires `path` or `url`.",
+                    }
+                )
+                continue
+            item["qq_media_kind"] = media_kind
+            native_items.append(item)
+        return native_items, residual_items, issues
+
+    @staticmethod
+    def _message_endpoint(chat_type: str, chat_id: str) -> str:
+        return (
             f"https://api.sgroup.qq.com/v2/users/{chat_id}/messages"
             if chat_type == "direct"
             else f"https://api.sgroup.qq.com/v2/groups/{chat_id}/messages"
         )
-        request = Request(endpoint, data=json.dumps(formatted["body"], ensure_ascii=False).encode("utf-8"), method="POST")
+
+    @staticmethod
+    def _files_endpoint(chat_type: str, chat_id: str) -> str:
+        return (
+            f"https://api.sgroup.qq.com/v2/users/{chat_id}/files"
+            if chat_type == "direct"
+            else f"https://api.sgroup.qq.com/v2/groups/{chat_id}/files"
+        )
+
+    @staticmethod
+    def _message_seq(reply_to_message_id: str | None) -> int | None:
+        if not reply_to_message_id:
+            return None
+        return max(int(time.time() * 1000) % 65536, 1)
+
+    def _send_text_message(
+        self,
+        *,
+        access_token: str,
+        chat_type: str,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: str | None,
+        render_mode: str,
+    ) -> dict[str, Any]:
+        if not text.strip():
+            return {"ok": False, "error": "QQ text message content is empty."}
+        body: dict[str, Any]
+        if render_mode == "markdown":
+            body = {"markdown": {"content": text}, "msg_type": 2}
+        else:
+            body = {"content": text, "msg_type": 0}
+        msg_seq = self._message_seq(reply_to_message_id)
+        if msg_seq is not None:
+            body["msg_seq"] = msg_seq
+        if reply_to_message_id:
+            body["msg_id"] = reply_to_message_id
+        return self._post_json(
+            endpoint=self._message_endpoint(chat_type, chat_id),
+            access_token=access_token,
+            body=body,
+        )
+
+    def _send_media_attachment(
+        self,
+        *,
+        access_token: str,
+        chat_type: str,
+        chat_id: str,
+        attachment: dict[str, Any],
+        reply_to_message_id: str | None,
+    ) -> dict[str, Any]:
+        media_kind = str(attachment.get("qq_media_kind") or "file").strip().lower()
+        upload_payload: dict[str, Any] = {
+            "file_type": self._IMAGE_FILE_TYPE if media_kind == "image" else self._FILE_FILE_TYPE,
+            "srv_send_msg": False,
+        }
+        url_value = str(attachment.get("url") or "").strip()
+        path_value = str(attachment.get("path") or "").strip()
+        try:
+            if url_value:
+                upload_payload["url"] = url_value
+            elif path_value:
+                payload, file_name = self._file_data_payload(Path(path_value), media_kind=media_kind)
+                upload_payload["file_data"] = payload
+                if media_kind == "file" and file_name:
+                    upload_payload["file_name"] = file_name
+            else:
+                return {"ok": False, "error": "QQ native media send requires `path` or `url`."}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        upload_result = self._post_json(
+            endpoint=self._files_endpoint(chat_type, chat_id),
+            access_token=access_token,
+            body=upload_payload,
+        )
+        if not upload_result.get("ok", False):
+            upload_result["error"] = str(upload_result.get("error") or "QQ media upload failed.").strip()
+            return upload_result
+        file_info = str(upload_result.get("payload", {}).get("file_info") or "").strip()
+        if not file_info:
+            return {
+                "ok": False,
+                "error": "QQ media upload succeeded but returned no `file_info`.",
+                "status_code": upload_result.get("status_code"),
+                "response": upload_result.get("response"),
+            }
+        message_body: dict[str, Any] = {
+            "msg_type": 7,
+            "media": {"file_info": file_info},
+        }
+        msg_seq = self._message_seq(reply_to_message_id)
+        if msg_seq is not None:
+            message_body["msg_seq"] = msg_seq
+        if reply_to_message_id:
+            message_body["msg_id"] = reply_to_message_id
+        send_result = self._post_json(
+            endpoint=self._message_endpoint(chat_type, chat_id),
+            access_token=access_token,
+            body=message_body,
+        )
+        if not send_result.get("ok", False):
+            send_result["error"] = str(send_result.get("error") or "QQ media message send failed.").strip()
+        return send_result
+
+    @staticmethod
+    def _file_data_payload(path: Path, *, media_kind: str) -> tuple[str, str]:
+        if not path.exists():
+            raise FileNotFoundError(f"QQ native {media_kind} attachment path does not exist: {path}")
+        payload = base64.b64encode(path.read_bytes()).decode("utf-8")
+        return payload, path.name
+
+    def _post_json(self, *, endpoint: str, access_token: str, body: dict[str, Any]) -> dict[str, Any]:
+        request = Request(endpoint, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), method="POST")
         request.add_header("Content-Type", "application/json; charset=utf-8")
         request.add_header("Authorization", f"QQBot {access_token}")
-        with urlopen(request, timeout=8) as response:  # noqa: S310
-            response_text = response.read().decode("utf-8", errors="replace")
-            return {"ok": 200 <= response.status < 300, "status_code": response.status, "response": response_text[:500], "transport": "qq-http"}
+        try:
+            with urlopen(request, timeout=8) as response:  # noqa: S310
+                response_text = response.read().decode("utf-8", errors="replace")
+                payload = json.loads(response_text) if response_text else {}
+                return {
+                    "ok": 200 <= response.status < 300,
+                    "status_code": response.status,
+                    "response": response_text[:500],
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "message_id": str((payload or {}).get("id") or "").strip() or None,
+                }
+        except HTTPError as exc:
+            response_text = exc.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(response_text) if response_text else {}
+            except json.JSONDecodeError:
+                payload = {}
+            return {
+                "ok": False,
+                "status_code": exc.code,
+                "response": response_text[:500],
+                "payload": payload if isinstance(payload, dict) else {},
+                "error": str((payload or {}).get("message") or response_text or exc.reason).strip() or "QQ HTTP error",
+            }
+        except Exception as exc:  # pragma: no cover - defensive network transport guard
+            return {
+                "ok": False,
+                "status_code": None,
+                "response": None,
+                "payload": {},
+                "error": str(exc),
+            }
 
     @classmethod
     def _access_token(cls, app_id: str, app_secret: str) -> str:

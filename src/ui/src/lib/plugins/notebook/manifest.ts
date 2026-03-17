@@ -56,12 +56,6 @@ export const notebookPluginManifest: UnifiedPluginManifest = {
   backend: {
     entry: "app.plugins.builtin.notebook_tools",
     tools: [],
-    routes: {
-      "/notebooks": "list_notebooks",
-      "/notebooks/:id": "get_notebook",
-      "/notebooks/:id/content": "get_notebook_content",
-      "/notebooks/:id/snapshots": "list_snapshots",
-    },
   },
 
   // ============================================================
@@ -76,16 +70,6 @@ export const notebookPluginManifest: UnifiedPluginManifest = {
   // UI Contributions
   // ============================================================
   contributes: {
-    // Sidebar menu entry
-    sidebarMenus: [
-      {
-        id: "notebook-list",
-        title: "Notebooks",
-        icon: "book-open",
-        order: 5, // High priority in sidebar
-      },
-    ],
-
     // Tab configuration
     tabIcon: "file-text",
     tabTitle: {
@@ -99,13 +83,6 @@ export const notebookPluginManifest: UnifiedPluginManifest = {
         title: "Export",
         icon: "Download",
         command: "notebook.export",
-        position: "right",
-      },
-      {
-        id: "notebook-share",
-        title: "Share",
-        icon: "Share",
-        command: "notebook.share",
         position: "right",
       },
     ],

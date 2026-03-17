@@ -3,12 +3,6 @@ import type { BashProgress } from '@/lib/types/bash'
 import { getApiBaseUrl } from '@/lib/api/client'
 import { refreshAccessToken } from '@/lib/api/auth'
 import { redirectToLanding } from '@/lib/navigation'
-import {
-  clearShareSession,
-  getActiveShareProjectId,
-  getShareSessionMeta,
-  getShareSessionToken,
-} from '@/lib/share-session'
 
 export type BashStreamConnectionState = {
   status: 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed' | 'error'
@@ -110,39 +104,15 @@ const buildAuthContext = () => {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
-  let authMode: 'share' | 'user' | 'none' = 'none'
+  let authMode: 'user' | 'none' = 'none'
 
   if (typeof window === 'undefined') return { headers, authMode }
 
   const userToken = window.localStorage.getItem('ds_access_token')
-  const shareToken = getShareSessionToken()
-  const shareMeta = getShareSessionMeta()
-  const activeShareProject = getActiveShareProjectId()
-  const preferShare = Boolean(
-    shareToken &&
-      shareMeta?.access === 'view' &&
-      shareMeta.projectId &&
-      activeShareProject &&
-      shareMeta.projectId === activeShareProject
-  )
-
-  if (preferShare && shareToken) {
-    headers.Authorization = `Bearer ${shareToken}`
-    headers['X-Share-Token'] = shareToken
-    authMode = 'share'
-    return { headers, authMode }
-  }
 
   if (userToken) {
     headers.Authorization = `Bearer ${userToken}`
     authMode = 'user'
-    return { headers, authMode }
-  }
-
-  if (shareToken) {
-    headers.Authorization = `Bearer ${shareToken}`
-    headers['X-Share-Token'] = shareToken
-    authMode = 'share'
   }
 
   return { headers, authMode }
@@ -151,19 +121,7 @@ const buildAuthContext = () => {
 const handleUnauthorized = (headers: Record<string, string>) => {
   if (typeof window === 'undefined') return
   const userToken = window.localStorage.getItem('ds_access_token')
-  const shareToken = getShareSessionToken()
   const hasUserToken = Boolean(userToken)
-  const hasShareSession = Boolean(shareToken)
-  const authHeader = typeof headers.Authorization === 'string' ? headers.Authorization : null
-  const usedShareSession = Boolean(authHeader && shareToken && authHeader === `Bearer ${shareToken}`)
-
-  if (usedShareSession || (!hasUserToken && hasShareSession)) {
-    clearShareSession()
-    if (!window.location.pathname.startsWith('/share')) {
-      window.location.href = '/share-error?error=session_expired'
-    }
-    return
-  }
 
   if (hasUserToken) {
     window.localStorage.removeItem('ds_access_token')
@@ -291,6 +249,122 @@ export function useBashLogStream({
         }
         const decoder = new TextDecoder()
         let buffer = ''
+        let sawDone = false
+
+        const handleParsedEvent = (parsed: ParsedEvent) => {
+          if (parsed.id) {
+            const parsedId = Number(parsed.id)
+            if (Number.isFinite(parsedId)) {
+              lastEventIdRef.current = parsedId
+            }
+          }
+          if (parsed.event === 'snapshot') {
+            try {
+              const data = JSON.parse(parsed.data) as BashStreamSnapshotEvent
+              if (typeof data?.latest_seq === 'number') {
+                lastEventIdRef.current = data.latest_seq
+              }
+              onSnapshotRef.current?.(data)
+            } catch (error) {
+              onErrorRef.current?.(
+                error instanceof Error ? error : new Error('invalid_snapshot_event')
+              )
+            }
+            return false
+          }
+          if (parsed.event === 'log_batch') {
+            try {
+              const data = JSON.parse(parsed.data) as BashStreamLogBatchEvent
+              if (typeof data?.to_seq === 'number') {
+                lastEventIdRef.current = data.to_seq
+              }
+              if (onLogBatchRef.current) {
+                onLogBatchRef.current(data)
+              } else if (onLogRef.current) {
+                data.lines?.forEach((line) => {
+                  if (typeof line?.seq !== 'number') return
+                  onLogRef.current?.({
+                    bash_id: data.bash_id,
+                    seq: line.seq,
+                    stream: line.stream ?? 'stdout',
+                    line: line.line ?? '',
+                    timestamp: line.timestamp ?? '',
+                  })
+                })
+              }
+            } catch (error) {
+              onErrorRef.current?.(
+                error instanceof Error ? error : new Error('invalid_log_batch_event')
+              )
+            }
+            return false
+          }
+          if (parsed.event === 'log') {
+            try {
+              const data = JSON.parse(parsed.data) as BashStreamLogEvent
+              if (typeof data?.seq === 'number') {
+                lastEventIdRef.current = data.seq
+              }
+              if (onLogBatchRef.current) {
+                onLogBatchRef.current({
+                  bash_id: data.bash_id,
+                  from_seq: data.seq,
+                  to_seq: data.seq,
+                  lines: [
+                    {
+                      seq: data.seq,
+                      stream: data.stream,
+                      line: data.line,
+                      timestamp: data.timestamp,
+                    },
+                  ],
+                })
+              } else {
+                onLogRef.current?.(data)
+              }
+            } catch (error) {
+              onErrorRef.current?.(
+                error instanceof Error ? error : new Error('invalid_log_event')
+              )
+            }
+            return false
+          }
+          if (parsed.event === 'gap') {
+            try {
+              const data = JSON.parse(parsed.data) as BashStreamGapEvent
+              onGapRef.current?.(data)
+            } catch (error) {
+              onErrorRef.current?.(
+                error instanceof Error ? error : new Error('invalid_gap_event')
+              )
+            }
+            return false
+          }
+          if (parsed.event === 'progress') {
+            try {
+              const data = JSON.parse(parsed.data) as BashStreamProgressEvent
+              onProgressRef.current?.(data)
+            } catch (error) {
+              onErrorRef.current?.(
+                error instanceof Error ? error : new Error('invalid_progress_event')
+              )
+            }
+            return false
+          }
+          if (parsed.event === 'done') {
+            try {
+              const data = JSON.parse(parsed.data) as BashStreamDoneEvent
+              onDoneRef.current?.(data)
+            } catch (error) {
+              onErrorRef.current?.(
+                error instanceof Error ? error : new Error('invalid_done_event')
+              )
+            }
+            sawDone = true
+            return true
+          }
+          return false
+        }
 
         while (true) {
           const { done, value } = await reader.read()
@@ -305,112 +379,32 @@ export function useBashLogStream({
             buffer = buffer.slice(boundaryIndex + 2)
             const normalized = raw.replace(/\r\n/g, '\n').trim()
             const parsed = parseEventBlock(normalized)
-            if (parsed) {
-              if (parsed.id) {
-                const parsedId = Number(parsed.id)
-                if (Number.isFinite(parsedId)) {
-                  lastEventIdRef.current = parsedId
-                }
-              }
-              if (parsed.event === 'snapshot') {
-                try {
-                  const data = JSON.parse(parsed.data) as BashStreamSnapshotEvent
-                  if (typeof data?.latest_seq === 'number') {
-                    lastEventIdRef.current = data.latest_seq
-                  }
-                  onSnapshotRef.current?.(data)
-                } catch (error) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error('invalid_snapshot_event')
-                  )
-                }
-              } else if (parsed.event === 'log_batch') {
-                try {
-                  const data = JSON.parse(parsed.data) as BashStreamLogBatchEvent
-                  if (typeof data?.to_seq === 'number') {
-                    lastEventIdRef.current = data.to_seq
-                  }
-                  if (onLogBatchRef.current) {
-                    onLogBatchRef.current(data)
-                  } else if (onLogRef.current) {
-                    data.lines?.forEach((line) => {
-                      if (typeof line?.seq !== 'number') return
-                      onLogRef.current?.({
-                        bash_id: data.bash_id,
-                        seq: line.seq,
-                        stream: line.stream ?? 'stdout',
-                        line: line.line ?? '',
-                        timestamp: line.timestamp ?? '',
-                      })
-                    })
-                  }
-                } catch (error) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error('invalid_log_batch_event')
-                  )
-                }
-              } else if (parsed.event === 'log') {
-                try {
-                  const data = JSON.parse(parsed.data) as BashStreamLogEvent
-                  if (typeof data?.seq === 'number') {
-                    lastEventIdRef.current = data.seq
-                  }
-                  if (onLogBatchRef.current) {
-                    onLogBatchRef.current({
-                      bash_id: data.bash_id,
-                      from_seq: data.seq,
-                      to_seq: data.seq,
-                      lines: [
-                        {
-                          seq: data.seq,
-                          stream: data.stream,
-                          line: data.line,
-                          timestamp: data.timestamp,
-                        },
-                      ],
-                    })
-                  } else {
-                    onLogRef.current?.(data)
-                  }
-                } catch (error) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error('invalid_log_event')
-                  )
-                }
-              } else if (parsed.event === 'gap') {
-                try {
-                  const data = JSON.parse(parsed.data) as BashStreamGapEvent
-                  onGapRef.current?.(data)
-                } catch (error) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error('invalid_gap_event')
-                  )
-                }
-              } else if (parsed.event === 'progress') {
-                try {
-                  const data = JSON.parse(parsed.data) as BashStreamProgressEvent
-                  onProgressRef.current?.(data)
-                } catch (error) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error('invalid_progress_event')
-                  )
-                }
-              } else if (parsed.event === 'done') {
-                try {
-                  const data = JSON.parse(parsed.data) as BashStreamDoneEvent
-                  onDoneRef.current?.(data)
-                } catch (error) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error('invalid_done_event')
-                  )
-                }
-                setConnection({ status: 'closed' })
-                stopStream()
-                return
-              }
+            if (parsed && handleParsedEvent(parsed)) {
+              setConnection({ status: 'closed' })
+              stopStream()
+              return
             }
             boundaryIndex = buffer.indexOf('\n\n')
           }
+        }
+
+        const trailing = buffer.replace(/\r\n/g, '\n').trim()
+        if (trailing) {
+          const parsed = parseEventBlock(trailing)
+          if (parsed && handleParsedEvent(parsed)) {
+            setConnection({ status: 'closed' })
+            stopStream()
+            return
+          }
+        }
+
+        if (!controller.signal.aborted && !sawDone) {
+          const delay = Math.min(2000 * (attempt + 1), 10000)
+          setConnection({ status: 'reconnecting' })
+          reconnectRef.current = window.setTimeout(() => {
+            void runStream(attempt + 1)
+          }, delay)
+          return
         }
 
         setConnection({ status: 'closed' })

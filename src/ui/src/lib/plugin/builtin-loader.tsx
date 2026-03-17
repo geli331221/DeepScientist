@@ -13,6 +13,7 @@ import type {
   PluginContext,
 } from "@/lib/types/plugin";
 import type { PluginComponentProps } from "@/lib/types/tab";
+import { wrapRecoverableImport } from "@/lib/utils/dynamic-import-recovery";
 
 // ============================================================
 // Types
@@ -131,6 +132,11 @@ const BUILTIN_PLUGIN_IMPORTS: Record<string, ComponentImportFn> = {
       default: m.default,
     })),
 
+  "@ds/plugin-git-diff-viewer": () =>
+    import("@/lib/plugins/git-diff-viewer/GitDiffViewerPlugin").then((m) => ({
+      default: m.default,
+    })),
+
   // ============================================================
   // Placeholder Plugins - to be implemented
   // ============================================================
@@ -220,6 +226,13 @@ function createPlaceholderModule(
  * Provides lifecycle hook management and preloading capabilities.
  */
 export class BuiltinPluginLoader {
+  private getRecoverableImport(
+    pluginId: string,
+    importFn: ComponentImportFn
+  ): ComponentImportFn {
+    return wrapRecoverableImport(importFn, `builtin-plugin:${pluginId}`);
+  }
+
   /**
    * Cache of lazy-loaded components
    */
@@ -258,7 +271,7 @@ export class BuiltinPluginLoader {
     }
 
     // Create lazy component
-    const LazyComponent = lazy(importFn);
+    const LazyComponent = lazy(this.getRecoverableImport(pluginId, importFn));
     this.lazyComponents.set(pluginId, LazyComponent);
 
     return LazyComponent;
@@ -286,7 +299,7 @@ export class BuiltinPluginLoader {
     // Get or create lazy component
     let LazyComponent = this.lazyComponents.get(manifest.id);
     if (!LazyComponent) {
-      LazyComponent = lazy(importFn);
+      LazyComponent = lazy(this.getRecoverableImport(manifest.id, importFn));
       this.lazyComponents.set(manifest.id, LazyComponent);
     }
 
@@ -354,7 +367,9 @@ export class BuiltinPluginLoader {
         try {
           // Create lazy component if not exists
           if (!this.lazyComponents.has(pluginId)) {
-            const LazyComponent = lazy(importFn);
+            const LazyComponent = lazy(
+              this.getRecoverableImport(pluginId, importFn)
+            );
             this.lazyComponents.set(pluginId, LazyComponent);
           }
 
@@ -387,7 +402,10 @@ export class BuiltinPluginLoader {
     }
 
     try {
-      const pluginModule = (await importFn()) as PluginModule;
+      const pluginModule = (await this.getRecoverableImport(
+        pluginId,
+        importFn
+      )()) as PluginModule;
       this.preloadedModules.set(pluginId, pluginModule);
       return pluginModule;
     } catch (error) {

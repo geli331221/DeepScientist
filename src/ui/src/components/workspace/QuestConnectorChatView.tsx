@@ -9,8 +9,13 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/components/ui/toast'
 import { useI18n } from '@/lib/i18n/useI18n'
+import { useTokenStream } from '@/lib/plugins/ai-manus/hooks/useTokenStream'
+import { ChatScrollProvider } from '@/lib/plugins/ai-manus/lib/chat-scroll-context'
+import { buildQuestTranscriptMessages } from '@/lib/questTranscript'
+import { useAutoFollowScroll } from '@/lib/useAutoFollowScroll'
 import { cn } from '@/lib/utils'
 import type { FeedItem } from '@/types'
+import { QuestCopilotPaneLayout } from './QuestCopilotPaneLayout'
 
 type ConnectorCommand = {
   name: string
@@ -25,6 +30,8 @@ type QuestConnectorChatViewProps = {
   activeToolCount: number
   connectionState: 'connecting' | 'connected' | 'reconnecting' | 'error'
   error?: string | null
+  stopping?: boolean
+  showStopButton?: boolean
   slashCommands?: ConnectorCommand[]
   onSubmit: (message: string) => Promise<void>
   onStopRun: () => Promise<void>
@@ -32,12 +39,12 @@ type QuestConnectorChatViewProps = {
 
 type ConnectorMessage = {
   id: string
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant'
   content: string
   createdAt?: string
   streaming?: boolean
   badge?: string | null
-  emphasis?: 'message' | 'artifact' | 'event'
+  emphasis?: 'message' | 'artifact'
   deliveryState?: string | null
 }
 
@@ -53,75 +60,8 @@ function formatTime(value?: string) {
   }).format(date)
 }
 
-function buildArtifactContent(
-  item: Extract<FeedItem, { type: 'artifact' }>,
-  labels: { reason: string; next: string }
-) {
-  const sections = [
-    item.content,
-    item.reason ? `${labels.reason}: ${item.reason}` : '',
-    item.guidance ? `${labels.next}: ${item.guidance}` : '',
-  ]
-    .map((part) => part?.trim())
-    .filter(Boolean)
-  return sections.join('\n\n').trim()
-}
-
-export function buildQuestConnectorMessages(
-  feed: FeedItem[],
-  labels: { reason: string; next: string }
-): ConnectorMessage[] {
-  return feed.flatMap((item) => {
-    if (item.type === 'message') {
-      if (item.reasoning || !item.content.trim()) {
-        return []
-      }
-      return [
-        {
-          id: item.id,
-          role: item.role,
-          content: item.content.trim(),
-          createdAt: item.createdAt,
-          streaming: Boolean(item.stream && item.role === 'assistant'),
-          deliveryState: item.role === 'user' ? (item.deliveryState ?? null) : null,
-          emphasis: 'message',
-        } satisfies ConnectorMessage,
-      ]
-    }
-
-    if (item.type === 'artifact') {
-      const content = buildArtifactContent(item, labels)
-      if (!content) {
-        return []
-      }
-      const badgeParts = [item.kind, item.status].filter(Boolean)
-      return [
-        {
-          id: item.id,
-          role: 'assistant',
-          content,
-          createdAt: item.createdAt,
-          badge: badgeParts.length ? badgeParts.join(' · ') : null,
-          emphasis: 'artifact',
-        } satisfies ConnectorMessage,
-      ]
-    }
-
-    if (item.type === 'event' && item.content.trim()) {
-      return [
-        {
-          id: item.id,
-          role: 'system',
-          content: item.content.trim(),
-          createdAt: item.createdAt,
-          badge: item.label,
-          emphasis: 'event',
-        } satisfies ConnectorMessage,
-      ]
-    }
-
-    return []
-  })
+export function buildQuestConnectorMessages(feed: FeedItem[]): ConnectorMessage[] {
+  return buildQuestTranscriptMessages(feed)
 }
 
 function DeliveryIndicator({ state }: { state?: string | null }) {
@@ -145,10 +85,23 @@ function DeliveryIndicator({ state }: { state?: string | null }) {
   )
 }
 
-function MessageBubble({ item }: { item: ConnectorMessage }) {
+function MessageBubble({
+  item,
+  animateText,
+}: {
+  item: ConnectorMessage
+  animateText: boolean
+}) {
   const isUser = item.role === 'user'
-  const isSystem = item.role === 'system'
   const isAssistant = item.role === 'assistant'
+  const contentRef = React.useRef<HTMLDivElement | null>(null)
+
+  useTokenStream({
+    ref: contentRef,
+    active: animateText,
+    contentKey: `${item.id}:${item.content}`,
+    mode: item.emphasis === 'artifact' ? 'status' : 'assistant',
+  })
 
   return (
     <div
@@ -159,14 +112,12 @@ function MessageBubble({ item }: { item: ConnectorMessage }) {
     >
       <div
         className={cn(
-          'max-w-[92%] rounded-2xl px-3.5 py-2.5 text-sm leading-6',
+          'min-w-0 max-w-[92%] overflow-hidden rounded-2xl px-3.5 py-2.5 text-sm leading-6',
           isUser
             ? 'bg-[#2F3437] text-white'
-            : isSystem
-              ? 'bg-black/[0.03] text-muted-foreground dark:bg-white/[0.04]'
-              : item.emphasis === 'artifact'
-                ? 'bg-[rgba(159,177,194,0.16)] text-foreground dark:bg-white/[0.06] dark:text-white/90'
-                : 'bg-white/[0.88] text-foreground dark:bg-white/[0.06] dark:text-white/90'
+            : item.emphasis === 'artifact'
+              ? 'bg-[rgba(159,177,194,0.16)] text-foreground dark:bg-white/[0.06] dark:text-white/90'
+              : 'bg-white/[0.88] text-foreground dark:bg-white/[0.06] dark:text-white/90'
         )}
       >
         {item.badge && isAssistant ? (
@@ -175,15 +126,16 @@ function MessageBubble({ item }: { item: ConnectorMessage }) {
           </div>
         ) : null}
         <div
+          ref={contentRef}
           className={cn(
-            'prose prose-sm max-w-none whitespace-pre-wrap break-words leading-6',
+            'ds-copilot-markdown prose prose-sm max-w-none whitespace-pre-wrap break-words [overflow-wrap:anywhere] leading-6',
             isUser ? 'prose-invert text-white' : 'text-foreground dark:prose-invert'
           )}
         >
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
         </div>
       </div>
-      {(item.createdAt || (isUser && item.deliveryState)) && !isSystem ? (
+      {(item.createdAt || (isUser && item.deliveryState)) ? (
         <div className={cn('flex items-center gap-2 text-[10px]', isUser ? 'text-white/55' : 'text-muted-foreground')}>
           {isUser ? <DeliveryIndicator state={item.deliveryState} /> : null}
           {item.createdAt ? <span>{formatTime(item.createdAt)}</span> : null}
@@ -201,6 +153,8 @@ export function QuestConnectorChatView({
   activeToolCount,
   connectionState,
   error,
+  stopping = false,
+  showStopButton = false,
   slashCommands = [],
   onSubmit,
   onStopRun,
@@ -211,18 +165,22 @@ export function QuestConnectorChatView({
   const [submitting, setSubmitting] = React.useState(false)
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null)
   const listRef = React.useRef<HTMLDivElement | null>(null)
-  const messages = React.useMemo(
-    () =>
-      buildQuestConnectorMessages(feed, {
-        reason: t('copilot_connector_reason'),
-        next: t('copilot_connector_next'),
-      }),
-    [feed, t]
-  )
-  const chatMessages = React.useMemo(
-    () => messages.filter((item) => item.emphasis !== 'event'),
-    [messages]
-  )
+  const contentRef = React.useRef<HTMLDivElement | null>(null)
+  const chatMessages = React.useMemo(() => buildQuestConnectorMessages(feed), [feed])
+  const latestAnimatedMessageId = React.useMemo(() => {
+    for (let index = chatMessages.length - 1; index >= 0; index -= 1) {
+      const item = chatMessages[index]
+      if (item.role === 'assistant' && item.content.trim()) {
+        return item.id
+      }
+    }
+    return null
+  }, [chatMessages])
+  const { isNearBottom } = useAutoFollowScroll({
+    scrollRef: listRef,
+    contentRef,
+    deps: [chatMessages.length, streaming, activeToolCount],
+  })
 
   const filteredCommands = React.useMemo(() => {
     const raw = input.trimStart()
@@ -238,12 +196,6 @@ export function QuestConnectorChatView({
       })
       .slice(0, 6)
   }, [input, slashCommands])
-
-  React.useEffect(() => {
-    const node = listRef.current
-    if (!node) return
-    node.scrollTop = node.scrollHeight
-  }, [chatMessages.length, streaming])
 
   const handleSubmit = React.useCallback(async () => {
     const trimmed = input.trim()
@@ -265,31 +217,24 @@ export function QuestConnectorChatView({
     }
   }, [addToast, input, onSubmit, submitting, t])
 
+  const handleStop = React.useCallback(async () => {
+    if (stopping) return
+    try {
+      await onStopRun()
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught)
+      addToast({
+        title: t('copilot_stop', undefined, 'Stop'),
+        message,
+        variant: 'error',
+      })
+    }
+  }, [addToast, onStopRun, stopping, t])
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {connectionState !== 'connected' || error ? (
-        <div className="px-4 pt-3 text-[11px] text-muted-foreground">
-          {error || connectionState}
-        </div>
-      ) : null}
-
-      <div ref={listRef} className="feed-scrollbar flex-1 min-h-0 space-y-3 overflow-y-auto px-4 py-4">
-        {chatMessages.length === 0 ? (
-          <div className="flex min-h-full items-center justify-center text-sm text-muted-foreground">
-            {restoring || loading ? t('copilot_connector_restoring') : t('copilot_connector_ready')}
-          </div>
-        ) : (
-          chatMessages.map((item) => <MessageBubble key={item.id} item={item} />)
-        )}
-
-        {(loading || restoring) && chatMessages.length === 0 ? (
-          <div className="flex justify-center py-4">
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-          </div>
-        ) : null}
-      </div>
-
-      <div className="border-t border-black/[0.06] bg-white/[0.35] px-4 py-3 backdrop-blur-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
+    <QuestCopilotPaneLayout
+      statusLine={connectionState !== 'connected' || error ? error || connectionState : undefined}
+      footer={
         <div className="relative">
           {filteredCommands.length > 0 ? (
             <div className="absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-2xl border border-black/[0.08] bg-white/[0.92] shadow-[0_18px_42px_-34px_rgba(17,24,39,0.22)] dark:border-white/[0.10] dark:bg-[rgba(34,37,44,0.92)]">
@@ -335,15 +280,20 @@ export function QuestConnectorChatView({
           <div className="mt-2 flex items-center justify-between gap-3">
             <div className="text-[11px] text-muted-foreground">{t('copilot_connector_enter_hint')}</div>
             <div className="flex items-center gap-2">
-              {streaming ? (
+              {showStopButton || stopping ? (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   className="h-8 rounded-full"
-                  onClick={() => void onStopRun()}
+                  disabled={stopping}
+                  onClick={() => void handleStop()}
                 >
-                  <Square className="mr-2 h-3.5 w-3.5" />
+                  {stopping ? (
+                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Square className="mr-2 h-3.5 w-3.5" />
+                  )}
                   {t('copilot_stop')}
                 </Button>
               ) : null}
@@ -364,8 +314,47 @@ export function QuestConnectorChatView({
             </div>
           </div>
         </div>
-      </div>
-    </div>
+      }
+    >
+      {({ bottomInset }) => (
+        <ChatScrollProvider value={{ isNearBottom }}>
+          <div
+            ref={listRef}
+            className="feed-scrollbar flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-4 pt-4"
+            style={{
+              paddingBottom: bottomInset,
+              scrollPaddingBottom: bottomInset,
+            }}
+          >
+            <div ref={contentRef} className="flex min-w-0 flex-col gap-3">
+              {chatMessages.length === 0 ? (
+                <div className="flex min-h-full items-center justify-center text-sm text-muted-foreground">
+                  {restoring || loading ? t('copilot_connector_restoring') : t('copilot_connector_ready')}
+                </div>
+              ) : (
+                chatMessages.map((item) => (
+                  <MessageBubble
+                    key={item.id}
+                    item={item}
+                    animateText={
+                      item.role === 'assistant' &&
+                      latestAnimatedMessageId === item.id &&
+                      Boolean(item.streaming || streaming)
+                    }
+                  />
+                ))
+              )}
+
+              {(loading || restoring) && chatMessages.length === 0 ? (
+                <div className="flex justify-center py-4">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </ChatScrollProvider>
+      )}
+    </QuestCopilotPaneLayout>
   )
 }
 

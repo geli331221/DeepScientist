@@ -141,13 +141,46 @@ export interface ConnectorSnapshot {
   enabled?: boolean
   connection_state?: string
   auth_state?: string
+  last_error?: string | null
   inbox_count?: number
   outbox_count?: number
   ignored_count?: number
   binding_count?: number
   target_count?: number
+  recent_conversations?: ConnectorRecentConversation[]
+  recent_events?: ConnectorRecentEvent[]
   default_target?: ConnectorTargetSnapshot | null
   discovered_targets?: ConnectorTargetSnapshot[]
+  details?: Record<string, unknown>
+}
+
+export interface ConnectorRecentConversation {
+  conversation_id: string
+  connector?: string
+  chat_type: string
+  chat_id: string
+  label?: string | null
+  source?: string | null
+  sender_id?: string | null
+  sender_name?: string | null
+  quest_id?: string | null
+  message_id?: string | null
+  updated_at?: string | null
+}
+
+export interface ConnectorRecentEvent {
+  event_type: 'inbound' | 'outbound' | 'ignored'
+  created_at?: string | null
+  conversation_id?: string | null
+  chat_type?: string | null
+  chat_id?: string | null
+  label?: string | null
+  kind?: string | null
+  message?: string | null
+  reason?: string | null
+  ok?: boolean | null
+  queued?: boolean | null
+  transport?: string | null
 }
 
 export interface ConnectorTargetSnapshot {
@@ -324,11 +357,14 @@ export interface ConfigTestPayload {
 }
 
 export interface MemoryCard {
+  id?: string
   document_id?: string
   title?: string
   excerpt?: string
   type?: string
   path?: string
+  updated_at?: string
+  writable?: boolean
 }
 
 export interface GraphPayload {
@@ -444,6 +480,18 @@ export interface GitBranchNode {
   breakthrough?: boolean
   breakthrough_level?: string | null
   recent_artifacts?: GitBranchArtifactSummary[]
+  branch_no?: string | null
+  idea_title?: string | null
+  idea_problem?: string | null
+  next_target?: string | null
+  lineage_intent?: string | null
+  parent_branch?: string | null
+  foundation_ref?: Record<string, unknown> | null
+  foundation_reason?: string | null
+  idea_md_path?: string | null
+  idea_draft_path?: string | null
+  latest_main_experiment?: Record<string, unknown> | null
+  experiment_count?: number | null
 }
 
 export interface GitBranchEdge {
@@ -744,12 +792,81 @@ export interface QuestNodeTraceDetailPayload {
   trace: QuestNodeTrace
 }
 
+export interface QuestStageField {
+  id: string
+  label: string
+  value: unknown
+  display_value?: string | null
+  tone?: string | null
+}
+
+export interface QuestStageFileEntry {
+  id: string
+  label: string
+  description?: string | null
+  path: string
+  absolute_path?: string | null
+  document_id?: string | null
+  kind: 'file' | 'directory' | string
+  exists: boolean
+  scope?: string | null
+}
+
+export interface QuestStageHistoryEntry {
+  id: string
+  artifact_id?: string | null
+  artifact_kind?: string | null
+  title: string
+  summary?: string | null
+  status?: string | null
+  created_at?: string | null
+  path?: string | null
+  document_id?: string | null
+  run_id?: string | null
+  campaign_id?: string | null
+  slice_id?: string | null
+}
+
+export interface QuestStageViewPayload {
+  quest_id: string
+  stage_key: string
+  stage_label: string
+  selection_ref?: string | null
+  selection_type?: string | null
+  branch_name?: string | null
+  title: string
+  note: string
+  status?: string | null
+  tags?: string[]
+  scope_paths?: string[]
+  compare_base?: string | null
+  compare_head?: string | null
+  snapshot_revision?: string | null
+  branch_no?: string | null
+  lineage_intent?: string | null
+  parent_branch?: string | null
+  foundation_ref?: Record<string, unknown> | null
+  foundation_reason?: string | null
+  foundation_label?: string | null
+  idea_draft_path?: string | null
+  draft_available?: boolean
+  subviews?: string[]
+  sections: {
+    overview: QuestStageField[]
+    key_facts: QuestStageField[]
+    key_files: QuestStageFileEntry[]
+    history: QuestStageHistoryEntry[]
+  }
+  details?: Record<string, unknown>
+}
+
 export interface ExplorerNode {
   id: string
   name: string
   path: string
   kind: 'file' | 'directory'
   scope: string
+  folder_kind?: string
   writable?: boolean
   document_id?: string
   open_kind?: 'markdown' | 'code' | 'text' | string

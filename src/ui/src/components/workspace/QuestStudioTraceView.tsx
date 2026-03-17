@@ -3,12 +3,13 @@
 import * as React from 'react'
 import { ArrowUp, Loader2, Slash, Square } from 'lucide-react'
 
-import { EventFeed } from '@/components/EventFeed'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/components/ui/toast'
 import { useI18n } from '@/lib/i18n/useI18n'
-import type { FeedItem } from '@/types'
+import type { FeedItem, QuestSummary } from '@/types'
+import { QuestCopilotPaneLayout } from './QuestCopilotPaneLayout'
+import { QuestStudioDirectTimeline } from './QuestStudioDirectTimeline'
 
 type ConnectorCommand = {
   name: string
@@ -18,12 +19,15 @@ type ConnectorCommand = {
 type QuestStudioTraceViewProps = {
   questId: string
   feed: FeedItem[]
+  snapshot?: QuestSummary | null
   loading: boolean
   restoring: boolean
   streaming: boolean
   activeToolCount: number
   connectionState: 'connecting' | 'connected' | 'reconnecting' | 'error'
   error?: string | null
+  stopping?: boolean
+  showStopButton?: boolean
   slashCommands?: ConnectorCommand[]
   onSubmit: (message: string) => Promise<void>
   onStopRun: () => Promise<void>
@@ -32,12 +36,15 @@ type QuestStudioTraceViewProps = {
 export function QuestStudioTraceView({
   questId,
   feed,
+  snapshot,
   loading,
   restoring,
   streaming,
   activeToolCount,
   connectionState,
   error,
+  stopping = false,
+  showStopButton = false,
   slashCommands = [],
   onSubmit,
   onStopRun,
@@ -83,33 +90,23 @@ export function QuestStudioTraceView({
     }
   }, [addToast, input, onSubmit, submitting, t])
 
-  const statusLine = React.useMemo(() => {
-    if (error) return error
-    if (connectionState !== 'connected') return connectionState
-    if (streaming) {
-      return activeToolCount > 0 ? `working · ${activeToolCount} tools` : 'working'
+  const handleStop = React.useCallback(async () => {
+    if (stopping) return
+    try {
+      await onStopRun()
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught)
+      addToast({
+        title: t('copilot_stop', undefined, 'Stop'),
+        message,
+        variant: 'error',
+      })
     }
-    return ''
-  }, [activeToolCount, connectionState, error, streaming])
+  }, [addToast, onStopRun, stopping, t])
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {statusLine ? (
-        <div className="px-4 pt-3 text-[11px] text-muted-foreground">{statusLine}</div>
-      ) : null}
-
-      <div className="flex-1 min-h-0 px-4 py-4">
-        <EventFeed
-          questId={questId}
-          items={feed}
-          loading={loading}
-          restoring={restoring}
-          connectionState={connectionState}
-          emptyLabel={t('copilot_studio_empty', undefined, 'Copilot trace appears here.')}
-        />
-      </div>
-
-      <div className="border-t border-black/[0.06] bg-white/[0.35] px-4 py-3 backdrop-blur-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
+    <QuestCopilotPaneLayout
+      footer={
         <div className="relative">
           {filteredCommands.length > 0 ? (
             <div className="absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-2xl border border-black/[0.08] bg-white/[0.92] shadow-[0_18px_42px_-34px_rgba(17,24,39,0.22)] dark:border-white/[0.10] dark:bg-[rgba(34,37,44,0.92)]">
@@ -154,15 +151,20 @@ export function QuestStudioTraceView({
           <div className="mt-2 flex items-center justify-between gap-3">
             <div className="text-[11px] text-muted-foreground">{t('copilot_connector_enter_hint')}</div>
             <div className="flex items-center gap-2">
-              {streaming ? (
+              {showStopButton || stopping ? (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   className="h-8 rounded-full"
-                  onClick={() => void onStopRun()}
+                  disabled={stopping}
+                  onClick={() => void handleStop()}
                 >
-                  <Square className="mr-2 h-3.5 w-3.5" />
+                  {stopping ? (
+                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Square className="mr-2 h-3.5 w-3.5" />
+                  )}
                   {t('copilot_stop')}
                 </Button>
               ) : null}
@@ -183,8 +185,24 @@ export function QuestStudioTraceView({
             </div>
           </div>
         </div>
-      </div>
-    </div>
+      }
+    >
+      {({ bottomInset }) => (
+        <QuestStudioDirectTimeline
+          questId={questId}
+          feed={feed}
+          loading={loading}
+          restoring={restoring}
+          streaming={streaming}
+          activeToolCount={activeToolCount}
+          connectionState={connectionState}
+          error={error}
+          snapshot={snapshot}
+          emptyLabel={t('copilot_studio_empty', undefined, 'Copilot trace appears here.')}
+          bottomInset={bottomInset}
+        />
+      )}
+    </QuestCopilotPaneLayout>
   )
 }
 

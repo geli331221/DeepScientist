@@ -10,10 +10,16 @@ Use this skill to turn the current baseline and problem frame into concrete, lit
 ## Interaction discipline
 
 - Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the latest user instruction bundle before selecting or refining ideas.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only at real checkpoints, and normally no more frequently than every 5 to 15 tool calls.
-- Each progress update must state completed analysis, the durable output touched, and the immediate next ideation step.
-- Message templates are references only. Adapt to the actual context and vary wording so updates feel respectful, human, and non-robotic.
+- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before selecting or refining ideas.
+- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
+- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or an occasional keepalive during truly long work. Do not update by tool-call cadence.
+- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
+- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- Keep ordinary subtask completions concise. When the idea stage actually finishes a meaningful deliverable such as a selected idea package, a rejected-ideas summary, or a route-shaping ideation checkpoint, upgrade to a richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` report.
+- That richer idea-stage milestone report should normally cover: the final selected or rejected direction, why it won or lost, the main remaining risk, and the exact recommended next stage or experiment.
+- That richer milestone report is still normally non-blocking. If the next experiment or route is already clear from durable evidence, continue automatically after reporting instead of waiting.
+- If the runtime starts an auto-continue turn with no new user message, keep advancing from the active requirements and current durable state instead of re-answering the previous user turn.
+- Message templates are references only. Adapt to the actual context and vary wording so updates feel natural and non-robotic.
 - Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
 - For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, wait up to 1 day when feasible, then choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest idea progress update before assuming the task changed completely.
@@ -30,11 +36,35 @@ It should produce executable hypotheses tied to:
 
 This stage is not just "brainstorming".
 It is the research-direction selection stage.
+It should normally create a new candidate direction branch and node; it does not by itself decide the next optimization round.
 The output must survive three checks at once:
 
 - novelty or at least clear research value
 - feasibility in the current repo and resource budget
 - manuscript defensibility if the line later becomes a paper claim
+
+Finishing one idea deliverable is not quest completion.
+After reporting a completed idea package, continue into the next justified stage unless a real blocking decision is still unresolved.
+
+When the quest disables research-paper delivery, keep manuscript defensibility secondary to:
+
+- algorithmic value
+- feasibility
+- clean experimental follow-through
+- durable recording of why this direction should be the next measured attempt
+
+Before starting a genuinely new round, default to the current research head as the foundation.
+However, you may deliberately choose a different foundation when the durable evidence says it is better.
+When the best starting point is not obvious, inspect `artifact.list_research_branches(...)` first and compare:
+
+- current head
+- baseline foundation
+- strongest recent measured branch
+- older but cleaner branch
+
+If you do not use the default current head, record the reason explicitly in the new idea submission.
+Treat a newly accepted branch as one durable research round.
+If the active branch already has a durable main-experiment result and you are starting a genuinely new optimization round, prefer creating a child branch from the chosen foundation rather than revising the old branch in place.
 
 At the direction level, prefer elegant algorithmic or theoretical improvements over brute-force cost-for-performance tradeoffs whenever possible.
 
@@ -45,8 +75,31 @@ This stage should preserve the strongest old DeepScientist direction-selection l
 - derive limitations
 - produce a compact set of candidate ideas from an explicit direction set
 - rank them with explicit tradeoffs
-- choose a direction with a cheap falsification path
+- choose a direction with a clear evidence-based decision path
 - ensure the selected direction is manuscript-defensible rather than merely implementation-plausible
+
+Use a compact search discipline during ideation:
+
+- first identify the current strongest line from existing results, literature, and branch history
+- treat that line as the current `incumbent`
+- keep only a small `frontier`, usually 2 to 3 serious alternatives
+- ensure the frontier is meaningfully differentiated rather than the same idea renamed
+- prefer selecting from existing evidence over expanding the candidate list indefinitely
+
+Candidate sets should usually cover some mix of:
+
+- a strong local refinement of the incumbent
+- an orthogonal alternative that addresses the same bottleneck differently
+- a cleaner or more defensible route with lower conceptual complexity
+
+Do not default to “run a small experiment and see” as the way to break ties.
+Break ties primarily through careful reasoning over:
+
+- existing experiment results
+- failure patterns
+- related-work overlap
+- code-path feasibility
+- claim defensibility
 
 ## Non-negotiable rules
 
@@ -57,6 +110,11 @@ This stage should preserve the strongest old DeepScientist direction-selection l
 - Every fresh idea build or idea-refinement pass must begin with:
   - a memory sweep, and
   - an external literature sweep.
+- Every fresh or resumed idea pass must update `artifacts/idea/literature_survey.md` or an equivalent durable survey report before a direction is promoted.
+- Every survey update must explicitly separate:
+  - reused prior survey coverage
+  - newly added papers or comparisons from this pass
+  - still-missing or unresolved overlaps
 - When a web/search tool is available, actively use it.
   Prefer web search for paper discovery, usually targeting arXiv first, then expand with citation and open-web search for neighborhood coverage.
 - When a concrete arXiv paper needs to be read, compared, or summarized, use `artifact.arxiv(paper_id=..., full_text=False)`.
@@ -69,6 +127,8 @@ This stage should preserve the strongest old DeepScientist direction-selection l
 - Treat ideation as read-heavy and write-light: inspect code and papers, but avoid substantial implementation during this stage.
 - Do not propose directions that require new datasets.
 - Do not default to brute-force engineering escalation when a cleaner first-principles direction is available.
+- Do not keep generating more ideas once a small, clearly ranked frontier already exists.
+- Do not treat superficial variation as a new idea if the expected mechanism and evidence burden are effectively unchanged.
 - Do not promote a direction unless you can explain:
   - what limitation it targets
   - why prior methods do not already solve it
@@ -199,10 +259,15 @@ The idea stage should usually leave behind:
 
 - a limitations analysis
 - a literature survey report
+- a survey-delta section that marks:
+  - reused findings
+  - newly retrieved papers this pass
+  - unresolved gaps or watchlist items
 - a related-work map
 - a novelty and research-value audit
 - `2-5` candidate ideas
 - a selected idea or explicit rejection of the current line
+- a durable Markdown idea draft that is finalized before the accepted idea is submitted
 - one or more memory cards for reusable rationale
 - one or more quest `papers` cards for the strongest papers or search clusters
 - an idea artifact and a decision artifact
@@ -220,6 +285,17 @@ Recommended durable intermediate outputs:
   - evaluation metrics and success criteria
   - infrastructure and constraint notes
   - claim boundary
+
+When producing a fuller research-outline style note, prefer a direct-agent-like structure:
+
+- `Executive Summary`
+- `Codebase Analysis`
+- `Limitations / Bottlenecks`
+- `KPIs`
+- `Research Directions`
+- `Risks & Mitigations`
+
+Do not force this structure for every tiny ideation turn, but use it when the quest needs a serious research-plan artifact.
 
 Recommended durable files:
 
@@ -277,6 +353,10 @@ Before generating ideas, state:
   - `Insight`
   - `Performance`
   - `Capability`
+- the problem importance in one sentence
+- the main challenge or bottleneck in one sentence
+- whether the direction is emerging, stable, or late relative to the current literature wave
+- the risk that the direction is valuable but may still be under-recognized
 - one sentence for the intended increment over the strongest baseline
 - what new knowledge the reader would gain if this line works
 
@@ -290,6 +370,7 @@ Before deep searching, write a compact plan for:
 - which literature buckets you will search
 - which evidence would validate or refute your current hypothesis
 - which prior ideas, findings, or failed attempts must not be duplicated blindly
+- a short first-principles memo explaining what you currently believe before you let the literature reshape that belief
 
 The plan does not need to be long.
 It does need to make the search strategy explicit.
@@ -302,6 +383,7 @@ At minimum:
 
 - inspect recent quest `papers`, `ideas`, `decisions`, and `knowledge`
 - inspect recent global `papers`, `knowledge`, and `templates` if the topic looks reusable
+- inspect the latest `artifacts/idea/literature_survey.md` or equivalent survey report when it exists
 - run `memory.search(...)` on:
   - the baseline method name
   - the task and dataset
@@ -314,6 +396,12 @@ At minimum:
 
 If the quest already has a strong survey and paper memory set, do not blindly repeat the whole search.
 Only search the open web for uncovered gaps, newer papers, or unclear overlaps.
+Every new external query should close one of these explicit gaps:
+
+- missing paper bucket
+- newer-than-last-survey refresh
+- unresolved overlap with a candidate idea
+- verification of a paper that might block novelty or value claims
 
 ### 2. Run the related-work sweep
 
@@ -339,6 +427,9 @@ For each meaningful search query or paper cluster, record:
 - which papers were newly added
 - which previously known papers were re-confirmed
 - which gaps remain after this pass
+
+Do not treat the search ledger as optional prose.
+It is the durable reason why the next idea pass should search only the remaining gaps instead of restarting broad discovery from zero.
 
 For the shortlist of closest papers, record:
 
@@ -495,6 +586,29 @@ When possible, make the direction-generation step explicitly two-layered:
 Then reduce to a compact `2-5` candidate set for actual selection.
 When operating in a tightly scoped idea assignment, prefer converging to one final idea rather than dumping many half-baked options.
 
+When the search space is not tiny, try to preserve diversity in the final candidate set:
+
+- one conservative or low-risk line
+- one higher-upside line
+- one elegance-first line with low engineering burden
+
+If all surviving candidates are minor variants of the same mechanism family, widen the search once before converging.
+
+When the quest needs a stronger strategist-style ideation pass, prefer a two-layer direct-agent framing for each direction:
+
+1. conceptual thrust
+   - one memorable abstract phrase
+2. first-principles rationale
+   - why the direction should work from mathematical, algorithmic, or logical reasoning
+3. path to an elegant solution
+   - why it is better than brute-force scaling or expensive engineering
+4. innovation factor
+   - what appears genuinely unexplored or underexplored
+5. research value justification
+   - why the direction should score well on usefulness, quality, or exploration value
+6. optional cross-domain inspiration
+   - where the idea borrows its structural intuition, if relevant
+
 For each candidate idea, specify:
 
 - mechanism
@@ -506,6 +620,18 @@ For each candidate idea, specify:
 - strongest competing hypothesis
 - closest prior work and novelty / value verdict
 - whether it overlaps too much with prior quest ideas or prior failed findings
+
+Treat each serious candidate as a compact decision package, not a slogan.
+For every candidate that survives initial triage, make sure you can state:
+
+- target limitation
+- why current methods still fail here
+- the smallest credible implementation surface in the current repo
+- the primary metric that would matter first
+- the cheapest falsification path
+- the abandonment condition
+- the reader-facing payoff if it works
+- the exact reason it is still worth trying despite the closest prior work
 
 When possible, also specify:
 
@@ -531,6 +657,15 @@ Score each candidate along explicit axes:
 - research value even if not fully novel
 - expected information gain
 - reusability as a platform capability
+
+Also keep a compact strategist-style score lens when useful:
+
+- `utility_score`
+- `quality_score`
+- `exploration_score`
+
+If these are used, explain the scores in prose rather than treating them as magic numbers.
+Use them as a secondary decision lens, not as a substitute for evidence-backed reasoning.
 
 Avoid "best sounding" choices.
 Prefer the best-explained choice.
@@ -569,12 +704,19 @@ Before selecting, perform a narrative defensibility precheck:
 - what evidence package would be needed later to defend it?
 - what is the claim boundary?
 - what is the strongest nearby prior work, and what remains differentiating here?
+- why is this the highest-leverage direction to invest in now, rather than merely one direction that could work?
 
 If the direction is not defensible even in outline form, do not promote it just because it is implementable.
 
 If multiple directions remain plausible and the choice is materially preference-sensitive, ask the user for a structured decision instead of pretending the tradeoff is objective.
 
 If the real issue is that literature coverage is weak or novelty is uncertain, route back to `scout` rather than forcing an idea selection.
+
+When the stage reaches a route-shaping outcome, notify the user through `artifact.interact(...)` deliberately:
+
+- use a richer threaded `milestone` update when a selected idea package, a rejected-ideas summary, or a route back to `scout` is durably recorded
+- the update should name the winner or rejection result, the strongest supporting evidence, the main residual risk, and the exact recommended next stage
+- if more than one candidate remains genuinely plausible and preference-sensitive, use `reply_mode='blocking'` for the user decision instead of pretending the choice is objective
 
 ## Idea output contract
 
@@ -692,6 +834,8 @@ Use tags to sharpen retrieval when helpful, for example:
 - `type:selection-rationale`
 - `topic:<mechanism>`
 
+When calling `memory.write(...)`, pass `tags` as an array like `["stage:idea", "type:selection-rationale", "topic:<mechanism>"]`, not as one comma-joined string.
+
 Recommended read timing:
 
 - before any new paper search:
@@ -708,6 +852,11 @@ Recommended read timing:
 Stage-end requirement:
 
 - if ideation produced a durable survey conclusion, selected-idea rationale, rejected-idea lesson, or novelty caveat, write at least one `memory.write(...)` before leaving the stage
+- at least one quest memory card should preserve the survey delta with retrieval hints, such as:
+  - covered paper buckets
+  - unresolved buckets
+  - paper identifiers or arXiv ids
+  - search-window notes like `searched_through: 2026-03`
 
 When writing paper memory cards, include enough metadata to avoid redundant search later, such as:
 
@@ -738,6 +887,7 @@ Preferred artifact choices:
 
 - use `report` for:
   - literature survey synthesis
+  - survey-delta refresh
   - related-work mapping
   - limitation analysis
   - novelty or value audit
@@ -749,8 +899,26 @@ Preferred artifact choices:
 - use `approval` when the user explicitly confirms a preference-sensitive choice
 - use `milestone` when ideation hits a meaningful user-visible checkpoint
 
-If the idea is selected and becomes the active route, immediately call `artifact.submit_idea(mode='create', ...)`.
-If you are refining the already-active idea, call `artifact.submit_idea(mode='revise', ...)`.
+If the idea is selected and becomes the active route, immediately call `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)`.
+Before that call, first finalize a concise but durable Markdown draft for the chosen route.
+That draft should usually cover:
+
+- executive summary
+- bottleneck or limitation framing
+- closest prior work and overlap
+- any cross-domain inspirations worth borrowing
+- selected claim
+- theory and method
+- code-level change plan
+- evaluation or falsification plan
+- risks, caveats, and implementation notes
+
+Use the draft to think clearly first, then compress the accepted contract into the structured `artifact.submit_idea(...)` fields.
+When the MCP surface supports it, pass the final Markdown draft through `draft_markdown` so the branch records both `idea.md` and `draft.md`.
+Normal durable idea flow should create a new branch and a new canvas node every time an accepted idea package changes meaningfully, including documentation-only idea-package changes.
+Use `lineage_intent='continue_line'` when the new idea is a child of the current active branch.
+Use `lineage_intent='branch_alternative'` when the new idea should branch from the current branch's parent foundation as a sibling-like alternative.
+`artifact.submit_idea(mode='revise', ...)` is maintenance-only compatibility for the same branch and should not be the normal research-route mechanism.
 Do not prefer `artifact.prepare_branch(...)` for the normal idea-selection path.
 
 Do not record a final selected-idea artifact without first recording a literature survey `report`.

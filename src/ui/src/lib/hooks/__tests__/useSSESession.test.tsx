@@ -8,12 +8,6 @@ jest.mock('@/lib/api/client', () => ({
   getApiBaseUrl: () => 'http://example.com',
 }))
 
-jest.mock('@/lib/share-session', () => ({
-  getShareSessionToken: () => null,
-  getShareSessionMeta: () => null,
-  getActiveShareProjectId: () => null,
-}))
-
 function resetStore() {
   useChatSessionStore.setState({
     sessionIdsByProject: {},

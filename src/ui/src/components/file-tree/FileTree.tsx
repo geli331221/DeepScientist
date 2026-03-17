@@ -38,6 +38,9 @@ export interface FileTreeProps {
   /** Height of the tree (defaults to 100%) */
   height?: number | string;
 
+  /** Row height for each tree item (defaults to 28). */
+  rowHeight?: number;
+
   /** When true, disables all mutating actions (drag/rename/create/upload/delete). */
   readOnly?: boolean;
 
@@ -97,6 +100,7 @@ export function FileTree({
   onFileDownload,
   className,
   height = "100%",
+  rowHeight = 28,
   readOnly = false,
   hideDotfiles = false,
   nodesOverride,
@@ -512,7 +516,7 @@ export function FileTree({
                 width={dimensions.width}
                 height={typeof dimensions.height === "number" ? dimensions.height : 400}
                 indent={16}
-                rowHeight={28}
+                rowHeight={rowHeight}
                 paddingTop={4}
                 paddingBottom={4}
                 renderDragPreview={FileTreeDragPreview}

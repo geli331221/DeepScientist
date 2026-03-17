@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 from deepscientist.config import ConfigManager
-from deepscientist.cli import _local_ui_url, init_command, metrics_command, pause_command
+from deepscientist.cli import _local_ui_url, init_command, pause_command
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.quest import QuestService
 from deepscientist.shared import ensure_dir, write_json, write_text
@@ -21,10 +21,15 @@ def test_init_creates_required_files(temp_home: Path) -> None:
     assert (temp_home / "config" / "runners.yaml").exists()
     assert (temp_home / "config" / "connectors.yaml").exists()
     config = manager.load_named("config")
+    runners = manager.load_named_normalized("runners")
     assert config["ui"]["host"] == "0.0.0.0"
     assert config["ui"]["port"] == 20999
-    assert config["ui"]["default_mode"] == "both"
+    assert config["ui"]["default_mode"] == "web"
     assert config["ui"]["auto_open_browser"] is True
+    assert config["bootstrap"]["codex_ready"] is False
+    assert config["bootstrap"]["codex_last_checked_at"] is None
+    assert runners["codex"]["model"] == "gpt-5.4"
+    assert runners["codex"]["model_reasoning_effort"] == "xhigh"
 
 
 def test_new_creates_standalone_git_repo(temp_home: Path) -> None:
@@ -37,6 +42,7 @@ def test_new_creates_standalone_git_repo(temp_home: Path) -> None:
     assert (quest_root / ".gitignore").exists()
     assert (quest_root / "quest.yaml").exists()
     assert (quest_root / "tmp").exists()
+    assert (quest_root / "userfiles").exists()
     assert (quest_root / ".codex" / "skills").exists()
     assert (quest_root / ".claude" / "agents").exists()
     assert (quest_root / ".claude" / "agents" / "deepscientist-decision.md").exists()
@@ -104,27 +110,17 @@ def test_explicit_numeric_quest_id_advances_next_auto_id(temp_home: Path) -> Non
     assert automatic["quest_id"] == "011"
 
 
-def test_metrics_command_accepts_numeric_quest_id(temp_home: Path, capsys) -> None:
+def test_preview_next_numeric_quest_id_matches_allocator_without_consuming_it(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     service = QuestService(temp_home)
-    snapshot = service.create("metrics quest")
-    runs_root = ensure_dir(Path(snapshot["quest_root"]) / "artifacts" / "runs")
-    write_json(
-        runs_root / "run-001.json",
-        {
-            "run_id": "run-001",
-            "run_kind": "main",
-            "exit_code": 0,
-            "summary": "ok",
-        },
-    )
 
-    exit_code = metrics_command(temp_home, "001")
+    assert service.preview_next_numeric_quest_id() == "001"
+    assert service.preview_next_numeric_quest_id() == "001"
 
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert '"run_id": "run-001"' in captured.out
+    created = service.create("preview quest")
 
+    assert created["quest_id"] == "001"
+    assert service.preview_next_numeric_quest_id() == "002"
 
 def test_init_command_syncs_global_skills(temp_home: Path, monkeypatch) -> None:
     ensure_home_layout(temp_home)

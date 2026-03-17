@@ -261,6 +261,60 @@ def build_session_update(
             "model": event.get("model"),
             "summary": event.get("summary"),
         }
+    elif event_type == "runner.turn_retry_started":
+        update_kind = "event"
+        update_payload["data"] = {
+            "label": "run_retry_started",
+            "run_id": event.get("run_id"),
+            "turn_id": event.get("turn_id"),
+            "skill_id": event.get("skill_id"),
+            "model": event.get("model"),
+            "attempt_index": event.get("attempt_index"),
+            "max_attempts": event.get("max_attempts"),
+            "summary": event.get("summary"),
+            "previous_run_id": event.get("previous_run_id"),
+        }
+    elif event_type == "runner.turn_retry_scheduled":
+        update_kind = "event"
+        update_payload["data"] = {
+            "label": "run_retry_scheduled",
+            "run_id": event.get("run_id"),
+            "turn_id": event.get("turn_id"),
+            "skill_id": event.get("skill_id"),
+            "model": event.get("model"),
+            "attempt_index": event.get("attempt_index"),
+            "max_attempts": event.get("max_attempts"),
+            "next_attempt_index": event.get("next_attempt_index"),
+            "backoff_seconds": event.get("backoff_seconds"),
+            "summary": event.get("summary"),
+            "failure_summary": event.get("failure_summary"),
+        }
+    elif event_type == "runner.turn_retry_aborted":
+        update_kind = "event"
+        update_payload["data"] = {
+            "label": "run_retry_aborted",
+            "run_id": event.get("run_id"),
+            "turn_id": event.get("turn_id"),
+            "skill_id": event.get("skill_id"),
+            "model": event.get("model"),
+            "attempt_index": event.get("attempt_index"),
+            "max_attempts": event.get("max_attempts"),
+            "summary": event.get("summary"),
+            "failure_summary": event.get("failure_summary"),
+        }
+    elif event_type == "runner.turn_retry_exhausted":
+        update_kind = "event"
+        update_payload["data"] = {
+            "label": "run_retry_exhausted",
+            "run_id": event.get("run_id"),
+            "turn_id": event.get("turn_id"),
+            "skill_id": event.get("skill_id"),
+            "model": event.get("model"),
+            "attempt_index": event.get("attempt_index"),
+            "max_attempts": event.get("max_attempts"),
+            "summary": event.get("summary"),
+            "failure_summary": event.get("failure_summary"),
+        }
     elif event_type == "quest.control":
         update_kind = "event"
         update_payload["data"] = {

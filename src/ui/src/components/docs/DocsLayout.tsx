@@ -365,20 +365,20 @@ export function DocsLayout({ slug = [] }: DocsLayoutProps) {
       {/* Header */}
       <header ref={headerRef} className="sticky top-0 z-50 border-b border-black/10 bg-[#f8f5ef]/90 backdrop-blur-xl">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4">
-	          <Link href="/projects" className="flex items-center gap-2">
-	            <img
-	              src={brandLogoSrc}
-	              alt="DeepScientist"
-	              width={22}
-	              height={22}
-	              className="object-contain"
-	              loading="eager"
-	              fetchPriority="high"
-	              decoding="async"
-	              draggable={false}
-	            />
-	            <span className="hidden sm:inline text-sm font-semibold">DeepScientist</span>
-	          </Link>
+          <Link href="/" className="flex items-center gap-2">
+            <img
+              src={brandLogoSrc}
+              alt="DeepScientist"
+              width={22}
+              height={22}
+              className="object-contain"
+              loading="eager"
+              fetchPriority="high"
+              decoding="async"
+              draggable={false}
+            />
+            <span className="hidden sm:inline text-sm font-semibold">DeepScientist</span>
+          </Link>
           <ChevronRight className="h-4 w-4 text-gray-300" />
           <Link href="/docs" className="text-sm font-medium text-gray-900">
             Docs

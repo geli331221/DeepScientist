@@ -4,7 +4,6 @@ import type {
   BashLogMeta,
   BashSession,
   BashStopResponse,
-  BashTranscriptPage,
 } from '@/lib/types/bash'
 
 export async function listBashSessions(
@@ -64,28 +63,6 @@ export async function getBashLogs(
     latestSeq: parseHeaderNumber(headers['x-bash-log-latest-seq']),
   }
   return { entries: response.data as BashLogEntry[], meta }
-}
-
-export async function getBashTranscriptPage(
-  projectId: string,
-  params: {
-    page: number
-    pageSize?: number
-    bashIds?: string[]
-    chatSessionId?: string
-    bashId?: string
-  }
-) {
-  const response = await apiClient.get(`/api/quests/${projectId}/bash/transcript`, {
-    params: {
-      page: params.page,
-      page_size: params.pageSize,
-      bash_ids: params.bashIds?.length ? params.bashIds.join(',') : undefined,
-      chat_session_id: params.chatSessionId,
-      bash_id: params.bashId,
-    },
-  })
-  return response.data as BashTranscriptPage
 }
 
 export async function stopBashSession(projectId: string, bashId: string, reason?: string) {

@@ -42,6 +42,18 @@ def _route(action: str, label: str, when: str, tradeoff: str) -> dict[str, str]:
     }
 
 
+def _need_research_paper_from_record(record: dict[str, Any]) -> bool:
+    delivery_policy = record.get("delivery_policy") if isinstance(record.get("delivery_policy"), dict) else {}
+    value = delivery_policy.get("need_research_paper")
+    if isinstance(value, bool):
+        return value
+    startup_contract = record.get("startup_contract") if isinstance(record.get("startup_contract"), dict) else {}
+    fallback = startup_contract.get("need_research_paper")
+    if isinstance(fallback, bool):
+        return fallback
+    return True
+
+
 def _guidance(
     *,
     current_anchor: str,
@@ -117,7 +129,10 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
                     _route("continue", "Stay on baseline verification", "Important comparability questions are still open even after confirmation.", "Keeps caution high, but delays ideation."),
                 ],
                 suggested_artifact_calls=[
-                    _artifact_call("artifact.record(kind='idea', ...)", "Capture the candidate hypothesis set."),
+                    _artifact_call(
+                        "artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)",
+                        "Create the first accepted idea branch as a durable research node.",
+                    ),
                     _artifact_call("artifact.record(kind='decision', ...)", "Select the next route with explicit reasons."),
                 ],
                 source_artifact_kind=kind,
@@ -148,6 +163,30 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
         )
 
     if kind == "idea":
+        flow_type = str(record.get("flow_type") or "").strip().lower()
+        protocol_step = str(record.get("protocol_step") or "").strip().lower()
+        if flow_type == "idea_submission" and protocol_step in {"create", "revise"}:
+            return _guidance(
+                current_anchor="idea",
+                recommended_skill="experiment",
+                recommended_action="launch_experiment",
+                summary="Idea branch is ready. Continue with the main experiment on this active research node.",
+                why_now="The accepted idea already has its durable branch/worktree, so the next leverage point is evidence production rather than another route-selection loop.",
+                complete_when=[
+                    "A main experiment is recorded on this idea branch.",
+                    "Metrics versus baseline are written durably.",
+                ],
+                alternative_routes=[
+                    _route("continue", "Inspect the branch once", "A quick branch sanity check is still needed before running.", "Adds caution, but should stay short."),
+                    _route("launch_analysis_campaign", "Analyze first", "The idea package still has unresolved setup ambiguity that needs clarification.", "Can reduce wasted runs, but is unusual before a first main result."),
+                ],
+                suggested_artifact_calls=[
+                    _artifact_call("artifact.record_main_experiment(...)", "Record the first real main result on this branch."),
+                ],
+                source_artifact_kind=kind,
+                source_artifact_id=artifact_id,
+                related_paths=[str(path) for path in related_paths],
+            )
         return _guidance(
             current_anchor="idea",
             recommended_skill="decision",
@@ -156,15 +195,15 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
             why_now="The quest already has a candidate direction, but continuation is still non-trivial and needs an explicit evidence-backed route.",
             complete_when=[
                 "A decision artifact names the chosen candidate or records rejection/reset.",
-                "If accepted, the target branch or run plan is prepared.",
+                "If accepted, the next active branch is already durable and ready for experiment execution.",
             ],
             alternative_routes=[
-                _route("branch", "Branch this idea", "The idea is promising and needs isolated implementation.", "Improves auditability, but creates branch overhead."),
+                _route("continue", "Continue on this branch", "The submitted idea is already the next durable branch.", "Keeps momentum high, but still requires a route decision."),
                 _route("reset", "Reset ideation", "The new idea is still too weak or too vague.", "Avoids wasted implementation, but reopens exploration."),
             ],
             suggested_artifact_calls=[
                 _artifact_call("artifact.record(kind='decision', ...)", "Turn the shortlisted idea into an explicit route choice."),
-                _artifact_call("artifact.prepare_branch(...)", "Create an isolated worktree only after the idea is accepted."),
+                _artifact_call("artifact.record(kind='decision', action='launch_experiment', ...)", "Route the new durable idea branch into the main experiment."),
             ],
             source_artifact_kind=kind,
             source_artifact_id=artifact_id,
@@ -186,12 +225,11 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
                     "Key metrics versus baseline are written durably.",
                 ],
                 alternative_routes=[
-                    _route("prepare_branch", "Prepare branch first", "Implementation risk is high and you need isolation.", "Improves reproducibility, but adds one more setup step."),
+                    _route("continue", "Use the active branch", "The accepted idea already owns an isolated branch/worktree.", "Keeps the normal path simple, but assumes the idea branch is in good shape."),
                     _route("launch_analysis_campaign", "Analyze first", "The setup still has unresolved confounders.", "Reduces implementation waste, but delays primary evidence."),
                 ],
                 suggested_artifact_calls=[
-                    _artifact_call("artifact.prepare_branch(...)", "Create the branch/worktree for the accepted experiment route."),
-                    _artifact_call("artifact.record(kind='run', ...)", "Persist the main experiment outcome."),
+                    _artifact_call("artifact.record_main_experiment(...)", "Persist the main experiment outcome on the active idea branch."),
                 ],
                 source_artifact_kind=kind,
                 source_artifact_id=artifact_id,
@@ -214,8 +252,37 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
                     _route("branch", "Branch another idea", "The current line no longer has the highest value.", "Expands search space, but delays explanation of the current line."),
                 ],
                 suggested_artifact_calls=[
-                    _artifact_call("artifact.prepare_branch(...)", "Spawn analysis branches or worktrees."),
+                    _artifact_call(
+                        "artifact.create_analysis_campaign(...)",
+                        "Spawn one or more structured child analysis branches/worktrees from the current result node.",
+                    ),
                     _artifact_call("artifact.record(kind='report', ...)", "Summarize the campaign before the next route decision."),
+                ],
+                source_artifact_kind=kind,
+                source_artifact_id=artifact_id,
+                related_paths=[str(path) for path in related_paths],
+            )
+        if action == "iterate":
+            return _guidance(
+                current_anchor="decision",
+                recommended_skill="idea",
+                recommended_action=action,
+                summary="Decision accepted: use the latest measured result to start the next optimization round.",
+                why_now=reason or "The current result is strong enough to inform another idea-selection pass without switching into paper work.",
+                complete_when=[
+                    "The latest main result is summarized durably against baseline.",
+                    "A new idea branch is recorded with explicit reasons grounded in the measured result.",
+                ],
+                alternative_routes=[
+                    _route("branch", "Branch an alternative", "The current result is informative, but a sibling direction may now be stronger.", "Improves search breadth, but adds another durable branch."),
+                    _route("launch_analysis_campaign", "Analyze first", "The result is promising but still ambiguous.", "Improves understanding, but delays the next optimization round."),
+                ],
+                suggested_artifact_calls=[
+                    _artifact_call("artifact.record(kind='report', ...)", "Summarize why this result should shape the next optimization round."),
+                    _artifact_call(
+                        "artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)",
+                        "Create the next durable idea branch from the measured result.",
+                    ),
                 ],
                 source_artifact_kind=kind,
                 source_artifact_id=artifact_id,
@@ -384,6 +451,29 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
                 source_artifact_id=artifact_id,
                 related_paths=[str(path) for path in related_paths],
             )
+        if not _need_research_paper_from_record(record):
+            return _guidance(
+                current_anchor="experiment",
+                recommended_skill="decision",
+                recommended_action="continue",
+                summary="Main run recorded. Paper mode is disabled, so the next route should stay focused on optimization rather than writing by default.",
+                why_now="The measured main result should now decide whether to continue the line with a new child branch, branch an alternative, or stop. Paper packaging is not the default goal in this quest mode.",
+                complete_when=[
+                    "A report or decision explains the result versus baseline.",
+                    "The next route is chosen: continue_line, branch_alternative, analysis, continue, or stop.",
+                ],
+                alternative_routes=[
+                    _route("iterate", "Iterate next idea", "The result is promising and should drive the next optimization round.", "Maintains research momentum, but delays any narrative packaging."),
+                    _route("branch", "Branch an alternative", "The current route is informative, but a sibling route may now be stronger.", "Expands search space, but adds another branch."),
+                ],
+                suggested_artifact_calls=[
+                    _artifact_call("artifact.record(kind='report', ...)", "Summarize the main run and explain how it changes the optimization strategy."),
+                    _artifact_call("artifact.record(kind='decision', ...)", "Choose the next optimization route based on the result."),
+                ],
+                source_artifact_kind=kind,
+                source_artifact_id=artifact_id,
+                related_paths=[str(path) for path in related_paths],
+            )
         return _guidance(
             current_anchor="experiment",
             recommended_skill="decision",
@@ -401,6 +491,10 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
             suggested_artifact_calls=[
                 _artifact_call("artifact.record(kind='report', ...)", "Summarize the main run and metric deltas."),
                 _artifact_call("artifact.record(kind='decision', ...)", "Choose the next route based on the result."),
+                _artifact_call(
+                    "artifact.create_analysis_campaign(...)",
+                    "When extra experiments are needed, create them as one-slice or multi-slice child branches from the current result node.",
+                ),
             ],
             source_artifact_kind=kind,
             source_artifact_id=artifact_id,
@@ -629,7 +723,10 @@ def build_guidance_for_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "A decision selects or rejects the current idea set.",
             ],
             suggested_artifact_calls=[
-                _artifact_call("artifact.record(kind='idea', ...)", "Capture the current hypothesis candidates."),
+                _artifact_call(
+                    "artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)",
+                    "Capture the accepted next idea as a new durable research node.",
+                ),
                 _artifact_call("artifact.record(kind='decision', ...)", "Choose the winner or route back."),
             ],
         )
@@ -645,8 +742,7 @@ def build_guidance_for_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "Metric deltas versus baseline are durable.",
             ],
             suggested_artifact_calls=[
-                _artifact_call("artifact.prepare_branch(...)", "Create an isolated run branch if needed."),
-                _artifact_call("artifact.record(kind='run', ...)", "Persist the main experiment result."),
+                _artifact_call("artifact.record_main_experiment(...)", "Persist the main experiment result on the active idea branch."),
             ],
         )
     if anchor == "analysis-campaign":
@@ -661,7 +757,7 @@ def build_guidance_for_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "A report synthesizes what the campaign changed.",
             ],
             suggested_artifact_calls=[
-                _artifact_call("artifact.record(kind='run', ...)", "Persist each analysis run."),
+                _artifact_call("artifact.record_analysis_slice(...)", "Persist each completed analysis slice and advance the campaign."),
                 _artifact_call("artifact.record(kind='report', ...)", "Write the campaign synthesis."),
             ],
         )

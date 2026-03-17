@@ -40,7 +40,7 @@ def build_memory_server(context: McpContext) -> FastMCP:
         body: str = "",
         markdown: str | None = None,
         scope: str = "quest",
-        tags: list[str] | None = None,
+        tags: list[str] | str | None = None,
         metadata: dict[str, Any] | None = None,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -204,13 +204,15 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         name="submit_idea",
         description=(
             "Create or revise the active research idea. "
-            "mode=create creates the idea branch/worktree and idea.md. "
-            "mode=revise updates the existing active idea.md without creating a new branch."
+            "Normal research flow should use mode=create together with lineage_intent=continue_line or branch_alternative, so each durable idea submission becomes a new branch/worktree and a new user-visible research node. "
+            "mode=revise is maintenance-only for refining the current active idea.md in place. "
+            "When foundation_ref is omitted, lineage_intent infers the parent and default foundation from the active research line."
         ),
     )
     def submit_idea(
         mode: str = "create",
         idea_id: str | None = None,
+        lineage_intent: str | None = None,
         title: str = "",
         problem: str = "",
         hypothesis: str = "",
@@ -219,13 +221,17 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         evidence_paths: list[str] | None = None,
         risks: list[str] | None = None,
         decision_reason: str = "",
+        foundation_ref: dict[str, Any] | str | None = None,
+        foundation_reason: str = "",
         next_target: str = "experiment",
+        draft_markdown: str = "",
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return service.submit_idea(
             context.require_quest_root(),
             mode=mode,
             idea_id=idea_id,
+            lineage_intent=lineage_intent,
             title=title,
             problem=problem,
             hypothesis=hypothesis,
@@ -234,8 +240,44 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             evidence_paths=evidence_paths,
             risks=risks,
             decision_reason=decision_reason,
+            foundation_ref=foundation_ref,
+            foundation_reason=foundation_reason,
             next_target=next_target,
+            draft_markdown=draft_markdown,
         )
+
+    @server.tool(
+        name="list_research_branches",
+        description=(
+            "List research branches with branch number, active idea, foundation info, and corresponding main-experiment results. "
+            "Use before creating the next idea when you need to compare possible foundations."
+        ),
+    )
+    def list_research_branches(comment: str | dict[str, Any] | None = None) -> dict[str, Any]:
+        return service.list_research_branches(context.require_quest_root())
+
+    @server.tool(
+        name="resolve_runtime_refs",
+        description=(
+            "Resolve the current canonical research ids and refs. "
+            "Use this before supplementary work when you need the active idea, latest main run, active campaign, outline, or reply-thread ids without guessing."
+        ),
+    )
+    def resolve_runtime_refs(comment: str | dict[str, Any] | None = None) -> dict[str, Any]:
+        return service.resolve_runtime_refs(context.require_quest_root())
+
+    @server.tool(
+        name="get_analysis_campaign",
+        description=(
+            "Get one analysis campaign manifest with todo items, slice status, and next pending slice. "
+            "Pass campaign_id='active' or omit it to recover the active campaign."
+        ),
+    )
+    def get_analysis_campaign(
+        campaign_id: str | None = "active",
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.get_analysis_campaign(context.require_quest_root(), campaign_id=campaign_id)
 
     @server.tool(
         name="record_main_experiment",
@@ -293,8 +335,8 @@ def build_artifact_server(context: McpContext) -> FastMCP:
     @server.tool(
         name="create_analysis_campaign",
         description=(
-            "Create a structured analysis campaign from the active idea branch. "
-            "Each slice receives its own branch/worktree and explicit requirements."
+            "Create a structured analysis campaign from the current workspace/result node. "
+            "Use this for one or more extra experiments; each slice receives its own child branch/worktree and explicit requirements."
         ),
     )
     def create_analysis_campaign(
@@ -302,6 +344,11 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         campaign_goal: str,
         slices: list[dict[str, Any]],
         parent_run_id: str | None = None,
+        campaign_origin: dict[str, Any] | None = None,
+        selected_outline_ref: str | None = None,
+        research_questions: list[str] | None = None,
+        experimental_designs: list[str] | None = None,
+        todo_items: list[dict[str, Any]] | None = None,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return service.create_analysis_campaign(
@@ -310,6 +357,86 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             campaign_goal=campaign_goal,
             parent_run_id=parent_run_id or context.run_id,
             slices=slices,
+            campaign_origin=campaign_origin,
+            selected_outline_ref=selected_outline_ref,
+            research_questions=research_questions,
+            experimental_designs=experimental_designs,
+            todo_items=todo_items,
+        )
+
+    @server.tool(
+        name="submit_paper_outline",
+        description=(
+            "Persist a paper outline candidate, select an approved outline, or revise the selected outline. "
+            "Use this before analysis campaigns that should support final writing claims."
+        ),
+    )
+    def submit_paper_outline(
+        mode: str = "candidate",
+        outline_id: str | None = None,
+        title: str = "",
+        note: str = "",
+        story: str = "",
+        ten_questions: list[str] | None = None,
+        detailed_outline: dict[str, Any] | None = None,
+        review_result: str | None = None,
+        selected_reason: str | None = None,
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.submit_paper_outline(
+            context.require_quest_root(),
+            mode=mode,
+            outline_id=outline_id,
+            title=title,
+            note=note,
+            story=story,
+            ten_questions=ten_questions,
+            detailed_outline=detailed_outline,
+            review_result=review_result,
+            selected_reason=selected_reason,
+        )
+
+    @server.tool(
+        name="list_paper_outlines",
+        description=(
+            "List candidate/revised paper outlines and the selected outline reference. "
+            "Use this before writing-facing analysis campaigns or when you need a valid outline_id."
+        ),
+    )
+    def list_paper_outlines(comment: str | dict[str, Any] | None = None) -> dict[str, Any]:
+        return service.list_paper_outlines(context.require_quest_root())
+
+    @server.tool(
+        name="submit_paper_bundle",
+        description=(
+            "Persist the final paper bundle manifest, including outline, draft, LaTeX/PDF outputs, and build reports."
+        ),
+    )
+    def submit_paper_bundle(
+        title: str | None = None,
+        summary: str = "",
+        outline_path: str | None = None,
+        draft_path: str | None = None,
+        writing_plan_path: str | None = None,
+        references_path: str | None = None,
+        claim_evidence_map_path: str | None = None,
+        compile_report_path: str | None = None,
+        pdf_path: str | None = None,
+        latex_root_path: str | None = None,
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.submit_paper_bundle(
+            context.require_quest_root(),
+            title=title,
+            summary=summary,
+            outline_path=outline_path,
+            draft_path=draft_path,
+            writing_plan_path=writing_plan_path,
+            references_path=references_path,
+            claim_evidence_map_path=claim_evidence_map_path,
+            compile_report_path=compile_report_path,
+            pdf_path=pdf_path,
+            latex_root_path=latex_root_path,
         )
 
     @server.tool(
@@ -329,6 +456,10 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         evidence_paths: list[str] | None = None,
         metric_rows: list[dict[str, Any]] | None = None,
         deviations: list[str] | None = None,
+        claim_impact: str | None = None,
+        reviewer_resolution: str | None = None,
+        manuscript_update_hint: str | None = None,
+        next_recommendation: str | None = None,
         dataset_scope: str = "full",
         subset_approval_ref: str | None = None,
         comment: str | dict[str, Any] | None = None,
@@ -344,6 +475,10 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             evidence_paths=evidence_paths,
             metric_rows=metric_rows,
             deviations=deviations,
+            claim_impact=claim_impact,
+            reviewer_resolution=reviewer_resolution,
+            manuscript_update_hint=manuscript_update_hint,
+            next_recommendation=next_recommendation,
             dataset_scope=dataset_scope,
             subset_approval_ref=subset_approval_ref,
         )
@@ -455,6 +590,8 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         expects_reply: bool | None = None,
         reply_mode: str | None = None,
         options: list[dict[str, Any]] | None = None,
+        surface_actions: list[dict[str, Any]] | None = None,
+        connector_hints: dict[str, Any] | None = None,
         allow_free_text: bool = True,
         reply_schema: dict[str, Any] | None = None,
         reply_to_interaction_id: str | None = None,
@@ -475,10 +612,28 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             expects_reply=expects_reply,
             reply_mode=reply_mode,
             options=options,
+            surface_actions=surface_actions,
+            connector_hints=connector_hints,
             allow_free_text=allow_free_text,
             reply_schema=reply_schema,
             reply_to_interaction_id=reply_to_interaction_id,
             supersede_open_requests=supersede_open_requests,
+        )
+
+    @server.tool(
+        name="complete_quest",
+        description=(
+            "Mark the quest as completed after the user explicitly approved completion via a blocking "
+            "artifact.interact(...) request whose reply_schema.decision_type is `quest_completion_approval`."
+        ),
+    )
+    def complete_quest(
+        summary: str = "",
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.complete_quest(
+            context.require_quest_root(),
+            summary=summary,
         )
 
     return server

@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepscientist"
-version = "0.1.0"
+version = "1.5.1"
 description = "DeepScientist Core skeleton"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 authors = [
   { name = "OpenAI Codex" }
 ]
@@ -17,6 +18,8 @@ dependencies = [
   "mcp>=1.19,<2",
   "Pillow>=10,<12",
   "PyYAML>=6,<7",
+  "rich>=14,<15",
+  "textual>=0.80,<1",
   "websockets>=15,<16"
 ]
 

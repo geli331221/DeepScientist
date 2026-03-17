@@ -84,6 +84,7 @@ type LabQuestGraphCanvasProps = {
   onBranchSelect?: (branch: string) => void
   onEventSelect?: (eventId: string, branchName?: string) => void
   onSelectionChange?: (selection: LabQuestSelectionContext | null) => void
+  onStageOpen?: (selection: LabQuestSelectionContext & { label?: string | null; summary?: string | null }) => void
   showFloatingPanels?: boolean
   minimalChrome?: boolean
 }
@@ -91,6 +92,12 @@ type LabQuestGraphCanvasProps = {
 type QuestNodeData = {
   label: string
   subtitle?: string | null
+  branchNo?: string | null
+  parentBranch?: string | null
+  ideaTitle?: string | null
+  foundationLabel?: string | null
+  foundationReason?: string | null
+  foundationRef?: Record<string, unknown> | null
   status?: string | null
   metric?: string | null
   verdict?: string | null
@@ -204,24 +211,6 @@ type BranchInsight = {
 type PipelineStepStatus = 'done' | 'active' | 'pending'
 
 const GRID_X = 240
-const BRANCH_LANE_HEIGHT = 260
-const BRANCH_LANE_ORDER = ['main', 'idea', 'analysis', 'paper', 'other'] as const
-
-const resolveBranchLaneKey = (node: LabQuestGraphNode): (typeof BRANCH_LANE_ORDER)[number] => {
-  if (node.node_kind === 'baseline_root') return 'main'
-  if (node.node_kind === 'placeholder') {
-    const stageKey = String(node.stage_key || '').trim().toLowerCase()
-    if (stageKey === 'idea') return 'idea'
-    if (stageKey === 'analysis-campaign') return 'analysis'
-    if (stageKey === 'write') return 'paper'
-  }
-  const branchClass = String(node.branch_class || '').trim().toLowerCase()
-  if (branchClass === 'main' || node.branch_name === 'main') return 'main'
-  if (branchClass === 'idea') return 'idea'
-  if (branchClass === 'analysis') return 'analysis'
-  if (branchClass === 'paper') return 'paper'
-  return 'other'
-}
 const GRID_Y = 170
 const DEPTH_SPREAD = 28
 const DAGRE_NODE_WIDTH = 190
@@ -825,6 +814,12 @@ const buildSelectionContext = (
     selectionType: string
     selectionRef: string
     branchName?: string | null
+    branchNo?: string | null
+    parentBranch?: string | null
+    foundationRef?: Record<string, unknown> | null
+    foundationReason?: string | null
+    foundationLabel?: string | null
+    ideaTitle?: string | null
     stageKey?: string | null
     edgeId?: string | null
     agentInstanceId?: string | null
@@ -843,6 +838,12 @@ const buildSelectionContext = (
   selection_ref: payload.selectionRef,
   quest_id: questId,
   branch_name: payload.branchName ?? null,
+  branch_no: payload.branchNo ?? null,
+  parent_branch: payload.parentBranch ?? null,
+  foundation_ref: payload.foundationRef ?? null,
+  foundation_reason: payload.foundationReason ?? null,
+  foundation_label: payload.foundationLabel ?? null,
+  idea_title: payload.ideaTitle ?? null,
   stage_key: payload.stageKey ?? null,
   edge_id: payload.edgeId ?? null,
   agent_instance_id: payload.agentInstanceId ?? null,
@@ -1391,6 +1392,8 @@ const QuestGraphNode = ({ data }: NodeProps) => {
     isPositiveDeltaLabel(nodeData.deltaLabel) ||
     ['good', 'support', 'go'].includes(String(nodeData.verdict || '').toLowerCase())
   const compactSummary =
+    nodeData.ideaTitle ||
+    nodeData.foundationLabel ||
     nodeData.nowDoing ||
     nodeData.summary ||
     nodeData.decisionReason ||
@@ -1398,6 +1401,7 @@ const QuestGraphNode = ({ data }: NodeProps) => {
     nodeData.status ||
     null
   const compactMeta = [
+    nodeData.branchNo ? `#${nodeData.branchNo}` : null,
     nodeData.deltaLabel,
     nodeData.metric,
     nodeData.branchClass ? formatStateLabel(nodeData.branchClass) : null,
@@ -1448,6 +1452,11 @@ const QuestGraphNode = ({ data }: NodeProps) => {
       </div>
       {nodeData.subtitle ? (
         <div className="lab-quest-graph-node__subtitle">{nodeData.subtitle}</div>
+      ) : null}
+      {nodeData.parentBranch || nodeData.foundationLabel ? (
+        <div className="lab-quest-graph-node__subtitle">
+          {nodeData.foundationLabel || nodeData.parentBranch}
+        </div>
       ) : null}
       {nodeData.decisionTarget ? (
         <div className="lab-quest-graph-node__decision-target">{nodeData.decisionTarget}</div>
@@ -1577,54 +1586,12 @@ const buildDagreLayout = (
 }
 
 const buildBranchLayout = (nodes: LabQuestGraphNode[], edges: LabQuestGraphEdge[]) => {
-  const positions = buildDagreLayout(nodes, edges, {
+  if (nodes.length === 0) return {}
+  return buildDagreLayout(nodes, edges, {
     rankdir: 'LR',
-    nodesep: nodes.length > 24 ? 56 : 80,
-    ranksep: nodes.length > 80 ? 110 : 130,
+    nodesep: nodes.length > 60 ? 44 : nodes.length > 24 ? 56 : 78,
+    ranksep: nodes.length > 100 ? 96 : nodes.length > 60 ? 112 : 136,
   })
-  if (nodes.length === 0) return positions
-  const laneMinY = new Map<(typeof BRANCH_LANE_ORDER)[number], number>()
-  nodes.forEach((node) => {
-    const lane = resolveBranchLaneKey(node)
-    const position = positions[node.node_id] ?? { x: 0, y: 0 }
-    const currentMin = laneMinY.get(lane)
-    laneMinY.set(lane, currentMin == null ? position.y : Math.min(currentMin, position.y))
-  })
-  nodes.forEach((node) => {
-    const lane = resolveBranchLaneKey(node)
-    const laneIndex = BRANCH_LANE_ORDER.indexOf(lane)
-    const position = positions[node.node_id] ?? { x: 0, y: 0 }
-    const laneBaseY = laneMinY.get(lane) ?? 0
-    positions[node.node_id] = {
-      x: position.x,
-      y: position.y - laneBaseY + laneIndex * BRANCH_LANE_HEIGHT,
-    }
-  })
-  if (nodes.length > 24) {
-    const wrapEvery = nodes.length > 80 ? 6 : 8
-    const laneRowGap = DAGRE_NODE_HEIGHT + 44
-    const laneGroups = new Map<(typeof BRANCH_LANE_ORDER)[number], LabQuestGraphNode[]>()
-    nodes.forEach((node) => {
-      const lane = resolveBranchLaneKey(node)
-      laneGroups.set(lane, [...(laneGroups.get(lane) || []), node])
-    })
-    laneGroups.forEach((laneNodes, lane) => {
-      const ordered = [...laneNodes].sort(
-        (left, right) => (positions[left.node_id]?.x ?? 0) - (positions[right.node_id]?.x ?? 0)
-      )
-      ordered.forEach((node, index) => {
-        const current = positions[node.node_id] ?? { x: 0, y: 0 }
-        const row = Math.floor(index / wrapEvery)
-        const col = index % wrapEvery
-        const laneIndex = BRANCH_LANE_ORDER.indexOf(lane)
-        positions[node.node_id] = {
-          x: col * (DAGRE_NODE_WIDTH + 78),
-          y: laneIndex * BRANCH_LANE_HEIGHT + row * laneRowGap,
-        }
-      })
-    })
-  }
-  return positions
 }
 
 const buildEventLayout = (nodes: LabQuestGraphNode[], edges: LabQuestGraphEdge[]) =>
@@ -2153,6 +2120,7 @@ function LabQuestGraphCanvasInner({
   onBranchSelect,
   onEventSelect,
   onSelectionChange,
+  onStageOpen,
   showFloatingPanels = true,
   minimalChrome = false,
   fetchGraph,
@@ -2920,7 +2888,7 @@ function LabQuestGraphCanvasInner({
               ? node.status || null
               : isPlaceholder
                 ? t('quest_graph_next_step_placeholder', undefined, 'Next step')
-                : branchInsight?.stageLabel || node.idea_id || 'Idea'
+                : node.idea_title || branchInsight?.stageLabel || node.idea_id || 'Idea'
         const nodeStatus =
           viewMode === 'branch'
             ? isPlaceholder
@@ -2942,6 +2910,12 @@ function LabQuestGraphCanvasInner({
           data: {
             label: label || 'node',
             subtitle,
+            branchNo: node.branch_no ?? null,
+            parentBranch: node.parent_branch ?? null,
+            ideaTitle: node.idea_title ?? null,
+            foundationLabel: node.foundation_label ?? null,
+            foundationReason: node.foundation_reason ?? null,
+            foundationRef: node.foundation_ref ?? null,
             status: nodeStatus,
             metric: viewMode === 'branch' ? null : metric,
             verdict:
@@ -2963,7 +2937,10 @@ function LabQuestGraphCanvasInner({
             eventCount: node.event_count ?? null,
             eventIds: node.event_ids ?? null,
             stageLabel: branchInsight?.stageLabel ?? null,
-            nowDoing: viewMode === 'branch' ? branchInsight?.nowDoing ?? fallbackSummary : null,
+            nowDoing:
+              viewMode === 'branch'
+                ? branchInsight?.nowDoing ?? node.idea_problem ?? fallbackSummary
+                : null,
             decisionReason: viewMode === 'branch' ? branchInsight?.decisionReason ?? null : null,
             evidenceStatus:
               viewMode === 'branch'
@@ -3726,23 +3703,31 @@ function LabQuestGraphCanvasInner({
       }
       if (viewMode === 'stage') {
         const stageData = data as QuestNodeData
-        applySelection(
-          buildSelectionContext(questId, {
-            selectionType: 'stage_node',
-            selectionRef: node.id,
-            branchName: stageData.branchName ?? null,
-            stageKey: stageData.stageKey ?? null,
-            worktreeRelPath: stageData.worktreeRelPath ?? null,
-            traceNodeId: node.id,
-            label: stageData.stageTitle || stageData.label,
-            summary: stageData.summary ?? null,
-            compareBase: stageData.compareBase ?? null,
-            compareHead: stageData.compareHead ?? null,
-            scopePaths: stageData.scopePaths ?? null,
-            nodeKind: stageData.nodeKind ?? null,
-            baselineGate: stageData.baselineGate ?? null,
-          })
-        )
+        const selection = buildSelectionContext(questId, {
+          selectionType: 'stage_node',
+          selectionRef: node.id,
+          branchName: stageData.branchName ?? null,
+          branchNo: stageData.branchNo ?? null,
+          parentBranch: stageData.parentBranch ?? null,
+          foundationRef: stageData.foundationRef ?? null,
+          foundationReason: stageData.foundationReason ?? null,
+          foundationLabel: stageData.foundationLabel ?? null,
+          ideaTitle: stageData.ideaTitle ?? null,
+          stageKey: stageData.stageKey ?? null,
+          worktreeRelPath: stageData.worktreeRelPath ?? null,
+          traceNodeId: node.id,
+          label: stageData.stageTitle || stageData.label,
+          summary: stageData.summary ?? null,
+          compareBase: stageData.compareBase ?? null,
+          compareHead: stageData.compareHead ?? null,
+          scopePaths: stageData.scopePaths ?? null,
+          nodeKind: stageData.nodeKind ?? null,
+          baselineGate: stageData.baselineGate ?? null,
+        })
+        applySelection(selection)
+        if (stageData.nodeKind !== 'placeholder' && onStageOpen) {
+          onStageOpen(selection)
+        }
         return
       }
       const questData = data as QuestNodeData
@@ -3753,30 +3738,38 @@ function LabQuestGraphCanvasInner({
             ? 'workflow_placeholder'
             : 'branch_node'
       if (questData.branchName) {
-        applySelection(
-          buildSelectionContext(questId, {
-            selectionType,
-            selectionRef:
-              selectionType === 'branch_node' ? questData.branchName : node.id,
-            branchName: questData.branchName,
-            stageKey: questData.stageKey ?? null,
-            worktreeRelPath: questData.worktreeRelPath ?? null,
-            traceNodeId: node.id,
-            label: questData.label,
-            summary: questData.summary ?? questData.nowDoing ?? null,
-            compareBase: questData.compareBase ?? null,
-            compareHead: questData.compareHead ?? null,
-            scopePaths: questData.scopePaths ?? null,
-            nodeKind: questData.nodeKind ?? null,
-            baselineGate: questData.baselineGate ?? null,
-          })
-        )
+        const selection = buildSelectionContext(questId, {
+          selectionType,
+          selectionRef:
+            selectionType === 'branch_node' ? questData.branchName : node.id,
+          branchName: questData.branchName,
+          branchNo: questData.branchNo ?? null,
+          parentBranch: questData.parentBranch ?? null,
+          foundationRef: questData.foundationRef ?? null,
+          foundationReason: questData.foundationReason ?? null,
+          foundationLabel: questData.foundationLabel ?? null,
+          ideaTitle: questData.ideaTitle ?? null,
+          stageKey: questData.stageKey ?? null,
+          worktreeRelPath: questData.worktreeRelPath ?? null,
+          traceNodeId: node.id,
+          label: questData.label,
+          summary: questData.summary ?? questData.nowDoing ?? null,
+          compareBase: questData.compareBase ?? null,
+          compareHead: questData.compareHead ?? null,
+          scopePaths: questData.scopePaths ?? null,
+          nodeKind: questData.nodeKind ?? null,
+          baselineGate: questData.baselineGate ?? null,
+        })
+        applySelection(selection)
+        if (selectionType !== 'workflow_placeholder' && onStageOpen) {
+          onStageOpen(selection)
+        }
       }
       if (selectionType === 'branch_node' && questData.branchName && onBranchSelect) {
         onBranchSelect(questData.branchName as string)
       }
     },
-    [applySelection, onBranchSelect, onEventSelect, questId, viewMode]
+    [applySelection, onBranchSelect, onEventSelect, onStageOpen, questId, viewMode]
   )
 
   const handleEdgeClick = React.useCallback(
@@ -4378,56 +4371,48 @@ function LabQuestGraphCanvasInner({
           ) : null}
           {sortedBranches.map((node) => {
             const isActive = node.branch_name === activeBranch
-            const trend = extractTrend(node, { metricKey: curveMetric || null, mode: curveMode })
-            const claimVerdict = extractBranchClaimVerdict(node)
-            const goDecision = extractBranchGoDecision(node)
-            const selectedMetric = pickMetricValue(
-              node.metrics_json as Record<string, unknown> | null,
-              curveMetric || null
-            )
-            const primaryMetric = selectedMetric
-              ? formatMetricLabel(selectedMetric.key, selectedMetric.value)
-              : pickPrimaryMetric(node.metrics_json as Record<string, unknown> | null)
             const insight = node.branch_name ? branchInsights.get(node.branch_name) : null
+            const fromLabel =
+              (typeof node.foundation_label === 'string' && node.foundation_label) ||
+              (typeof node.parent_branch === 'string' && node.parent_branch) ||
+              null
+            const statusLabel =
+              (typeof insight?.stageLabel === 'string' && insight.stageLabel) ||
+              (typeof node.next_target === 'string' && node.next_target) ||
+              'idea'
             return (
               <button
                 key={node.node_id}
                 type="button"
                 className={cn('lab-quest-branch-item', isActive && 'is-active')}
-                onClick={() => node.branch_name && onBranchSelect?.(node.branch_name)}
+                onClick={() => {
+                  if (node.branch_name) {
+                    onBranchSelect?.(node.branch_name)
+                  }
+                }}
               >
-                <div className="lab-quest-branch-item__title">{node.branch_name}</div>
+                <div className="lab-quest-branch-item__title">
+                  {node.branch_no ? `#${node.branch_no} · ` : ''}
+                  {node.idea_title || node.branch_name}
+                </div>
                 <div className="lab-quest-branch-item__meta">
-                  <span>{insight?.stageLabel || 'Idea'}</span>
-                  {insight?.verdict ? <span className={`is-${insight.verdict}`}>{insight.verdict}</span> : null}
-                  {claimVerdict ? (
-                    <span className={cn('lab-quest-graph-node__verdict', `is-${toneForClaimVerdict(claimVerdict)}`)}>
-                      {claimVerdict}
-                    </span>
-                  ) : null}
-                  {goDecision ? (
-                    <span className={cn('lab-quest-graph-node__verdict', `is-${toneForGoDecision(goDecision)}`)}>
-                      {goDecision}
-                    </span>
-                  ) : null}
-                  {primaryMetric ? <span>{primaryMetric}</span> : null}
+                  <span>{node.branch_name}</span>
+                  <span>·</span>
+                  <span>{statusLabel}</span>
                 </div>
+                {fromLabel ? (
+                  <div className="lab-quest-branch-item__line">
+                    <span className="lab-quest-branch-item__label">From</span>
+                    <span>{fromLabel}</span>
+                  </div>
+                ) : null}
                 <div className="lab-quest-branch-item__line">
-                  <span className="lab-quest-branch-item__label">Now</span>
-                  <span>{insight?.nowDoing || 'Waiting for next step'}</span>
-                </div>
-                <div className="lab-quest-branch-item__line">
-                  <span className="lab-quest-branch-item__label">Decision</span>
-                  <span>{insight?.decisionReason || 'No decision yet'}</span>
-                </div>
-                <div className="lab-quest-branch-item__line">
-                  <span className="lab-quest-branch-item__label">Evidence</span>
-                  <span>{insight?.evidenceStatus || 'Pending evidence'}</span>
+                  <span className="lab-quest-branch-item__label">Next</span>
+                  <span>{node.next_target || insight?.nowDoing || 'Waiting for next step'}</span>
                 </div>
                 <div className="lab-quest-branch-item__line lab-quest-branch-item__line--meta">
                   <span>{insight?.updatedAt ? formatRelativeTime(insight.updatedAt) : formatRelativeTime(node.created_at)}</span>
                 </div>
-                {trend ? <MetricCurveChart values={trend} className="lab-quest-sparkline" /> : null}
               </button>
             )
           })}

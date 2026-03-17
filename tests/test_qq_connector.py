@@ -6,9 +6,19 @@ from deepscientist.config import ConfigManager
 from deepscientist.daemon import DaemonApp
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.quest import QuestService
-from deepscientist.shared import read_json
+from deepscientist.shared import read_json, read_jsonl, write_json
 from deepscientist.shared import write_yaml
 from deepscientist.skills import SkillInstaller
+
+
+def test_qq_auto_bind_is_enabled_by_default(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    connectors = manager.load_named("connectors")
+
+    assert connectors["qq"]["auto_bind_dm_to_active_quest"] is True
 
 
 def test_qq_group_requires_binding_and_supports_commands(temp_home: Path) -> None:
@@ -78,7 +88,7 @@ def test_qq_group_requires_binding_and_supports_commands(temp_home: Path) -> Non
     assert "Approval recorded" in approval["reply"]["payload"]["text"]
 
 
-def test_qq_direct_message_starts_in_help_mode_and_auto_binds_to_newest_quest(
+def test_qq_direct_message_auto_binds_to_latest_existing_quest_and_rebinds_to_newest_quest(
     temp_home: Path,
     monkeypatch,
 ) -> None:
@@ -112,10 +122,17 @@ def test_qq_direct_message_starts_in_help_mode_and_auto_binds_to_newest_quest(
     )
     assert first["accepted"] is True
     assert older_quest["quest_id"] in first["reply"]["payload"]["text"]
-    assert "/use" in first["reply"]["payload"]["text"]
-    assert "openid" in first["reply"]["payload"]["text"]
-    assert app.quest_service.history(older_quest["quest_id"]) == []
-    assert app.list_qq_bindings() == []
+    first_history = app.quest_service.history(older_quest["quest_id"])
+    assert first_history
+    assert first_history[-1]["content"] == "请先更新当前研究计划。"
+    assert first_history[-1]["source"] == "qq:direct:user-2"
+    assert any(
+        item["conversation_id"] == "qq:direct:user-2" and item["quest_id"] == older_quest["quest_id"]
+        for item in app.list_qq_bindings()
+    )
+    first_outbox = read_jsonl(temp_home / "logs" / "connectors" / "qq" / "outbox.jsonl")
+    assert first_outbox
+    assert first_outbox[-1]["delivery"]["ok"] is True
 
     latest = app.create_quest(goal="qq latest quest", source="web")
     latest_id = latest["quest_id"]
@@ -154,8 +171,70 @@ def test_qq_direct_message_starts_in_help_mode_and_auto_binds_to_newest_quest(
     assert connector_statuses["qq"]["connection_state"] == "ready"
     assert connector_statuses["qq"]["default_target"]["conversation_id"] == "qq:direct:user-2"
     assert any(item["conversation_id"] == "qq:direct:user-2" for item in connector_statuses["qq"]["discovered_targets"])
+    assert any(item["conversation_id"] == "qq:direct:user-2" for item in connector_statuses["qq"]["recent_conversations"])
+    assert any(item["event_type"] == "outbound" for item in connector_statuses["qq"]["recent_events"])
     assert any(item["text"].startswith("已自动检测并保存当前 QQ openid") for item in deliveries)
+    assert any(older_quest["quest_id"] in item["text"] for item in deliveries)
     assert any(latest_id in item["text"] for item in deliveries)
+    assert any("我即将为您完成以下任务：qq latest quest" in item["text"] for item in deliveries)
+    assert any(f"/use {older_quest['quest_id']}" in item["text"] for item in deliveries)
+    assert not any(f"/use {latest_id}" in item["text"] for item in deliveries)
+    assert any("自动使用这个新 quest 保持连接" in item["text"] for item in deliveries)
+
+
+def test_qq_auto_bind_to_latest_quest_still_happens_when_another_connector_is_primary(
+    temp_home: Path,
+    monkeypatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["_routing"]["primary_connector"] = "telegram"
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    connectors["qq"]["auto_bind_dm_to_active_quest"] = True
+    connectors["telegram"]["enabled"] = True
+    connectors["telegram"]["auto_bind_dm_to_active_quest"] = True
+    write_yaml(manager.path_for("connectors"), connectors)
+    write_json(
+        temp_home / "logs" / "connectors" / "telegram" / "state.json",
+        {"last_conversation_id": "telegram:direct:alice", "updated_at": "2026-03-12T00:00:00+00:00"},
+    )
+
+    deliveries: list[dict] = []
+
+    def fake_deliver(_self, payload, _config):  # noqa: ANN001
+        deliveries.append(dict(payload))
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_deliver)
+    app = DaemonApp(temp_home)
+
+    first = app.handle_qq_inbound(
+        {
+            "chat_type": "direct",
+            "sender_id": "user-9",
+            "sender_name": "Tester",
+            "text": "先看看现在的任务。",
+        }
+    )
+
+    assert first["accepted"] is True
+    assert app.list_qq_bindings() == []
+
+    latest = app.create_quest(goal="multi connector latest quest", source="web")
+
+    assert any(
+        item["conversation_id"] == "qq:direct:user-9" and item["quest_id"] == latest["quest_id"]
+        for item in app.list_qq_bindings()
+    )
+    assert any(
+        item["conversation_id"] == "telegram:direct:alice" and item["quest_id"] == latest["quest_id"]
+        for item in app.list_connector_bindings("telegram")
+    )
+    assert any("我即将为您完成以下任务：multi connector latest quest" in item["text"] for item in deliveries)
 
 
 def test_qq_direct_message_does_not_overwrite_existing_main_chat_id(temp_home: Path, monkeypatch) -> None:
@@ -187,3 +266,53 @@ def test_qq_direct_message_does_not_overwrite_existing_main_chat_id(temp_home: P
     assert response["accepted"] is True
     assert "existing-openid" == manager.load_named("connectors")["qq"]["main_chat_id"]
     assert "自动检测并保存当前 QQ openid" not in response["reply"]["payload"]["text"]
+
+
+def test_qq_new_command_replies_with_actual_goal(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    deliveries: list[dict] = []
+
+    def fake_deliver(_self, payload, _config):  # noqa: ANN001
+        deliveries.append(dict(payload))
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_deliver)
+    app = DaemonApp(temp_home)
+    monkeypatch.setattr(
+        app,
+        "schedule_turn",
+        lambda quest_id, reason="user_message": {
+            "scheduled": True,
+            "started": True,
+            "queued": False,
+            "reason": reason,
+        },
+    )
+
+    response = app.handle_qq_inbound(
+        {
+            "chat_type": "direct",
+            "sender_id": "user-6",
+            "sender_name": "Tester",
+            "text": "/new 复现一个图神经网络基线",
+        }
+    )
+
+    assert response["accepted"] is True
+    assert "我即将为您完成以下任务：复现一个图神经网络基线" in response["reply"]["payload"]["text"]
+    created_quest_id = str(response["reply"]["payload"]["quest_id"])
+    assert created_quest_id
+    assert "自动使用这个新 quest 保持连接" in response["reply"]["payload"]["text"]
+    assert any("我即将为您完成以下任务：复现一个图神经网络基线" in item["text"] for item in deliveries)
+    history = app.quest_service.history(created_quest_id)
+    assert history
+    assert history[-1]["content"] == "复现一个图神经网络基线"
+    assert history[-1]["source"] == "qq:direct:user-6"

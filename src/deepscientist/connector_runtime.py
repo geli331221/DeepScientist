@@ -59,6 +59,8 @@ def infer_connector_transport(name: str, config: dict[str, Any] | None) -> str:
         ):
             return "legacy_meta_cloud"
         return "local_session"
+    if normalized == "lingzhu":
+        return "openclaw_sse"
     if relay_url and mode == "relay":
         return "relay"
     return "direct"
@@ -85,7 +87,7 @@ def normalize_conversation_id(conversation_id: Any) -> str:
     if not raw:
         return "local:default"
     lowered = raw.lower()
-    if lowered in {"web", "cli", "api", "command", "local", "local-ui", "tui-ink", "web-react", "tui-local"}:
+    if lowered in {"web", "cli", "api", "command", "local", "local-ui", "tui-ink", "tui-textual", "web-react", "tui-local"}:
         return "local:default"
     parsed = parse_conversation_id(raw)
     if parsed is not None:

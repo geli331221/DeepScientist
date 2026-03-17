@@ -208,178 +208,180 @@ export function QuestSettingsSurface({
   )
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-hidden">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-foreground">Quest settings</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            Select which connector receives progress updates for <span className="font-mono">{questId}</span>.
+    <div className="flex h-full min-h-0 flex-col overflow-hidden p-4 sm:p-5">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 rounded-[28px] border border-black/[0.06] bg-white/[0.42] p-4 shadow-card backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.03] sm:p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-foreground">Quest settings</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Select which connector receives progress updates for <span className="font-mono">{questId}</span>.
+            </div>
           </div>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => void reloadConnectors()}
+            disabled={loadingConnectors}
+            className="shrink-0"
+          >
+            <RefreshCw className={cn('mr-2 h-4 w-4', loadingConnectors && 'animate-spin')} />
+            Refresh
+          </Button>
         </div>
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          onClick={() => void reloadConnectors()}
-          disabled={loadingConnectors}
-          className="shrink-0"
-        >
-          <RefreshCw className={cn('mr-2 h-4 w-4', loadingConnectors && 'animate-spin')} />
-          Refresh
-        </Button>
-      </div>
 
-      <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-5">
-        <EnhancedCard
-          enableSpotlight={false}
-          className="border border-border/60 bg-[var(--ds-panel-elevated)]/70 backdrop-blur-xl shadow-[var(--ds-shadow-md)]"
-        >
-          <div className="p-4 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-medium text-foreground">Theme</div>
-              <SegmentedControl
-                value={theme}
-                onValueChange={(value) => setTheme(value)}
-                items={themeItems}
-                size="sm"
-                ariaLabel="Theme selection"
-              />
+        <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-5">
+          <EnhancedCard
+            enableSpotlight={false}
+            className="border border-border/60 bg-[var(--ds-panel-elevated)]/70 backdrop-blur-xl shadow-[var(--ds-shadow-md)]"
+          >
+            <div className="p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium text-foreground">Theme</div>
+                <SegmentedControl
+                  value={theme}
+                  onValueChange={(value) => setTheme(value)}
+                  items={themeItems}
+                  size="sm"
+                  ariaLabel="Theme selection"
+                />
+              </div>
+              <div className="text-xs text-muted-foreground">
+                This setting applies to the whole web workspace (not just this quest).
+              </div>
             </div>
-            <div className="text-xs text-muted-foreground">
-              This setting applies to the whole web workspace (not just this quest).
-            </div>
-          </div>
-        </EnhancedCard>
+          </EnhancedCard>
 
-        <EnhancedCard
-          enableSpotlight={false}
-          className="border border-border/60 bg-[var(--ds-panel-elevated)]/70 backdrop-blur-xl shadow-[var(--ds-shadow-md)]"
-        >
-          <div className="p-4 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium text-foreground">Outbound connector</div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  Only one connector target is kept as the primary delivery destination.
+          <EnhancedCard
+            enableSpotlight={false}
+            className="border border-border/60 bg-[var(--ds-panel-elevated)]/70 backdrop-blur-xl shadow-[var(--ds-shadow-md)]"
+          >
+            <div className="p-4 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Outbound connector</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Only one connector target is kept as the primary delivery destination.
+                  </div>
                 </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void bindConversation('', { force: true })}
+                  disabled={binding}
+                >
+                  <Unlink2 className="mr-2 h-4 w-4" />
+                  Local only
+                </Button>
               </div>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => void bindConversation('', { force: true })}
-                disabled={binding}
-              >
-                <Unlink2 className="mr-2 h-4 w-4" />
-                Local only
-              </Button>
-            </div>
 
-            <Separator className="bg-border/50" />
+              <Separator className="bg-border/50" />
 
-            {connectors.length === 0 ? (
-              <div className="text-sm text-muted-foreground">
-                {loadingConnectors ? 'Loading connectors…' : 'No connector configured yet.'}
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-3">
-                {connectors.map((connector) => {
-                  const badge = connectionBadge(connector)
-                  const targets = connector.discovered_targets || []
-                  const defaultId = connector.default_target?.conversation_id || targets[0]?.conversation_id || ''
-                  const chosen = selection[connector.name] ?? defaultId
-                  const chosenKey = conversationIdentityKey(chosen)
-                  const isBound = Boolean(boundPrimaryKey && chosenKey === boundPrimaryKey)
-                  const boundQuestId = targets.find(
-                    (item) => conversationIdentityKey(item.conversation_id) === chosenKey
-                  )?.quest_id
+              {connectors.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  {loadingConnectors ? 'Loading connectors…' : 'No connector configured yet.'}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {connectors.map((connector) => {
+                    const badge = connectionBadge(connector)
+                    const targets = connector.discovered_targets || []
+                    const defaultId = connector.default_target?.conversation_id || targets[0]?.conversation_id || ''
+                    const chosen = selection[connector.name] ?? defaultId
+                    const chosenKey = conversationIdentityKey(chosen)
+                    const isBound = Boolean(boundPrimaryKey && chosenKey === boundPrimaryKey)
+                    const boundQuestId = targets.find(
+                      (item) => conversationIdentityKey(item.conversation_id) === chosenKey
+                    )?.quest_id
 
-                  return (
-                    <div
-                      key={connector.name}
-                      className={cn(
-                        'rounded-2xl border px-3 py-3 bg-background/40 backdrop-blur-md',
-                        isBound ? 'border-[var(--ds-brand)]/40 shadow-sm' : 'border-border/50'
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-foreground">
-                              {connectorLabel(connector)}
-                            </span>
-                            <Badge variant={badge.variant} className="text-[10px] uppercase tracking-wide">
-                              {badge.label}
-                            </Badge>
-                            {isBound ? (
-                              <span className="inline-flex items-center gap-1 text-xs text-[var(--success-foreground)]">
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                bound
+                    return (
+                      <div
+                        key={connector.name}
+                        className={cn(
+                          'rounded-2xl border px-3 py-3 bg-background/40 backdrop-blur-md',
+                          isBound ? 'border-[var(--ds-brand)]/40 shadow-sm' : 'border-border/50'
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-semibold text-foreground">
+                                {connectorLabel(connector)}
                               </span>
-                            ) : null}
-                          </div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {connector.transport ? `transport: ${connector.transport}` : ' '}
-                          </div>
-                        </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          onClick={() => void bindConversation(chosen || defaultId, { force: false })}
-                          disabled={
-                            binding ||
-                            !connector.enabled ||
-                            !(chosen || defaultId) ||
-                            Boolean(isBound)
-                          }
-                        >
-                          <Link2 className="mr-2 h-4 w-4" />
-                          Bind
-                        </Button>
-                      </div>
-
-                      <div className="mt-3 flex flex-col gap-2">
-                        <div className="flex items-center gap-2">
-                          <div className="text-xs text-muted-foreground shrink-0">Target</div>
-                          <div className="flex-1 min-w-0">
-                            <Select
-                              value={chosen || defaultId}
-                              onValueChange={(value) =>
-                                setSelection((current) => ({ ...current, [connector.name]: value }))
-                              }
-                              disabled={!connector.enabled || targets.length === 0}
-                            >
-                              <SelectTrigger className="h-8 rounded-xl bg-background/40 border-border/60">
-                                <SelectValue placeholder={targets.length ? 'Select target…' : 'No target yet'} />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {targets.map((item) => (
-                                  <SelectItem key={item.conversation_id} value={item.conversation_id}>
-                                    {targetLabel(item)}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        </div>
-
-                        {boundQuestId && boundQuestId !== questId ? (
-                          <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                            <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                            <div className="text-xs text-amber-800 dark:text-amber-200">
-                              This target is currently bound to <span className="font-mono">{boundQuestId}</span>.
-                              Binding here will reassign it.
+                              <Badge variant={badge.variant} className="text-[10px] uppercase tracking-wide">
+                                {badge.label}
+                              </Badge>
+                              {isBound ? (
+                                <span className="inline-flex items-center gap-1 text-xs text-[var(--success-foreground)]">
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                  bound
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {connector.transport ? `transport: ${connector.transport}` : ' '}
                             </div>
                           </div>
-                        ) : null}
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => void bindConversation(chosen || defaultId, { force: false })}
+                            disabled={
+                              binding ||
+                              !connector.enabled ||
+                              !(chosen || defaultId) ||
+                              Boolean(isBound)
+                            }
+                          >
+                            <Link2 className="mr-2 h-4 w-4" />
+                            Bind
+                          </Button>
+                        </div>
+
+                        <div className="mt-3 flex flex-col gap-2">
+                          <div className="flex items-center gap-2">
+                            <div className="text-xs text-muted-foreground shrink-0">Target</div>
+                            <div className="flex-1 min-w-0">
+                              <Select
+                                value={chosen || defaultId}
+                                onValueChange={(value) =>
+                                  setSelection((current) => ({ ...current, [connector.name]: value }))
+                                }
+                                disabled={!connector.enabled || targets.length === 0}
+                              >
+                                <SelectTrigger className="h-8 rounded-xl bg-background/40 border-border/60">
+                                  <SelectValue placeholder={targets.length ? 'Select target…' : 'No target yet'} />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {targets.map((item) => (
+                                    <SelectItem key={item.conversation_id} value={item.conversation_id}>
+                                      {targetLabel(item)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+
+                          {boundQuestId && boundQuestId !== questId ? (
+                            <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                              <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
+                              <div className="text-xs text-amber-800 dark:text-amber-200">
+                                This target is currently bound to <span className="font-mono">{boundQuestId}</span>.
+                                Binding here will reassign it.
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </EnhancedCard>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </EnhancedCard>
+        </div>
       </div>
 
       <ConfirmModal

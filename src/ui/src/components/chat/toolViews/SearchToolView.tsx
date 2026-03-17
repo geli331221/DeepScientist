@@ -1,61 +1,35 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Search as SearchIcon, Sparkles } from 'lucide-react'
+import { AlertTriangle, Sparkles } from 'lucide-react'
 import type { ToolViewProps } from './types'
-import { DsToolFrame, DsToolPill, DsToolSection } from './DsToolFrame'
-
-function buildFaviconUrl(value?: string) {
-  if (!value) return ''
-  try {
-    const url =
-      value.startsWith('http://') || value.startsWith('https://')
-        ? new URL(value)
-        : new URL(`https://${value}`)
-    return `${url.origin}/favicon.ico`
-  } catch {
-    return ''
-  }
-}
+import { DsToolFrame, DsToolSection } from './DsToolFrame'
+import { WebSearchQueryPills, WebSearchResults } from './WebSearchCards'
+import { normalizeWebSearchPayload } from './web-search-view-utils'
 
 export function SearchToolView({ toolContent, panelMode }: ToolViewProps) {
   const showHeader = panelMode == null
   const autoExpandResults = !showHeader
   const [resultsExpanded, setResultsExpanded] = useState(autoExpandResults)
-  const error = toolContent.content?.error as string | undefined
-  const results = (toolContent.content?.results as Array<{
-    title?: string
-    link?: string
-    url?: string
-    source?: string
-    snippet?: string
-  }> | undefined) ?? []
-  const queryFromContent = toolContent.content?.query
-  const args =
-    toolContent.args && typeof toolContent.args === 'object' && !Array.isArray(toolContent.args)
-      ? (toolContent.args as Record<string, unknown>)
-      : undefined
-  const query =
-    (typeof queryFromContent === 'string' && queryFromContent) ||
-    (typeof args?.query === 'string' && args.query) ||
-    (typeof args?.q === 'string' && args.q) ||
-    (typeof args?.text === 'string' && args.text) ||
-    ''
-  const count = results.length
+  const payload = normalizeWebSearchPayload({
+    args: toolContent.args,
+    content: toolContent.content,
+    metadataSearch:
+      toolContent.metadata && typeof toolContent.metadata === 'object'
+        ? (toolContent.metadata as Record<string, unknown>).search
+        : undefined,
+    output:
+      toolContent.content && typeof toolContent.content === 'object'
+        ? (toolContent.content as Record<string, unknown>).result ??
+          (toolContent.content as Record<string, unknown>).output
+        : undefined,
+  })
+  const error = payload.error
+  const results = payload.results
+  const query = payload.query
+  const count = payload.count
   const isSearching = toolContent.status === 'calling'
-  const queryVariants =
-    (Array.isArray(toolContent.content?.queries)
-      ? toolContent.content.queries
-      : [])?.map((entry) => String(entry).trim()).filter(Boolean) ?? []
-  const searchSummary =
-    typeof toolContent.content?.summary === 'string'
-      ? toolContent.content.summary
-      : typeof toolContent.content?.text === 'string'
-        ? toolContent.content.text
-        : typeof toolContent.content?.output === 'string'
-          ? toolContent.content.output
-          : ''
-  const dedupedQueries = Array.from(new Set([query, ...queryVariants].filter(Boolean)))
+  const dedupedQueries = payload.queries
 
   useEffect(() => {
     setResultsExpanded(autoExpandResults)
@@ -97,13 +71,7 @@ export function SearchToolView({ toolContent, panelMode }: ToolViewProps) {
 
             {dedupedQueries.length > 0 ? (
               <DsToolSection title="Issued queries">
-                <div className="flex flex-wrap gap-1.5">
-                  {dedupedQueries.map((entry) => (
-                    <DsToolPill key={entry} tone={entry === query ? 'default' : 'muted'}>
-                      {entry}
-                    </DsToolPill>
-                  ))}
-                </div>
+                <WebSearchQueryPills queries={dedupedQueries} activeQuery={query} />
               </DsToolSection>
             ) : null}
 
@@ -117,64 +85,17 @@ export function SearchToolView({ toolContent, panelMode }: ToolViewProps) {
               </button>
             ) : null}
 
+            {payload.summary ? (
+              <DsToolSection title="Search summary">
+                <div className="text-[12px] leading-6 text-[var(--text-secondary)]">
+                  {payload.summary}
+                </div>
+              </DsToolSection>
+            ) : null}
+
             {results.length > 0 && resultsExpanded ? (
               <DsToolSection title={`Results (${count})`}>
-                <div className="space-y-3">
-                  {results.map((result, index) => {
-                    const link = result.link || result.url || result.source || ''
-                    const title = result.title || link || 'Untitled result'
-                    const faviconUrl = buildFaviconUrl(link)
-                    return (
-                      <div
-                        key={`${link || index}`}
-                        className="rounded-[14px] border border-[var(--border-light)] bg-[rgba(255,255,255,0.76)] px-3 py-3"
-                      >
-                        <div className="flex items-start gap-3">
-                          <div className="mt-[2px] flex h-8 w-8 items-center justify-center rounded-[10px] bg-[rgba(121,145,182,0.10)]">
-                            {faviconUrl ? (
-                              <img
-                                src={faviconUrl}
-                                alt=""
-                                className="h-4 w-4 rounded-[4px]"
-                                onError={(event) => {
-                                  event.currentTarget.style.display = 'none'
-                                }}
-                              />
-                            ) : (
-                              <SearchIcon className="h-4 w-4 text-[#6382ad]" />
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            {link ? (
-                              <a
-                                href={link}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="block text-[12px] font-semibold text-[var(--text-primary)] hover:underline"
-                              >
-                                {title}
-                              </a>
-                            ) : (
-                              <div className="block text-[12px] font-semibold text-[var(--text-primary)]">
-                                {title}
-                              </div>
-                            )}
-                            {result.source ? (
-                              <div className="mt-1 text-[10px] uppercase tracking-[0.06em] text-[var(--text-tertiary)]">
-                                {result.source}
-                              </div>
-                            ) : null}
-                            {result.snippet ? (
-                              <div className="mt-2 text-[12px] leading-6 text-[var(--text-secondary)]">
-                                {result.snippet}
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
+                <WebSearchResults payload={payload} />
               </DsToolSection>
             ) : null}
 
@@ -186,13 +107,13 @@ export function SearchToolView({ toolContent, panelMode }: ToolViewProps) {
                     {isSearching
                       ? 'Codex is still issuing search queries.'
                       : dedupedQueries.length > 0
-                        ? 'This run persisted the exact search queries, but the upstream runtime did not expose result cards for this call.'
+                        ? 'This run preserved the search trace, but the upstream runtime did not return result cards for this call.'
                         : 'No structured search results were returned for this call.'}
                   </span>
                 </div>
-                {searchSummary ? (
+                {payload.summary ? (
                   <div className="mt-3 rounded-[12px] bg-[rgba(255,255,255,0.72)] px-3 py-3 text-[12px] leading-6 text-[var(--text-secondary)]">
-                    {searchSummary}
+                    {payload.summary}
                   </div>
                 ) : null}
               </DsToolSection>

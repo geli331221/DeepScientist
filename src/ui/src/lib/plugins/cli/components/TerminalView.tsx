@@ -21,7 +21,7 @@ import {
 } from '../services/session-persistence'
 import { loadRecording, saveRecording } from '../services/recording-persistence'
 import { sendBrowserNotification } from '../services/notification-service'
-import { buildConversationSessionId, buildSharedSessionId } from '../lib/session-id'
+import { buildConversationSessionId, buildDefaultSessionId } from '../lib/session-id'
 import { TerminalReplayDialog } from './TerminalReplayDialog'
 import { BatchOperationsDialog } from './BatchOperationsDialog'
 import { useToast } from '@/components/ui/toast'
@@ -43,13 +43,11 @@ export function TerminalView({
   projectId,
   server,
   readOnly,
-  authMode,
   canUnbind,
 }: {
   projectId: string
   server: CliServer
   readOnly?: boolean
-  authMode?: 'user' | 'share'
   canUnbind?: boolean
 }) {
   const sessionManagerRef = useRef(new SessionManager())
@@ -84,7 +82,6 @@ export function TerminalView({
   const persistTimeoutRef = useRef<number | null>(null)
   const recordingPersistRef = useRef<Map<string, number>>(new Map())
   const lastStatusRef = useRef(server.status)
-  const sharedSessionIdRef = useRef<string | null>(null)
   const autoCreatedRef = useRef(false)
   const recordingRef = useRef<Map<string, Array<{ ts: number; data: string }>>>(new Map())
   const terminalSerializeRef = useRef<() => string>(() => '')
@@ -424,7 +421,6 @@ export function TerminalView({
   const { socket, status, sendTerminalInput, sendTerminalResize, emitEnvelope } = useCliSocket({
     projectId,
     serverId: server.id,
-    authMode,
     handlers: socketHandlers,
   })
 
@@ -592,16 +588,15 @@ export function TerminalView({
     }
   }, [activeSessionId, captureSerialized, clearTerminal, emitEnvelope, server.id, setSessionsInStore])
 
-  const ensureSharedSession = useCallback(async () => {
+  const ensureDefaultSession = useCallback(async () => {
     if (!projectId) return null
-    const sharedId = await buildSharedSessionId(projectId, server.id)
-    sharedSessionIdRef.current = sharedId
-    const existing = sessionManagerRef.current.getSession(sharedId)
+    const defaultSessionId = await buildDefaultSessionId(projectId, server.id)
+    const existing = sessionManagerRef.current.getSession(defaultSessionId)
     if (existing && existing.state !== 'closed') {
       setActiveSessionId(existing.id)
       return existing
     }
-    return createSession({ id: sharedId })
+    return createSession({ id: defaultSessionId })
   }, [createSession, projectId, server.id])
 
   const ensureConversationSession = useCallback(async () => {
@@ -661,7 +656,7 @@ export function TerminalView({
           })
           const updated = sessionManagerRef.current.getSessionsByServer(server.id)
           if (updated.length === 0) {
-            await ensureSharedSession()
+            await ensureDefaultSession()
             return
           }
           setSessions(updated)
@@ -676,7 +671,7 @@ export function TerminalView({
       const persisted = loadPersistedSessions().filter((session) => session.serverId === server.id)
       if (persisted.length === 0) {
         if (sessionManagerRef.current.getSessionsByServer(server.id).length === 0) {
-          await ensureSharedSession()
+          await ensureDefaultSession()
         }
         return
       }
@@ -707,7 +702,7 @@ export function TerminalView({
 
       const updated = sessionManagerRef.current.getSessionsByServer(server.id)
       if (updated.length === 0) {
-        await ensureSharedSession()
+        await ensureDefaultSession()
         return
       }
       setSessions(updated)
@@ -716,7 +711,7 @@ export function TerminalView({
     }
 
     void restore()
-  }, [projectId, status.state, server.id, socket, createSession, ensureSharedSession, setSessionsInStore])
+  }, [projectId, status.state, server.id, socket, createSession, ensureDefaultSession, setSessionsInStore])
 
   useEffect(() => {
     if (autoCreatedRef.current) return
@@ -725,9 +720,9 @@ export function TerminalView({
     if (conversationId) {
       void ensureConversationSession()
     } else {
-      void ensureSharedSession()
+      void ensureDefaultSession()
     }
-  }, [activeSessionId, conversationId, ensureConversationSession, ensureSharedSession, sessions.length])
+  }, [activeSessionId, conversationId, ensureConversationSession, ensureDefaultSession, sessions.length])
 
   const restoreActiveSession = useCallback(() => {
     if (!activeSession || !terminalReady) return

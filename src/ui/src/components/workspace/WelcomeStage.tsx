@@ -41,6 +41,7 @@ export function WelcomeStage({
         prev.threadId === next.threadId &&
         prev.historyOpen === next.historyOpen &&
         prev.isResponding === next.isResponding &&
+        prev.toolCount === next.toolCount &&
         prev.ready === next.ready &&
         prev.isRestoring === next.isRestoring &&
         prev.restoreAttempted === next.restoreAttempted &&

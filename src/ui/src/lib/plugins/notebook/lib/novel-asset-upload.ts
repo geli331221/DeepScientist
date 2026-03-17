@@ -45,8 +45,7 @@ export function resolveNotebookAssetUrl(
   const base = src.startsWith("/api/") ? `${getApiBaseUrl()}${src}` : src;
   const token =
     typeof window !== "undefined"
-      ? window.sessionStorage.getItem("ds_share_session_token") ||
-        window.localStorage.getItem("ds_access_token")
+      ? window.localStorage.getItem("ds_access_token")
       : null;
   if (!token) return base;
   if (base.includes("token=")) return base;

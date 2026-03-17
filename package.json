@@ -1,13 +1,41 @@
 {
-  "name": "deepscientist",
-  "version": "0.1.0",
-  "private": true,
-  "description": "DeepScientist Core skeleton",
+  "name": "@researai/deepscientist",
+  "version": "1.5.1",
+  "description": "Local-first research operating system with a Python runtime and npm launcher",
+  "license": "MIT",
+  "files": [
+    "AGENTS.md",
+    "README.md",
+    "docs/en/",
+    "docs/zh/",
+    "install.sh",
+    "assets/branding/",
+    "assets/connectors/",
+    "bin/",
+    "pyproject.toml",
+    "src/deepscientist/**/*.py",
+    "src/prompts/",
+    "src/skills/[!.]*/",
+    "src/skills/[!.]*/**",
+    "src/tui/dist/",
+    "src/tui/package.json",
+    "src/ui/dist/"
+  ],
+  "engines": {
+    "node": ">=18.18",
+    "npm": ">=9"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "ds": "bin/ds.js",
     "ds-cli": "bin/ds.js",
     "resear": "bin/ds.js",
     "research": "bin/ds.js"
+  },
+  "dependencies": {
+    "@openai/codex": "^0.114.0"
   },
   "scripts": {
     "ds": "node ./bin/ds.js",
@@ -18,6 +46,7 @@
     "ui:build": "npm --prefix src/ui run build",
     "tui:install": "npm --prefix src/tui install",
     "tui:build": "npm --prefix src/tui run build",
-    "postinstall": "npm --prefix src/ui install && npm --prefix src/ui run build && npm --prefix src/tui install && npm --prefix src/tui run build"
+    "build:release": "node ./scripts/build-release.mjs",
+    "prepack": "npm run build:release"
   }
 }

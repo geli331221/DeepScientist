@@ -51,9 +51,6 @@ export const adminKeys = {
   auditLogs: (params?: PaginationParams & AuditLogFilter) => [...adminKeys.all, 'auditLogs', params] as const,
   logSources: () => [...adminKeys.all, 'logSources'] as const,
   logTail: (source: string, lines: number) => [...adminKeys.all, 'logTail', source, lines] as const,
-  cliServers: (params?: { status?: string; project_id?: string; q?: string }) =>
-    [...adminKeys.all, 'cliServers', params] as const,
-  cliServersBase: () => [...adminKeys.all, 'cliServers'] as const,
   broadcasts: (params?: AdminBroadcastListParams) =>
     [...adminKeys.all, 'broadcasts', params] as const,
   broadcastsBase: () => [...adminKeys.all, 'broadcasts'] as const,
@@ -68,10 +65,6 @@ export const adminKeys = {
     q?: string
   }) => [...adminKeys.all, 'feedbacks', params] as const,
   feedbacksBase: () => [...adminKeys.all, 'feedbacks'] as const,
-  blogs: (params?: { skip?: number; limit?: number }) =>
-    [...adminKeys.all, 'blogs', params] as const,
-  blogsBase: () => [...adminKeys.all, 'blogs'] as const,
-  blog: (blogId: string) => [...adminKeys.all, 'blogs', blogId] as const,
   autofigureSessions: (params?: AutoFigureAdminSessionsParams) =>
     [...adminKeys.all, 'autofigureSessions', params] as const,
   autofigureSession: (sessionId: string) =>
@@ -578,135 +571,6 @@ export function useAdminLogTail(source: string, lines: number) {
     queryFn: () => adminApi.getLogTail(source, lines),
     enabled: Boolean(source),
     refetchOnWindowFocus: false,
-  });
-}
-
-// CLI Admin
-export function useAdminCliServers(params?: { status?: string; project_id?: string; q?: string }) {
-  return useQuery({
-    queryKey: adminKeys.cliServers(params),
-    queryFn: () => adminApi.getAdminCliServers(params),
-  });
-}
-
-export function useUpdateAdminCliServer() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ serverId, name }: { serverId: string; name?: string }) =>
-      adminApi.updateAdminCliServer(serverId, { name }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.cliServersBase() });
-    },
-  });
-}
-
-export function useRefreshAdminCliServer() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (serverId: string) => adminApi.refreshAdminCliServer(serverId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.cliServersBase() });
-    },
-  });
-}
-
-export function useUnbindAdminCliServer() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (serverId: string) => adminApi.unbindAdminCliServer(serverId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.cliServersBase() });
-    },
-  });
-}
-
-// Blog admin
-export function useAdminBlogs(params?: { skip?: number; limit?: number }) {
-  return useQuery({
-    queryKey: adminKeys.blogs(params),
-    queryFn: () => adminApi.getAdminBlogs(params),
-  });
-}
-
-export function useAdminBlog(blogId?: string) {
-  return useQuery({
-    queryKey: blogId ? adminKeys.blog(blogId) : adminKeys.blogsBase(),
-    queryFn: () => adminApi.getAdminBlog(blogId || ''),
-    enabled: Boolean(blogId),
-  });
-}
-
-export function useCreateAdminBlog() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (formData: FormData) => adminApi.createAdminBlog(formData),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.blogsBase() });
-    },
-  });
-}
-
-export function useUpdateAdminBlog() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      blogId,
-      input
-    }: {
-      blogId: string
-      input: {
-        title?: string
-        cite_url?: string | null
-        excerpt?: string | null
-        is_published?: boolean
-      }
-    }) =>
-      adminApi.updateAdminBlog(blogId, input),
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.blogsBase() });
-      queryClient.invalidateQueries({ queryKey: adminKeys.blog(variables.blogId) });
-    },
-  });
-}
-
-export function useUpdateAdminBlogContent() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ blogId, input }: { blogId: string; input: { content: string; excerpt?: string | null } }) =>
-      adminApi.updateAdminBlogContent(blogId, input),
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.blog(variables.blogId) });
-      queryClient.invalidateQueries({ queryKey: adminKeys.blogsBase() });
-    },
-  });
-}
-
-export function useUploadAdminBlogTitleFigure() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ blogId, file }: { blogId: string; file: File }) =>
-      adminApi.uploadAdminBlogTitleFigure(blogId, file),
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.blog(variables.blogId) });
-      queryClient.invalidateQueries({ queryKey: adminKeys.blogsBase() });
-    },
-  });
-}
-
-export function useUploadAdminBlogAsset() {
-  return useMutation({
-    mutationFn: ({ blogId, file }: { blogId: string; file: File }) =>
-      adminApi.uploadAdminBlogAsset(blogId, file),
-  });
-}
-
-export function useDeleteAdminBlog() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (blogId: string) => adminApi.deleteAdminBlog(blogId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: adminKeys.blogsBase() });
-    },
   });
 }
 

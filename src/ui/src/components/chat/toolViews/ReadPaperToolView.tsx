@@ -98,7 +98,7 @@ function normalizeItem(value: unknown): NormalizedReadPaperItem | null {
 }
 
 export function ReadPaperToolView({ toolContent, panelMode }: ToolViewProps) {
-  const { t } = useI18n('review')
+  const { t } = useI18n('workspace')
   const showHeader = panelMode == null
   const toolRecord = asRecord(toolContent)
   const rawContent = asRecord(toolContent.content)

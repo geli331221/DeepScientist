@@ -13,7 +13,7 @@ from deepscientist.prompts import PromptBuilder
 from deepscientist.quest import QuestService
 from deepscientist.runners import CodexRunner, RunRequest
 from deepscientist.runtime_logs import JsonlLogger
-from deepscientist.shared import read_jsonl
+from deepscientist.shared import read_jsonl, resolve_runner_binary
 from deepscientist.skills import SkillInstaller
 
 
@@ -79,11 +79,63 @@ def test_codex_runner_creates_history_and_run_outputs(temp_home: Path, monkeypat
     assert "--search" in command_payload["command"]
     assert "-c" in command_payload["command"]
     assert 'approval_policy="never"' in command_payload["command"]
+    assert 'model_reasoning_effort="xhigh"' in command_payload["command"]
     assert "--ask-for-approval" not in command_payload["command"]
     event_log = (quest_root / ".ds" / "events.jsonl").read_text(encoding="utf-8")
     assert "runner.turn_start" in event_log
     assert "runner.delta" in event_log
     assert "runner.turn_finish" in event_log
+
+
+def test_resolve_runner_binary_supports_env_override_for_codex(monkeypatch, temp_home: Path) -> None:
+    temp_home.mkdir(parents=True, exist_ok=True)
+    fake_codex = temp_home / "codex"
+    fake_codex.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_codex.chmod(0o755)
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("DEEPSCIENTIST_CODEX_BINARY", str(fake_codex))
+
+    assert resolve_runner_binary("codex", runner_name="codex") == str(fake_codex)
+
+
+def test_codex_runner_build_command_uses_resolved_codex_binary(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("runner binary quest")
+    quest_root = Path(quest["quest_root"])
+
+    fake_codex = temp_home / "codex"
+    fake_codex.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_codex.chmod(0o755)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("DEEPSCIENTIST_CODEX_BINARY", str(fake_codex))
+
+    runner = CodexRunner(
+        home=temp_home,
+        repo_root=repo_root(),
+        binary="codex",
+        logger=JsonlLogger(temp_home / "logs", level="debug"),
+        prompt_builder=PromptBuilder(repo_root(), temp_home),
+        artifact_service=ArtifactService(temp_home),
+    )
+    command = runner._build_command(
+        RunRequest(
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            worktree_root=None,
+            run_id="run-binary-001",
+            skill_id="decision",
+            message="Respond briefly.",
+            model="gpt-5.4",
+            approval_policy="never",
+            sandbox_mode="workspace-write",
+        ),
+        "Reply with exactly HELLO.",
+    )
+
+    assert command[0] == str(fake_codex)
 
 
 def test_codex_runner_maps_real_json_item_types_to_tool_events(temp_home: Path, monkeypatch) -> None:
@@ -107,7 +159,7 @@ def test_codex_runner_maps_real_json_item_types_to_tool_events(temp_home: Path, 
                 f"print(json.dumps({{'type': 'item.started', 'item': {{'id': 'cmd_1', 'type': 'command_execution', 'command': '/bin/bash -lc \\\"sed -n \\'2p\\' {note_path}\\\"', 'aggregated_output': '', 'exit_code': None, 'status': 'in_progress'}}}}))",
                 f"print(json.dumps({{'type': 'item.completed', 'item': {{'id': 'cmd_1', 'type': 'command_execution', 'command': '/bin/bash -lc \\\"sed -n \\'2p\\' {note_path}\\\"', 'aggregated_output': 'beta\\\\n', 'exit_code': 0, 'status': 'completed'}}}}))",
                 "print(json.dumps({'type': 'item.started', 'item': {'id': 'ws_1', 'type': 'web_search', 'query': '', 'action': {'type': 'other'}}}))",
-                "print(json.dumps({'type': 'item.completed', 'item': {'id': 'ws_1', 'type': 'web_search', 'query': 'OpenAI homepage official', 'action': {'type': 'search', 'query': 'OpenAI homepage official', 'queries': ['OpenAI homepage official']}, 'status': 'completed'}}))",
+                "print(json.dumps({'type': 'item.completed', 'item': {'id': 'ws_1', 'type': 'web_search', 'query': 'OpenAI homepage official', 'action': {'type': 'search', 'query': 'OpenAI homepage official', 'queries': ['OpenAI homepage official']}, 'results': [{'title': 'OpenAI', 'link': 'https://openai.com', 'snippet': 'Official homepage'}], 'summary': 'Found the official homepage.', 'status': 'completed'}}))",
                 "print(json.dumps({'type': 'item.started', 'item': {'id': 'mcp_1', 'type': 'mcp_tool_call', 'server': 'memory', 'tool': 'list_recent', 'arguments': {'scope': 'quest', 'limit': 5, 'comment': {'summary': 'Check recent memory', 'next': 'Use the result to decide the next step'}}, 'status': 'in_progress'}}))",
                 "print(json.dumps({'type': 'item.completed', 'item': {'id': 'mcp_1', 'type': 'mcp_tool_call', 'server': 'memory', 'tool': 'list_recent', 'arguments': {'scope': 'quest', 'limit': 5, 'comment': {'summary': 'Check recent memory', 'next': 'Use the result to decide the next step'}}, 'result': {'content': [{'type': 'text', 'text': '{\"ok\": true, \"count\": 0, \"items\": []}'}], 'structured_content': {'ok': True, 'count': 0, 'items': []}}, 'status': 'completed'}}))",
                 f"print(json.dumps({{'type': 'item.completed', 'item': {{'id': 'fc_1', 'type': 'file_change', 'changes': [{{'path': '{note_path}', 'kind': 'update'}}], 'status': 'completed'}}}}))",
@@ -153,6 +205,14 @@ def test_codex_runner_maps_real_json_item_types_to_tool_events(temp_home: Path, 
     assert any(event.get("tool_name") == "shell_command" and "beta" in str(event.get("output") or "") for event in tool_results)
     assert any(event.get("tool_name") == "web_search" for event in tool_calls)
     assert any(event.get("tool_name") == "web_search" and "OpenAI homepage official" in str(event.get("args") or "") for event in tool_results)
+    assert any(
+        event.get("tool_name") == "web_search"
+        and isinstance(event.get("metadata"), dict)
+        and isinstance(event["metadata"].get("search"), dict)
+        and isinstance(event["metadata"]["search"].get("results"), list)
+        and event["metadata"]["search"]["results"][0].get("title") == "OpenAI"
+        for event in tool_results
+    )
     assert any(event.get("tool_name") == "memory.list_recent" for event in tool_calls)
     assert any(event.get("tool_name") == "memory.list_recent" and "scope" in str(event.get("args") or "") for event in tool_results)
     assert any(event.get("tool_name") == "file_change" and str(note_path) in str(event.get("output") or "") for event in tool_results)
@@ -414,3 +474,92 @@ def test_codex_runner_interrupt_stops_spawned_process_group(temp_home: Path, mon
         time.sleep(0.05)
     else:
         raise AssertionError("interrupt did not stop the spawned child process")
+
+
+def test_codex_runner_injects_retry_recovery_packet_into_prompt(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("runner retry packet quest")
+    quest_root = Path(quest["quest_root"])
+
+    fake_bin_root = temp_home / "bin"
+    fake_bin_root.mkdir(parents=True, exist_ok=True)
+    stdin_dump = temp_home / "retry-stdin.txt"
+    fake_codex = fake_bin_root / "codex"
+    fake_codex.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json, pathlib, sys",
+                "payload = sys.stdin.read()",
+                f"path = pathlib.Path({str(stdin_dump)!r})",
+                "path.write_text(payload, encoding='utf-8')",
+                "print(json.dumps({'item': {'text': 'retry prompt ok'}}))",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin_root}:{os.environ.get('PATH', '')}")
+
+    runner = CodexRunner(
+        home=temp_home,
+        repo_root=repo_root(),
+        binary="codex",
+        logger=JsonlLogger(temp_home / "logs", level="debug"),
+        prompt_builder=PromptBuilder(repo_root(), temp_home),
+        artifact_service=ArtifactService(temp_home),
+    )
+    result = runner.run(
+        RunRequest(
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            worktree_root=None,
+            run_id="run-retry-prompt-001",
+            skill_id="decision",
+            message="Continue after a transport failure.",
+            model="gpt-5.4",
+            approval_policy="never",
+            sandbox_mode="workspace-write",
+            turn_id="turn-retry-001",
+            attempt_index=2,
+            max_attempts=5,
+            retry_context={
+                "attempt_index": 1,
+                "max_attempts": 5,
+                "previous_run_id": "run-failed-001",
+                "previous_exit_code": 1,
+                "failure_kind": "exit_code",
+                "failure_summary": "Runner `codex` exited with code 1 on attempt 1/5.",
+                "previous_output_text": "Partial answer before the crash.",
+                "stderr_tail": "transport disconnected",
+                "recent_messages": ["Observed a partial result."],
+                "tool_progress": [
+                    {
+                        "tool_name": "web_search",
+                        "status": "completed",
+                        "args": "query=adapter paper",
+                        "output": "3 results collected",
+                    }
+                ],
+                "workspace_summary": {
+                    "branch": "main",
+                    "git_status": ["M status.md"],
+                    "bash_sessions": [],
+                },
+                "recent_artifacts": ["run -> run-failed-001 -> Partial answer before the crash."],
+            },
+        )
+    )
+
+    prompt_text = (result.run_root / "prompt.md").read_text(encoding="utf-8")
+    stdin_text = stdin_dump.read_text(encoding="utf-8")
+
+    assert result.ok is True
+    assert "## Retry Recovery Packet" in prompt_text
+    assert "run-failed-001" in prompt_text
+    assert "Partial answer before the crash." in prompt_text
+    assert "web_search" in prompt_text
+    assert prompt_text == stdin_text

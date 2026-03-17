@@ -22,6 +22,7 @@ DECISION_ACTIONS = {
     "attach_baseline",
     "publish_baseline",
     "waive_baseline",
+    "iterate",
     "reset",
     "stop",
     "write",

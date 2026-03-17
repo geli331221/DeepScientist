@@ -5,8 +5,6 @@ import type {
   CliFileListResponse,
   CliFileContentResponse,
   CliLogManifestResponse,
-  CliServerShareListResponse,
-  CliNotebookImportResponse,
   CliTelemetryResponse,
   CliMethodListResponse,
   CliMethodGetResponse,
@@ -229,35 +227,6 @@ export async function getCliLogObject(
   return response.data
 }
 
-export async function listCliShares(projectId: string, serverId: string) {
-  const response = await apiClient.get(`/api/v1/projects/${projectId}/cli/servers/${serverId}/shares`)
-  return response.data as CliServerShareListResponse
-}
-
-export async function createCliShare(
-  projectId: string,
-  serverId: string,
-  payload: { user_id?: string; email?: string; permission: string; edit_granularity?: Record<string, boolean>; expires_at?: string }
-) {
-  const response = await apiClient.post(`/api/v1/projects/${projectId}/cli/servers/${serverId}/shares`, payload)
-  return response.data as { success: boolean; share_id: string }
-}
-
-export async function updateCliShare(
-  projectId: string,
-  serverId: string,
-  shareId: string,
-  payload: { permission?: string; edit_granularity?: Record<string, boolean>; expires_at?: string }
-) {
-  const response = await apiClient.patch(`/api/v1/projects/${projectId}/cli/servers/${serverId}/shares/${shareId}`, payload)
-  return response.data as { success: boolean }
-}
-
-export async function deleteCliShare(projectId: string, serverId: string, shareId: string) {
-  const response = await apiClient.delete(`/api/v1/projects/${projectId}/cli/servers/${serverId}/shares/${shareId}`)
-  return response.data as { success: boolean }
-}
-
 export async function listCliTasks(projectId: string, serverId: string) {
   const response = await apiClient.get(`/api/v1/projects/${projectId}/cli/servers/${serverId}/tasks`)
   return response.data as Array<{ id: string; title: string; status: string; updated_at: string }>
@@ -317,16 +286,4 @@ export type CliHealthResponse = {
 export async function getCliHealth() {
   const response = await apiClient.get('/api/v1/health/cli')
   return response.data as CliHealthResponse
-}
-
-export async function importCliMarkdownToNotebook(
-  projectId: string,
-  notebookId: string,
-  payload: { server_id: string; path: string; title?: string }
-) {
-  const response = await apiClient.post(
-    `/api/v1/projects/${projectId}/cli/notebooks/${notebookId}/import-markdown`,
-    payload
-  )
-  return response.data as CliNotebookImportResponse
 }

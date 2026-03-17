@@ -93,9 +93,7 @@ import {
 } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
-import { ProjectShareDialog } from '@/components/features/Share/ProjectShareDialog'
 import { SpotlightCard } from '@/components/react-bits'
-import { isShareViewForProject } from '@/lib/share-session'
 import { useSessionList } from '@/lib/hooks/useSessionList'
 import { copyToClipboard } from '@/lib/clipboard'
 import { handleUIEffect, previewPdfToolEffect } from '@/lib/ai/effect-dispatcher'
@@ -1602,13 +1600,11 @@ export function AiManusChatView({
     [projectId, setCliServerId, setExecutionTarget]
   )
 
-  const isShareView = Boolean(projectId && isShareViewForProject(projectId))
-  const readOnlyMode = Boolean(readOnly || isShareView)
+  const readOnlyMode = Boolean(readOnly)
   const sessionListEnabledValue = (sessionListEnabled ?? true) && !deferSessionList
   const resolvedHistoryMode = historyMode ?? 'inline'
   const historyPanelEnabled =
     sessionListEnabledValue &&
-    !isShareView &&
     (mode === 'welcome' || resolvedHistoryMode === 'overlay')
   const historyPanelInline =
     historyPanelEnabled && resolvedHistoryMode !== 'overlay' && mode === 'welcome'
@@ -1686,7 +1682,6 @@ export function AiManusChatView({
   } | null>(null)
   const recoveryTimeoutRef = useRef<number | null>(null)
   const autoResumeTimerRef = useRef<number | null>(null)
-  const [shareOpen, setShareOpen] = useState(false)
   const refreshingAgentsRef = useRef(false)
   const lastOnlineServersKeyRef = useRef<string | null>(null)
   const lastMentionRefreshRef = useRef<string | null>(null)
@@ -2433,7 +2428,7 @@ export function AiManusChatView({
   // On page entry (or project switch), restore latest history when no session is selected
   // and avoid overriding a user-selected session on other surfaces.
   useEffect(() => {
-    if (!projectId || readOnlyMode || isShareView) return
+    if (!projectId || readOnlyMode) return
     if (typeof window === 'undefined') return
 
     let cancelled = false
@@ -2571,7 +2566,6 @@ export function AiManusChatView({
     }
   }, [
     isCopilotSurface,
-    isShareView,
     projectId,
     readOnlyMode,
     requestRestore,
@@ -2966,8 +2960,8 @@ export function AiManusChatView({
         loadedProjectId: latestSessionLoadedRef.current,
       })
 
-      if (!projectId || readOnlyMode || isShareView) {
-        debugLog('latest:skip', { reason: 'no_project_or_readonly_or_share' })
+      if (!projectId || readOnlyMode) {
+        debugLog('latest:skip', { reason: 'no_project_or_readonly' })
         return null
       }
       if (!allowSurfaceFallback) {
@@ -3079,7 +3073,6 @@ export function AiManusChatView({
       debugLog,
       draftSessionIdRef,
       allowSurfaceFallback,
-      isShareView,
       isRestoring,
       sessionSurface,
       projectId,
@@ -3105,7 +3098,6 @@ export function AiManusChatView({
       allowSurfaceFallback &&
       Boolean(projectId) &&
       !readOnlyMode &&
-      !isShareView &&
       !draftSessionIdRef.current &&
       isCopilotSurface &&
       !manualSessionSelectionRef.current &&
@@ -3118,7 +3110,7 @@ export function AiManusChatView({
         debugLog('sessions:reload', { reason: 'visible_or_mode_changed' })
         void reloadSessionSummaries()
       }
-      if (!projectId || readOnlyMode || isShareView) return
+      if (!projectId || readOnlyMode) return
       if (draftSessionIdRef.current) return
       if (currentSessionId && messagesRef.current.length === 0 && !isRestoring) {
         debugLog('restore:request', { reason: 'visible_restore_existing_session' })
@@ -3143,7 +3135,7 @@ export function AiManusChatView({
     // Improved: On first mount, even if not visible, fetch the latest session so the
     // Copilot conversation history is hydrated after a hard refresh.
     if (isFirstMount && !currentSessionId && !draftSessionIdRef.current) {
-      if (!projectId || readOnlyMode || isShareView) return
+      if (!projectId || readOnlyMode) return
       debugLog('latest:trigger', { reason: 'first_mount_no_session' })
       if (allowSurfaceFallback) {
         void loadLatestSession({ force: true, adopt: shouldAutoAdoptLatest })
@@ -3154,7 +3146,7 @@ export function AiManusChatView({
     // Improved: On first mount, even if not visible, trigger restore if we have a sessionId
     // but no messages loaded. This ensures session content loads after page refresh.
     if (isFirstMount && currentSessionId && messagesRef.current.length === 0) {
-      if (!projectId || readOnlyMode || isShareView) return
+      if (!projectId || readOnlyMode) return
       if (!isRestoring) {
         debugLog('restore:request', { reason: 'first_mount_session_no_messages' })
         requestRestore()
@@ -3163,7 +3155,6 @@ export function AiManusChatView({
   }, [
     debugLog,
     allowSurfaceFallback,
-    isShareView,
     isRestoring,
     loadLatestSession,
     mode,
@@ -5195,6 +5186,7 @@ export function AiManusChatView({
       threadId: sessionId ?? null,
       historyOpen: historyOpenValue,
       isResponding: isAgentBusy,
+      toolCount: toolCallCount,
       ready: Boolean(sessionId),
       isRestoring,
       restoreAttempted,
@@ -5214,6 +5206,7 @@ export function AiManusChatView({
       prev.threadId === meta.threadId &&
       prev.historyOpen === meta.historyOpen &&
       prev.isResponding === meta.isResponding &&
+      prev.toolCount === meta.toolCount &&
       prev.ready === meta.ready &&
       prev.isRestoring === meta.isRestoring &&
       prev.restoreAttempted === meta.restoreAttempted &&
@@ -9808,15 +9801,6 @@ export function AiManusChatView({
             chatPanel
           )}
         </div>
-
-        {projectId ? (
-          <ProjectShareDialog
-            projectId={projectId}
-            open={shareOpen}
-            onOpenChange={setShareOpen}
-            canManageShare={!readOnlyMode}
-          />
-        ) : null}
 
         <Dialog
           open={renameDialogOpen}

@@ -71,7 +71,11 @@ export function DocsContent({ filePath, onTocChange, onContentReady, className }
 
   return (
     <div className={cn('w-full', className)}>
-      <MarkdownPreview content={content} baseFilePath={filePath} />
+      <MarkdownPreview
+        content={content}
+        baseFilePath={filePath}
+        className="markdown-body ds-docs-markdown"
+      />
     </div>
   )
 }

@@ -501,12 +501,6 @@ const SOURCE_EXACT: Record<string, Record<AutoLocale, string>> = {
     ko: '프로젝트 이름 변경에 실패했습니다.',
     ru: 'Не удалось переименовать проект.',
   },
-  'Renaming is disabled in shared view.': {
-    fr: 'Le renommage est désactivé dans la vue partagée.',
-    ja: '共有ビューでは名前変更できません。',
-    ko: '공유 보기에서는 이름을 변경할 수 없습니다.',
-    ru: 'Переименование отключено в режиме общего доступа.',
-  },
   'Signed in as': {
     fr: 'Connecté en tant que',
     ja: 'サインイン中',

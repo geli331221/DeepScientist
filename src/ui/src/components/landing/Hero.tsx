@@ -13,9 +13,7 @@ import { HERO_COPY, HERO_STAGES } from './hero-content'
 import type { QuestSummary } from '@/types'
 import HeroNav from './HeroNav'
 import HeroScene from './HeroScene'
-import HeroStory from './HeroStory'
 import HeroProgress from './HeroProgress'
-import HeroSections from './HeroSections'
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
 const FINAL_SCROLL_HOLD = 0.2
@@ -36,7 +34,6 @@ export default function Hero() {
   const [progress, setProgress] = useState(0)
   const [isMobile, setIsMobile] = useState(false)
   const [isPortraitMode, setIsPortraitMode] = useState(false)
-  const [carouselStage, setCarouselStage] = useState(0)
   const [showProgress, setShowProgress] = useState(true)
   const progressRef = useRef(0)
   const targetRef = useRef(0)
@@ -268,6 +265,7 @@ export default function Hero() {
     title: string
     goal: string
     quest_id?: string
+    preferred_connector_conversation_id?: string
     requested_baseline_ref?: { baseline_id: string; variant_id?: string | null } | null
     startup_contract?: Record<string, unknown> | null
   }) => {
@@ -282,6 +280,10 @@ export default function Hero() {
         goal: payload.goal.trim(),
         title: payload.title.trim() || undefined,
         quest_id: payload.quest_id?.trim() || undefined,
+        source: 'web-react',
+        auto_start: true,
+        initial_message: payload.goal.trim(),
+        preferred_connector_conversation_id: payload.preferred_connector_conversation_id?.trim() || undefined,
         requested_baseline_ref: payload.requested_baseline_ref ?? undefined,
         startup_contract: payload.startup_contract ?? undefined,
       })
@@ -316,14 +318,8 @@ export default function Hero() {
     return 3
   }, [progress])
 
-  const mobileProgress = useMemo(() => {
-    const count = HERO_STAGES.length
-    if (count <= 1) return 0
-    return carouselStage / (count - 1)
-  }, [carouselStage])
-  const storyStageIndex = isMobile ? carouselStage : scrollStage
-  const sceneStageIndex = isMobile ? carouselStage : scrollStage
-  const barProgress = isMobile ? mobileProgress : progress
+  const sceneStageIndex = scrollStage
+  const barProgress = progress
 
   return (
     <>
@@ -357,9 +353,11 @@ export default function Hero() {
                     <h1 className="text-4xl font-semibold leading-tight md:text-5xl">
                       {HERO_COPY.headline}
                     </h1>
-                    <p className="max-w-xl text-base text-[#5D5A55] md:text-lg">
-                      {HERO_COPY.subhead}
-                    </p>
+                    {HERO_COPY.subhead ? (
+                      <p className="max-w-xl text-base text-[#5D5A55] md:text-lg">
+                        {HERO_COPY.subhead}
+                      </p>
+                    ) : null}
                     <div className="text-sm uppercase tracking-[0.22em] text-[#9FB1C2]">
                       {HERO_COPY.tagline}
                     </div>
@@ -396,17 +394,12 @@ export default function Hero() {
                 </FadeContent>
 
                 {!isPortraitMode ? (
-                  <div className="relative min-w-0 space-y-6">
+                  <div className="relative min-w-0">
                     <HeroScene
                       progress={progress}
                       stageIndex={sceneStageIndex}
                       reducedMotion={reducedMotion}
                       isMobile={isMobile}
-                    />
-                    <HeroStory
-                      progress={progress}
-                      stageIndex={storyStageIndex}
-                      onStageChange={isMobile ? setCarouselStage : undefined}
                     />
                   </div>
                 ) : null}
@@ -415,7 +408,7 @@ export default function Hero() {
             {!isPortraitMode ? (
               <HeroProgress
                 progress={barProgress}
-                stageIndex={isMobile ? carouselStage : scrollStage}
+                stageIndex={scrollStage}
                 className={`relative mt-8 w-full transition-opacity duration-300 lg:fixed lg:bottom-4 lg:left-0 lg:right-0 lg:mt-0 lg:z-[60] ${
                   showProgress ? 'opacity-100' : 'opacity-0'
                 }`}
@@ -424,7 +417,6 @@ export default function Hero() {
           </div>
         </section>
 
-        {!isPortraitMode ? <HeroSections /> : null}
       </div>
 
       <CreateProjectDialog

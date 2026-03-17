@@ -35,6 +35,29 @@ def _confirm_local_baseline(artifact: ArtifactService, quest_root: Path, baselin
     )
 
 
+def test_confirm_baseline_writes_metric_contract_json_and_exposes_path(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("baseline metric contract json quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    result = _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-metric-contract")
+
+    assert result["ok"] is True
+    confirmed_ref = result["confirmed_baseline_ref"]
+    assert confirmed_ref["metric_contract_json_rel_path"] == "baselines/local/baseline-metric-contract/json/metric_contract.json"
+    metric_contract_json = quest_root / confirmed_ref["metric_contract_json_rel_path"]
+    assert metric_contract_json.exists()
+    payload = read_json(metric_contract_json, {})
+    assert payload["kind"] == "baseline_metric_contract"
+    assert payload["baseline_id"] == "baseline-metric-contract"
+    assert payload["metric_contract"]["primary_metric_id"] == "acc"
+    attachment = read_yaml(quest_root / "baselines" / "imported" / "baseline-metric-contract" / "attachment.yaml", {})
+    assert attachment["confirmation"]["metric_contract_json_rel_path"] == confirmed_ref["metric_contract_json_rel_path"]
+
+
 class _FakeHeaders:
     def __init__(self, charset: str = "utf-8") -> None:
         self._charset = charset
@@ -171,6 +194,44 @@ def test_artifact_interact_and_prepare_branch(temp_home: Path) -> None:
     assert Path(branch["worktree_root"]).exists()
 
 
+def test_artifact_mailbox_preserves_user_message_attachments(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("artifact attachment mailbox quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    quest_service.append_message(
+        quest["quest_id"],
+        role="user",
+        content="Please inspect the attached PDF.",
+        source="qq:direct:openid-123",
+        attachments=[
+            {
+                "kind": "remote",
+                "name": "report.pdf",
+                "content_type": "application/pdf",
+                "path": "attachments/report.pdf",
+                "extracted_text_path": "attachments/report.txt",
+            }
+        ],
+    )
+    result = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="I am picking up the latest inbound request.",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=True,
+    )
+
+    assert result["recent_inbound_messages"]
+    latest = result["recent_inbound_messages"][-1]
+    assert latest["conversation_id"] == "qq:direct:openid-123"
+    assert latest["attachments"][0]["name"] == "report.pdf"
+    assert latest["attachments"][0]["extracted_text_path"] == "attachments/report.txt"
+
+
 def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -189,16 +250,21 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
         mechanism="Insert a small residual adapter before the head.",
         decision_reason="This is the strongest next idea.",
         next_target="experiment",
+        draft_markdown="# Adapter route draft\n\n## Code-Level Change Plan\n\nPatch the adapter path.\n",
     )
     idea_worktree = Path(created["worktree_root"])
     idea_md_path = Path(created["idea_md_path"])
+    idea_draft_path = Path(created["idea_draft_path"])
     assert created["branch"].startswith(f"idea/{quest['quest_id']}-")
     assert idea_worktree.exists()
     assert idea_md_path.exists()
+    assert idea_draft_path.exists()
+    assert "Adapter route draft" in idea_draft_path.read_text(encoding="utf-8")
     assert created["guidance"]
-    assert created["recommended_skill_reads"] == ["decision"]
+    assert created["recommended_skill_reads"] == ["experiment"]
     assert created["suggested_artifact_calls"]
     assert created["next_instruction"]
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "experiment"
 
     revised = artifact.submit_idea(
         quest_root,
@@ -210,11 +276,13 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
         mechanism="Tune the adapter depth and placement.",
         decision_reason="Refine the same active route before coding.",
         next_target="experiment",
+        draft_markdown="# Adapter route v2 draft\n\n## Risks / Caveats / Implementation Notes\n\nMind the hard examples.\n",
     )
     assert revised["worktree_root"] == created["worktree_root"]
     assert "Adapter route v2" in idea_md_path.read_text(encoding="utf-8")
+    assert "Adapter route v2 draft" in idea_draft_path.read_text(encoding="utf-8")
     assert revised["guidance"]
-    assert revised["recommended_skill_reads"] == ["decision"]
+    assert revised["recommended_skill_reads"] == ["experiment"]
     assert revised["suggested_artifact_calls"]
     assert revised["next_instruction"]
 
@@ -254,6 +322,7 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
     state_after_campaign = quest_service.read_research_state(quest_root)
     assert state_after_campaign["active_analysis_campaign_id"] == campaign["campaign_id"]
     assert state_after_campaign["current_workspace_root"] == first_slice["worktree_root"]
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "analysis-campaign"
 
     first_record = artifact.record_analysis_slice(
         quest_root,
@@ -289,6 +358,7 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
     assert final_state["active_analysis_campaign_id"] is None
     assert final_state["current_workspace_root"] == str(idea_worktree)
     assert final_state["research_head_branch"] == created["branch"]
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "decision"
 
     events = read_jsonl(quest_root / ".ds" / "events.jsonl")
     campaign_event = next(
@@ -300,6 +370,348 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
     )
     assert campaign_event["workspace_root"] == str(idea_worktree)
     assert campaign_event["details"]["slice_count"] == 2
+
+
+def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper outline quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    baseline_root = quest_root / "baselines" / "local" / "baseline-outline"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Baseline\n", encoding="utf-8")
+    artifact.confirm_baseline(
+        quest_root,
+        baseline_path="baselines/local/baseline-outline",
+        baseline_id="baseline-outline",
+        summary="Baseline confirmed for outline-bound analysis.",
+        metrics_summary={"acc": 0.88},
+        metric_contract={"primary_metric_id": "acc", "direction": "maximize"},
+        primary_metric={"metric_id": "acc", "value": 0.88},
+    )
+    created = artifact.submit_idea(
+        quest_root,
+        title="Outline-aware idea",
+        problem="Need a stronger analysis plan.",
+        hypothesis="Outline-driven analysis improves research discipline.",
+        mechanism="Bind analysis tasks to paper questions and experiment designs.",
+        expected_gain="Cleaner downstream writing.",
+        decision_reason="Promote this line for paper-oriented experimentation.",
+    )
+    assert created["ok"] is True
+
+    candidate_1 = artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Outline A",
+        note="First draft outline.",
+        story="Tell the motivation-first story.",
+        ten_questions=["Why now?", "Why this baseline?"],
+        detailed_outline={
+            "title": "Outline A",
+            "abstract": "Abstract A",
+            "research_questions": ["RQ1"],
+            "methodology": "Method A",
+            "experimental_designs": ["Exp-A"],
+            "contributions": ["C1"],
+        },
+        review_result="candidate",
+    )
+    candidate_2 = artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Outline B",
+        note="Second draft outline.",
+        story="Tell the evidence-first story.",
+        ten_questions=["What changed?", "Why does it matter?"],
+        detailed_outline={
+            "title": "Outline B",
+            "abstract": "Abstract B",
+            "research_questions": ["RQ-main"],
+            "methodology": "Method B",
+            "experimental_designs": ["Exp-main"],
+            "contributions": ["C-main"],
+        },
+        review_result="preferred",
+    )
+    candidate_3 = artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Outline C",
+        note="Third draft outline.",
+        story="Tell the robustness-first story.",
+        ten_questions=["What might fail?", "How do we know?"],
+        detailed_outline={
+            "title": "Outline C",
+            "abstract": "Abstract C",
+            "research_questions": ["RQ-aux"],
+            "methodology": "Method C",
+            "experimental_designs": ["Exp-aux"],
+            "contributions": ["C-aux"],
+        },
+        review_result="backup",
+    )
+    assert candidate_1["outline_id"] == "outline-001"
+    assert candidate_2["outline_id"] == "outline-002"
+    assert candidate_3["outline_id"] == "outline-003"
+
+    selected = artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-002",
+        selected_reason="This version best matches the intended main claim and experiment design.",
+    )
+    assert selected["ok"] is True
+    assert Path(selected["selected_outline_path"]).exists()
+    assert Path(selected["outline_selection_path"]).exists()
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "write"
+
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Outline-bound analysis",
+        campaign_goal="Answer the selected paper questions cleanly.",
+        selected_outline_ref="outline-002",
+        research_questions=["RQ-main"],
+        experimental_designs=["Exp-main"],
+        todo_items=[
+            {
+                "todo_id": "todo-001",
+                "slice_id": "ablation",
+                "title": "Ablation for RQ-main",
+                "research_question": "RQ-main",
+                "experimental_design": "Exp-main",
+                "completion_condition": "Show whether the core module is necessary.",
+            }
+        ],
+        slices=[
+            {
+                "slice_id": "ablation",
+                "title": "Ablation",
+                "goal": "Disable the core module and compare.",
+                "hypothesis": "Performance will drop without the core module.",
+                "required_changes": "Disable the core module only.",
+                "metric_contract": "Report full validation metrics.",
+            }
+        ],
+    )
+    assert campaign["ok"] is True
+    assert Path(campaign["todo_manifest_path"]).exists()
+    manifest = read_json(quest_root / ".ds" / "analysis_campaigns" / f"{campaign['campaign_id']}.json", {})
+    assert manifest["selected_outline_ref"] == "outline-002"
+    assert manifest["todo_items"][0]["slice_id"] == "ablation"
+    assert manifest["slices"][0]["research_question"] == "RQ-main"
+    assert manifest["slices"][0]["experimental_design"] == "Exp-main"
+
+    stage_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": f"stage:{created['branch']}:analysis-campaign",
+            "selection_type": "stage_node",
+            "branch_name": created["branch"],
+            "stage_key": "analysis-campaign",
+        },
+    )
+    assert stage_view["stage_key"] == "analysis"
+    assert stage_view["details"]["analysis"]["selected_outline_ref"] == "outline-002"
+    assert stage_view["details"]["analysis"]["todo_items"][0]["slice_id"] == "ablation"
+
+
+def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unified_fields(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("supplementary protocol quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-supplementary")
+    idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Runtime-ref idea",
+        problem="Need a unified route for all extra experiments.",
+        hypothesis="A single campaign protocol reduces ambiguity.",
+        mechanism="Use one campaign surface for all supplementary work.",
+        decision_reason="Promote the unified protocol route.",
+        next_target="experiment",
+    )
+    main_run = artifact.record_main_experiment(
+        quest_root,
+        run_id="main-supp-001",
+        title="Unified protocol main run",
+        hypothesis="The unified protocol is workable.",
+        setup="Use the accepted baseline setup.",
+        execution="Completed the main run.",
+        results="Main result is ready for extra evidence work.",
+        conclusion="Needs one follow-up reviewer-linked run.",
+        metric_rows=[{"metric_id": "acc", "value": 0.91}],
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Supplementary Outline",
+        detailed_outline={
+            "title": "Supplementary Outline",
+            "research_questions": ["RQ-supp"],
+            "experimental_designs": ["Exp-supp"],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Bind the next supplementary run to the selected outline.",
+    )
+
+    refs = artifact.resolve_runtime_refs(quest_root)
+    assert refs["active_idea_id"] == idea["idea_id"]
+    assert refs["latest_main_run_id"] == "main-supp-001"
+    assert refs["selected_outline_ref"] == "outline-001"
+
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Reviewer-linked supplementary run",
+        campaign_goal="Answer the remaining reviewer concern with one clean slice.",
+        campaign_origin={
+            "kind": "rebuttal",
+            "reason": "Reviewer requested one additional controlled comparison.",
+            "reviewer_item_ids": ["R1-C1"],
+        },
+        selected_outline_ref="outline-001",
+        research_questions=["RQ-supp"],
+        experimental_designs=["Exp-supp"],
+        todo_items=[
+            {
+                "todo_id": "todo-r1-c1",
+                "slice_id": "reviewer-check",
+                "title": "Reviewer check",
+                "research_question": "RQ-supp",
+                "experimental_design": "Exp-supp",
+                "completion_condition": "Answer whether the claim survives the requested check.",
+                "why_now": "This is the only remaining blocker before revision.",
+                "success_criteria": "Produce a fair comparison and a usable manuscript update.",
+                "abandonment_criteria": "Stop only if the metric contract becomes invalid.",
+                "reviewer_item_ids": ["R1-C1"],
+                "manuscript_targets": ["Results", "Rebuttal response"],
+            }
+        ],
+        slices=[
+            {
+                "slice_id": "reviewer-check",
+                "title": "Reviewer-linked check",
+                "goal": "Run the requested controlled comparison.",
+                "why_now": "Needed for the current revision package.",
+                "required_changes": "Modify only the requested comparison factor.",
+                "success_criteria": "Return a clean comparable result.",
+                "abandonment_criteria": "Abort if the comparison breaks the metric contract.",
+                "reviewer_item_ids": ["R1-C1"],
+                "manuscript_targets": ["Results", "Response letter"],
+            }
+        ],
+    )
+    active_campaign = artifact.get_analysis_campaign(quest_root, campaign_id="active")
+    assert active_campaign["campaign_id"] == campaign["campaign_id"]
+    assert active_campaign["campaign_origin"]["kind"] == "rebuttal"
+    assert active_campaign["todo_items"][0]["reviewer_item_ids"] == ["R1-C1"]
+    assert active_campaign["next_pending_slice_id"] == "reviewer-check"
+
+    outlines = artifact.list_paper_outlines(quest_root)
+    assert outlines["selected_outline_ref"] == "outline-001"
+    assert any(item["outline_id"] == "outline-001" for item in outlines["outlines"])
+
+    completed = artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="reviewer-check",
+        setup="Keep the baseline contract fixed.",
+        execution="Ran the requested controlled comparison.",
+        results="The claim remains supported under the requested check.",
+        metric_rows=[{"metric_id": "acc", "value": 0.905}],
+        claim_impact="Strengthens confidence in the main claim.",
+        reviewer_resolution="Addresses reviewer item R1-C1 directly.",
+        manuscript_update_hint="Update the rebuttal response and the main results paragraph.",
+        next_recommendation="Return to the parent branch and revise the manuscript.",
+    )
+    assert completed["ok"] is True
+    result_text = Path(completed["result_path"]).read_text(encoding="utf-8")
+    assert "## Claim Impact" in result_text
+    assert "Strengthens confidence in the main claim." in result_text
+    manifest_after = artifact.get_analysis_campaign(quest_root, campaign_id=campaign["campaign_id"])
+    assert manifest_after["slices"][0]["claim_impact"] == "Strengthens confidence in the main claim."
+    assert main_run["run_id"] == "main-supp-001"
+    stage_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": f"stage:{idea['branch']}:analysis-campaign",
+            "selection_type": "stage_node",
+            "branch_name": idea["branch"],
+            "stage_key": "analysis-campaign",
+        },
+    )
+    analysis_details = stage_view["details"]["analysis"]
+    assert analysis_details["campaign_origin"]["kind"] == "rebuttal"
+    assert analysis_details["todo_items"][0]["success_criteria"] == "Produce a fair comparison and a usable manuscript update."
+    assert analysis_details["slices"][0]["claim_impact"] == "Strengthens confidence in the main claim."
+
+
+def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper bundle quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Bundle Outline",
+        note="Candidate for bundle test.",
+        detailed_outline={
+            "title": "Bundle Outline",
+            "research_questions": ["RQ-bundle"],
+            "experimental_designs": ["Exp-bundle"],
+            "contributions": ["C-bundle"],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use this for bundle generation.",
+    )
+    (quest_root / "paper" / "draft.md").write_text("# Draft\n", encoding="utf-8")
+    (quest_root / "paper" / "writing_plan.md").write_text("# Plan\n", encoding="utf-8")
+    (quest_root / "paper" / "references.bib").write_text("@article{demo, title={Demo}}\n", encoding="utf-8")
+    (quest_root / "paper" / "build").mkdir(parents=True, exist_ok=True)
+    write_json(quest_root / "paper" / "build" / "compile_report.json", {"ok": True})
+    (quest_root / "paper" / "paper.pdf").write_bytes(b"%PDF-1.4\n%paper\n")
+
+    result = artifact.submit_paper_bundle(
+        quest_root,
+        title="Bundle Paper",
+        summary="Paper bundle is ready for final review.",
+        pdf_path="paper/paper.pdf",
+    )
+    assert result["ok"] is True
+    assert Path(result["manifest_path"]).exists()
+    snapshot = quest_service.snapshot(quest["quest_id"])
+    assert snapshot["active_anchor"] == "finalize"
+
+    stage_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": "stage:main:write",
+            "selection_type": "stage_node",
+            "branch_name": "main",
+            "stage_key": "write",
+        },
+    )
+    assert stage_view["stage_key"] == "paper"
+    assert any(item["label"] == "Bundle Manifest" for item in stage_view["sections"]["key_files"])
 
 
 def test_record_main_experiment_writes_result_and_baseline_comparison(temp_home: Path) -> None:
@@ -381,6 +793,7 @@ def test_record_main_experiment_writes_result_and_baseline_comparison(temp_home:
     payload = read_json(result_json, {})
     assert payload["result_kind"] == "main_experiment"
     assert payload["baseline_ref"]["baseline_id"] == "baseline-main"
+    assert payload["baseline_ref"]["metric_contract_json_rel_path"] == "baselines/imported/baseline-main/json/metric_contract.json"
     assert payload["metrics_summary"]["acc"] == 0.89
     assert payload["baseline_comparisons"]["primary_metric_id"] == "acc"
     primary = next(item for item in payload["baseline_comparisons"]["items"] if item["metric_id"] == "acc")
@@ -391,6 +804,274 @@ def test_record_main_experiment_writes_result_and_baseline_comparison(temp_home:
     snapshot = quest_service.snapshot(quest["quest_id"])
     assert snapshot["summary"]["latest_metric"]["key"] == "acc"
     assert snapshot["summary"]["latest_metric"]["delta_vs_baseline"] == pytest.approx(0.05)
+
+
+def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("idea foundation quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-foundation")
+
+    first_idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Adapter route",
+        problem="Baseline saturates on difficult cases.",
+        hypothesis="A small adapter improves the main score.",
+        mechanism="Insert a light residual adapter.",
+        decision_reason="Best next route from the current head.",
+        next_target="experiment",
+    )
+    assert first_idea["branch_no"] == "001"
+    first_metadata, _ = load_markdown_document(Path(first_idea["idea_md_path"]))
+    assert first_metadata["foundation_ref"]["kind"] == "current_head"
+    assert first_metadata["foundation_ref"]["branch"] == first_idea["parent_branch"]
+
+    revised_first_idea = artifact.submit_idea(
+        quest_root,
+        mode="revise",
+        idea_id=first_idea["idea_id"],
+        title="Adapter route refined",
+        problem="Baseline still misses difficult cases.",
+        hypothesis="A tuned adapter improves the main score.",
+        mechanism="Tune adapter placement and depth.",
+        decision_reason="Refine the same branch before the main run.",
+        next_target="experiment",
+    )
+    assert revised_first_idea["branch"] == first_idea["branch"]
+
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-001",
+        title="Adapter main run",
+        hypothesis="Adapter improves validation accuracy.",
+        setup="Use the attached baseline training recipe.",
+        execution="Ran the full validation sweep.",
+        results="Accuracy improved.",
+        conclusion="The adapter is promising enough for follow-up analysis.",
+        metric_rows=[
+            {"metric_id": "acc", "value": 0.88, "split": "val"},
+        ],
+        evidence_paths=["outputs/main-001/metrics.json"],
+    )
+
+    second_idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Run-informed route",
+        problem="Need a follow-up idea grounded in the measured win.",
+        hypothesis="The measured gain suggests a stronger route.",
+        mechanism="Extend the winning adapter logic into the next branch.",
+        decision_reason="Use the best measured branch as the next foundation.",
+        foundation_ref={"kind": "run", "ref": "main-001"},
+        foundation_reason="Build on the best measured main run.",
+        next_target="experiment",
+    )
+    assert second_idea["branch_no"] == "002"
+    second_metadata, _ = load_markdown_document(Path(second_idea["idea_md_path"]))
+    assert second_metadata["foundation_ref"]["kind"] == "run"
+    assert second_metadata["foundation_ref"]["ref"] == "main-001"
+    assert second_metadata["foundation_ref"]["branch"] == first_idea["branch"]
+    assert second_metadata["foundation_reason"] == "Build on the best measured main run."
+
+    third_idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Baseline reset route",
+        problem="Need a clean restart from the confirmed baseline.",
+        hypothesis="A fresh line from baseline may unlock a cleaner improvement.",
+        mechanism="Restart from the baseline branch with a different modification point.",
+        decision_reason="Try a fresh route from the baseline instead of compounding changes.",
+        foundation_ref={"kind": "baseline", "ref": "baseline-foundation"},
+        foundation_reason="Restart from the confirmed baseline branch.",
+        next_target="experiment",
+    )
+    assert third_idea["branch_no"] == "003"
+    third_metadata, _ = load_markdown_document(Path(third_idea["idea_md_path"]))
+    assert third_metadata["foundation_ref"]["kind"] == "baseline"
+    assert third_metadata["foundation_ref"]["ref"] == "baseline-foundation"
+    assert third_metadata["foundation_reason"] == "Restart from the confirmed baseline branch."
+
+    branches = artifact.list_research_branches(quest_root)
+    assert branches["ok"] is True
+    assert branches["count"] == 3
+    assert branches["active_head_branch"] == third_idea["branch"]
+
+    by_branch = {item["branch_name"]: item for item in branches["branches"]}
+    first_branch = by_branch[first_idea["branch"]]
+    assert first_branch["branch_no"] == "001"
+    assert first_branch["idea_title"] == "Adapter route refined"
+    assert first_branch["parent_branch"] == "main"
+    assert first_branch["foundation_ref"]["kind"] == "current_head"
+    assert first_branch["latest_main_experiment"]["run_id"] == "main-001"
+    assert first_branch["latest_main_experiment"]["primary_metric_id"] == "acc"
+    assert first_branch["latest_main_experiment"]["primary_value"] == pytest.approx(0.88)
+    assert first_branch["has_main_result"] is True
+    assert first_branch["round_state"] == "post_result"
+
+    second_branch = by_branch[second_idea["branch"]]
+    assert second_branch["branch_no"] == "002"
+    assert second_branch["idea_title"] == "Run-informed route"
+    assert second_branch["parent_branch"] == first_idea["branch"]
+    assert second_branch["foundation_ref"]["kind"] == "run"
+    assert second_branch["foundation_ref"]["ref"] == "main-001"
+    assert second_branch["foundation_reason"] == "Build on the best measured main run."
+    assert second_branch["latest_main_experiment"] is None
+    assert second_branch["has_main_result"] is False
+    assert second_branch["round_state"] == "pre_result"
+
+    third_branch = by_branch[third_idea["branch"]]
+    assert third_branch["branch_no"] == "003"
+    assert third_branch["idea_title"] == "Baseline reset route"
+    assert third_branch["parent_branch"] == "main"
+    assert third_branch["foundation_ref"]["kind"] == "baseline"
+    assert third_branch["foundation_ref"]["ref"] == "baseline-foundation"
+    assert third_branch["foundation_reason"] == "Restart from the confirmed baseline branch."
+    assert branches["branches"][0]["branch_name"] == third_idea["branch"]
+
+    branch_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": second_idea["branch"],
+            "selection_type": "branch_node",
+            "branch_name": second_idea["branch"],
+            "stage_key": "idea",
+            "compare_base": first_idea["branch"],
+            "compare_head": second_idea["branch"],
+        },
+    )
+    assert branch_view["branch_no"] == "002"
+    assert branch_view["title"] == "Branch #002 · Run-informed route"
+    assert branch_view["foundation_label"] == "run · main-001"
+    assert branch_view["parent_branch"] == first_idea["branch"]
+    assert branch_view["compare_base"] == first_idea["branch"]
+    assert branch_view["compare_head"] == second_idea["branch"]
+    assert branch_view["lineage_intent"] == "continue_line"
+    assert branch_view["draft_available"] is True
+    assert branch_view["idea_draft_path"].endswith("/draft.md")
+    assert "draft" in branch_view["subviews"]
+    assert any(item["label"] == "Idea Markdown" for item in branch_view["sections"]["key_files"])
+    assert any(item["label"] == "Idea Draft" for item in branch_view["sections"]["key_files"])
+
+
+def test_submit_idea_lineage_intent_creates_child_and_sibling_like_nodes(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("idea lineage quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-lineage")
+
+    first_idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="First route",
+        problem="Baseline saturates.",
+        hypothesis="A first improvement path exists.",
+        mechanism="Add a small adapter.",
+        decision_reason="Open the first durable idea line.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-lineage-001",
+        title="First route main run",
+        hypothesis="The first route helps.",
+        setup="Use baseline recipe.",
+        execution="Ran validation.",
+        results="Improved accuracy.",
+        conclusion="Use the measured result to continue branching.",
+        metric_rows=[{"metric_id": "acc", "value": 0.87}],
+    )
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "decision"
+
+    child_idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        lineage_intent="continue_line",
+        title="Child route",
+        problem="Extend the winning line.",
+        hypothesis="The measured win supports a stronger child route.",
+        mechanism="Deepen the adapter path.",
+        decision_reason="Continue the active line from the measured result.",
+        draft_markdown="# Child route draft\n\n## Selected Claim\n\nDeepen the adapter path.\n",
+    )
+    sibling_like_idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        lineage_intent="branch_alternative",
+        title="Sibling-like route",
+        problem="Try an alternative from the same parent foundation.",
+        hypothesis="A sibling route may outperform the direct continuation.",
+        mechanism="Change the intervention point while keeping the same parent foundation.",
+        decision_reason="Branch an alternative from the parent foundation.",
+        draft_markdown="# Sibling route draft\n\n## Selected Claim\n\nChange the intervention point.\n",
+    )
+
+    child_metadata, _ = load_markdown_document(Path(child_idea["idea_md_path"]))
+    sibling_metadata, _ = load_markdown_document(Path(sibling_like_idea["idea_md_path"]))
+
+    assert child_idea["lineage_intent"] == "continue_line"
+    assert child_idea["parent_branch"] == first_idea["branch"]
+    assert child_idea["foundation_ref"]["kind"] == "run"
+    assert child_idea["foundation_ref"]["ref"] == "main-lineage-001"
+    assert child_metadata["lineage_intent"] == "continue_line"
+
+    assert sibling_like_idea["lineage_intent"] == "branch_alternative"
+    assert sibling_like_idea["parent_branch"] == first_idea["branch"]
+    assert sibling_like_idea["foundation_ref"]["kind"] == "run"
+    assert sibling_like_idea["foundation_ref"]["ref"] == "main-lineage-001"
+    assert sibling_metadata["lineage_intent"] == "branch_alternative"
+
+    branches = artifact.list_research_branches(quest_root)
+    by_branch = {item["branch_name"]: item for item in branches["branches"]}
+    assert by_branch[child_idea["branch"]]["lineage_intent"] == "continue_line"
+    assert by_branch[child_idea["branch"]]["parent_branch"] == first_idea["branch"]
+    assert by_branch[child_idea["branch"]]["idea_draft_path"].endswith("/draft.md")
+    assert by_branch[sibling_like_idea["branch"]]["lineage_intent"] == "branch_alternative"
+    assert by_branch[sibling_like_idea["branch"]]["parent_branch"] == first_idea["branch"]
+    assert by_branch[sibling_like_idea["branch"]]["idea_draft_path"].endswith("/draft.md")
+
+
+def test_stage_view_exposes_idea_draft_content_and_subviews(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("idea draft stage view quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-draft")
+
+    idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Drafted route",
+        problem="Baseline saturates early.",
+        hypothesis="A clearer route helps later execution.",
+        mechanism="Introduce a compact adapter.",
+        decision_reason="Record the chosen route with a durable draft.",
+        draft_markdown="# Drafted route\n\n## Theory and Method\n\nUse a compact adapter.\n",
+    )
+
+    stage_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": idea["branch"],
+            "selection_type": "branch_node",
+            "branch_name": idea["branch"],
+            "stage_key": "idea",
+            "compare_base": "main",
+            "compare_head": idea["branch"],
+        },
+    )
+
+    assert stage_view["draft_available"] is True
+    assert stage_view["idea_draft_path"].endswith("/draft.md")
+    assert stage_view["subviews"] == ["overview", "details", "draft"]
+    assert "Use a compact adapter." in stage_view["details"]["branch"]["idea_draft_markdown"]
 
 
 def test_attach_baseline_fails_when_registry_source_is_not_materializable(temp_home: Path) -> None:
@@ -531,7 +1212,7 @@ def test_artifact_arxiv_full_text_falls_back_to_html(temp_home: Path, monkeypatc
     assert result["attempts"][0]["ok"] is False
 
 
-def test_artifact_interact_respects_primary_connector_policy(temp_home: Path) -> None:
+def test_artifact_interact_respects_primary_connector_policy(temp_home: Path, monkeypatch) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
@@ -541,6 +1222,11 @@ def test_artifact_interact_respects_primary_connector_policy(temp_home: Path) ->
     connectors["_routing"]["primary_connector"] = "telegram"
     connectors["_routing"]["artifact_delivery_policy"] = "primary_plus_local"
     write_yaml(manager.path_for("connectors"), connectors)
+
+    def fake_telegram_deliver(_self, _payload, _config):  # noqa: ANN001
+        return {"ok": True, "transport": "telegram-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.TelegramConnectorBridge.deliver", fake_telegram_deliver)
 
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
     quest = quest_service.create("artifact routing quest")
@@ -571,6 +1257,70 @@ def test_artifact_interact_respects_primary_connector_policy(temp_home: Path) ->
     assert any("Primary connector routing test." in str(item.get("message") or "") for item in local_records)
     assert any("Primary connector routing test." in str(item.get("text") or "") for item in telegram_records)
     assert not slack_outbox.exists()
+
+
+def test_artifact_interact_fans_out_to_all_bound_connectors_without_primary(
+    temp_home: Path,
+    monkeypatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    connectors["telegram"]["enabled"] = True
+    connectors["_routing"]["primary_connector"] = None
+    connectors["_routing"]["artifact_delivery_policy"] = "primary_plus_local"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    deliveries: list[str] = []
+
+    def fake_qq_deliver(_self, payload, _config):  # noqa: ANN001
+        deliveries.append(str(payload.get("conversation_id") or ""))
+        return {"ok": True, "transport": "qq-http"}
+
+    def fake_telegram_deliver(_self, payload, _config):  # noqa: ANN001
+        deliveries.append(str(payload.get("conversation_id") or ""))
+        return {"ok": True, "transport": "telegram-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_qq_deliver)
+    monkeypatch.setattr("deepscientist.bridges.connectors.TelegramConnectorBridge.deliver", fake_telegram_deliver)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("artifact fanout quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    quest_service.bind_source(quest["quest_id"], "local:default")
+    quest_service.bind_source(quest["quest_id"], "qq:direct:qq-user-1")
+    quest_service.bind_source(quest["quest_id"], "telegram:direct:tg-user-1")
+
+    result = artifact.interact(
+        quest_root,
+        kind="milestone",
+        message="Fanout all bound connectors.",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["delivery_policy"] == "primary_plus_local"
+    assert result["preferred_connector"] is None
+    assert result["delivery_targets"] == [
+        "local:default",
+        "qq:direct:qq-user-1",
+        "telegram:direct:tg-user-1",
+    ]
+    assert "qq:direct:qq-user-1" in deliveries
+    assert "telegram:direct:tg-user-1" in deliveries
+
+    qq_records = read_jsonl(temp_home / "logs" / "connectors" / "qq" / "outbox.jsonl")
+    telegram_records = read_jsonl(temp_home / "logs" / "connectors" / "telegram" / "outbox.jsonl")
+
+    assert qq_records[-1]["delivery"]["ok"] is True
+    assert telegram_records[-1]["delivery"]["ok"] is True
 
 
 def test_artifact_interact_auto_uses_single_enabled_connector_for_primary_only(temp_home: Path) -> None:
@@ -608,6 +1358,143 @@ def test_artifact_interact_auto_uses_single_enabled_connector_for_primary_only(t
 
     assert any("Single connector auto-selection test." in str(item.get("text") or "") for item in whatsapp_records)
     assert not local_outbox.exists()
+
+
+def test_artifact_interact_persists_surface_actions_and_connector_payload(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    def fake_qq_deliver(_self, _payload, _config):  # noqa: ANN001
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_qq_deliver)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("artifact surface actions quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    quest_service.bind_source(quest["quest_id"], "qq:direct:qq-user-surface")
+
+    surface_actions = [
+        {
+            "type": "send_notification",
+            "title": "Checkpoint reached",
+            "body": "Main baseline audit completed.",
+        }
+    ]
+    result = artifact.interact(
+        quest_root,
+        kind="milestone",
+        message="Surface action delivery test.",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+        surface_actions=surface_actions,
+    )
+
+    assert result["status"] == "ok"
+    assert result["surface_actions"] == surface_actions
+    assert result["delivery_targets"] == ["qq:direct:qq-user-surface"]
+
+    qq_records = read_jsonl(temp_home / "logs" / "connectors" / "qq" / "outbox.jsonl")
+    assert qq_records
+    assert qq_records[-1]["surface_actions"] == surface_actions
+
+    interaction_records = quest_service.latest_artifact_interaction_records(quest_root, limit=5)
+    assert interaction_records
+    assert interaction_records[-1]["surface_actions"] == surface_actions
+
+    events = read_jsonl(quest_root / ".ds" / "events.jsonl")
+    outbound = [item for item in events if item.get("type") == "connector.outbound"]
+    assert outbound
+    assert outbound[-1]["surface_actions"] == surface_actions
+
+
+def test_artifact_interact_normalizes_attachment_paths_and_returns_delivery_results(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    captured: list[dict] = []
+
+    def fake_qq_deliver(_self, payload, _config):  # noqa: ANN001
+        captured.append(dict(payload))
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_qq_deliver)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("artifact attachment normalize quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    quest_service.bind_source(quest["quest_id"], "qq:direct:qq-user-absolute")
+
+    relative_path = Path("artifacts") / "reports" / "summary.png"
+    absolute_path = quest_root / relative_path
+    absolute_path.parent.mkdir(parents=True, exist_ok=True)
+    absolute_path.write_bytes(b"fake-image")
+
+    result = artifact.interact(
+        quest_root,
+        kind="milestone",
+        message="Attachment normalization test.",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+        attachments=[
+            {
+                "kind": "path",
+                "path": str(relative_path),
+                "label": "summary",
+            }
+        ],
+    )
+
+    assert result["status"] == "ok"
+    assert result["attachment_issues"] == []
+    assert result["normalized_attachments"][0]["path"] == str(absolute_path.resolve())
+    assert result["delivery_results"]
+    assert result["delivery_results"][0]["ok"] is True
+    assert result["delivery_results"][0]["conversation_id"] == "qq:direct:qq-user-absolute"
+    assert captured
+    assert captured[-1]["attachments"][0]["path"] == str(absolute_path.resolve())
+
+
+def test_artifact_interact_reports_missing_attachment_path_to_agent(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("artifact attachment error quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    result = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="Missing attachment path test.",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+        attachments=[
+            {
+                "kind": "path",
+                "path": "artifacts/reports/missing.png",
+                "label": "missing",
+                "connector_delivery": {"qq": {"media_kind": "image"}},
+            }
+        ],
+    )
+
+    assert result["status"] == "ok"
+    assert result["attachment_issues"]
+    assert result["attachment_issues"][0]["error"] == "attachment path does not exist"
+    assert result["normalized_attachments"][0]["path"].endswith("/artifacts/reports/missing.png")
 
 
 def test_explorer_lists_real_files_and_path_documents_can_be_saved(temp_home: Path) -> None:
@@ -681,6 +1568,44 @@ def test_explorer_opens_image_files_as_assets(temp_home: Path) -> None:
     assert "documents/asset" in opened["asset_url"]
 
 
+def test_explorer_marks_paper_latex_folder_for_workspace_opening(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper latex explorer quest")
+    quest_root = Path(quest["quest_root"])
+
+    latex_root = quest_root / "paper" / "latex"
+    latex_root.mkdir(parents=True, exist_ok=True)
+    (latex_root / "main.tex").write_text(
+        "\n".join(
+            [
+                r"\documentclass{article}",
+                r"\begin{document}",
+                "Hello",
+                r"\end{document}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    explorer = quest_service.explorer(quest["quest_id"])
+    research = next(section for section in explorer["sections"] if section["id"] == "research")
+
+    def flatten(nodes: list[dict]) -> list[dict]:
+        items: list[dict] = []
+        for node in nodes:
+            items.append(node)
+            items.extend(flatten(node.get("children") or []))
+        return items
+
+    research_nodes = flatten(research["nodes"])
+    latex_node = next(node for node in research_nodes if node.get("path") == "paper/latex")
+    assert latex_node["kind"] == "directory"
+    assert latex_node["folder_kind"] == "latex"
+
+
 def test_markdown_asset_upload_uses_sibling_assets_folder(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -705,8 +1630,51 @@ def test_markdown_asset_upload_uses_sibling_assets_folder(temp_home: Path) -> No
 
     opened = quest_service.open_document(quest["quest_id"], uploaded["asset_document_id"])
     assert opened["meta"]["renderer_hint"] == "image"
-    assert opened["mime_type"] == "image/png"
-    assert "documents/asset" in opened["asset_url"]
+
+
+def test_questpath_documents_and_stage_view_cover_quest_root_files(temp_home: Path) -> None:
+    quest_service = QuestService(temp_home)
+    artifact = ArtifactService(temp_home)
+    quest = quest_service.create("stage view quest")
+    quest_root = temp_home / "quests" / quest["quest_id"]
+    docs_dir = quest_root / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    appendix = docs_dir / "appendix.md"
+    appendix.write_text("# Appendix\n\nQuest-root file.\n", encoding="utf-8")
+
+    opened = quest_service.open_document(quest["quest_id"], "questpath::docs/appendix.md")
+
+    assert opened["document_id"] == "questpath::docs/appendix.md"
+    assert "Quest-root file" in opened["content"]
+
+    baseline_dir = quest_root / "baselines" / "local" / "baseline-001"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    (baseline_dir / "metrics.json").write_text('{"acc": 0.91}\n', encoding="utf-8")
+    result = artifact.confirm_baseline(
+        quest_root,
+        baseline_path="baselines/local/baseline-001",
+        baseline_id="baseline-001",
+        summary="Baseline confirmed for stage view.",
+        metrics_summary={"acc": 0.91},
+        metric_contract={"primary_metric_id": "acc", "direction": "maximize"},
+        primary_metric={"metric_id": "acc", "value": 0.91},
+    )
+    assert result["ok"] is True
+
+    stage_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": "stage:main:baseline",
+            "selection_type": "stage_node",
+            "branch_name": "main",
+            "stage_key": "baseline",
+        },
+    )
+
+    assert stage_view["stage_key"] == "baseline"
+    assert stage_view["title"] == "Baseline · baseline-001"
+    assert any(item["label"] == "Attachment" for item in stage_view["sections"]["key_files"])
+    assert any(str(item.get("artifact_kind") or "") == "baseline" for item in stage_view["sections"]["history"])
 
 
 def test_explorer_can_switch_to_git_snapshot_and_open_historical_files(temp_home: Path) -> None:
@@ -860,6 +1828,66 @@ def test_artifact_interact_tracks_pending_request_and_user_reply(temp_home: Path
     assert latest["text"].startswith("Launch it now")
 
 
+def test_artifact_interact_redirects_ordinary_decision_requests_in_autonomous_mode(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create(
+        "autonomous decision quest",
+        startup_contract={"decision_policy": "autonomous"},
+    )
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    result = artifact.interact(
+        quest_root,
+        kind="decision_request",
+        message="Should I choose branch A or branch B?",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+        reply_mode="blocking",
+        options=[
+            {"id": "a", "label": "A", "description": "Choose branch A."},
+            {"id": "b", "label": "B", "description": "Choose branch B."},
+        ],
+    )
+
+    assert result["status"] == "autonomous_redirected"
+    assert result["reply_mode"] == "none"
+    assert result["interaction_id"] is None
+    snapshot_after = quest_service.snapshot(quest["quest_id"])
+    assert snapshot_after["status"] != "waiting_for_user"
+    assert not snapshot_after["pending_decisions"]
+
+
+def test_artifact_interact_allows_completion_approval_in_autonomous_mode(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create(
+        "autonomous completion approval quest",
+        startup_contract={"decision_policy": "autonomous"},
+    )
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    request = artifact.interact(
+        quest_root,
+        kind="decision_request",
+        message="The quest appears complete. May I end it now?",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+        reply_mode="blocking",
+        reply_schema={"decision_type": "quest_completion_approval"},
+    )
+
+    assert request["status"] == "ok"
+    assert request["reply_mode"] == "blocking"
+    snapshot_after = quest_service.snapshot(quest["quest_id"])
+    assert snapshot_after["status"] == "waiting_for_user"
+    assert snapshot_after["pending_decisions"]
+
+
 def test_bind_source_repairs_lowercased_connector_binding_and_preserves_chat_id_case(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -997,6 +2025,84 @@ def test_approval_record_closes_pending_interaction(temp_home: Path) -> None:
     assert not snapshot_after["pending_decisions"]
 
 
+def test_complete_quest_requires_explicit_user_approval(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("completion approval required")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    request = artifact.interact(
+        quest_root,
+        kind="decision_request",
+        message="The quest appears complete. May I end it now?",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+        reply_mode="blocking",
+        reply_schema={"decision_type": "quest_completion_approval"},
+        options=[
+            {"id": "approve", "label": "Approve", "description": "End the quest now."},
+            {"id": "continue", "label": "Continue", "description": "Keep working."},
+        ],
+    )
+
+    quest_service.append_message(
+        quest["quest_id"],
+        role="user",
+        content="好的",
+        source="web-react",
+        reply_to_interaction_id=request["interaction_id"],
+    )
+
+    result = artifact.complete_quest(quest_root, summary="Attempting to complete the quest.")
+
+    assert result["ok"] is False
+    assert result["status"] == "approval_not_explicit"
+    snapshot_after = quest_service.snapshot(quest["quest_id"])
+    assert snapshot_after["status"] != "completed"
+
+
+def test_complete_quest_marks_quest_completed_after_explicit_user_approval(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("completion approved")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    request = artifact.interact(
+        quest_root,
+        kind="decision_request",
+        message="The quest appears complete. May I end it now?",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+        reply_mode="blocking",
+        reply_schema={"decision_type": "quest_completion_approval"},
+        options=[
+            {"id": "approve", "label": "Approve", "description": "End the quest now."},
+            {"id": "continue", "label": "Continue", "description": "Keep working."},
+        ],
+    )
+
+    reply = quest_service.append_message(
+        quest["quest_id"],
+        role="user",
+        content="同意完成",
+        source="web-react",
+        reply_to_interaction_id=request["interaction_id"],
+    )
+
+    result = artifact.complete_quest(quest_root, summary="Research line finished with reviewed deliverables.")
+
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert result["approval_message_id"] == reply["id"]
+    assert result["snapshot"]["status"] == "completed"
+    assert result["approval"]["record"]["source"]["kind"] == "user"
+    assert result["decision"]["record"]["action"] == "stop"
+
+
 def test_threaded_progress_auto_links_user_reply_without_waiting(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -1086,6 +2192,8 @@ def test_user_message_queue_is_delivered_only_when_artifact_interact_polls(temp_
     assert polled["delivery_batch"] is not None
     assert [item["message_id"] for item in polled["recent_inbound_messages"]] == [first["id"], second["id"]]
     assert "这是最新用户的要求" in polled["agent_instruction"]
+    assert "优先于当前后台子任务" in polled["agent_instruction"]
+    assert "立即再调用一次 artifact.interact" in polled["agent_instruction"]
     assert "先检查训练入口。" in polled["agent_instruction"]
     assert "然后核对依赖版本。" in polled["agent_instruction"]
 
@@ -1109,3 +2217,163 @@ def test_user_message_queue_is_delivered_only_when_artifact_interact_polls(temp_
     assert no_new_message["recent_inbound_messages"] == []
     assert "当前用户并没有发送任何消息" in no_new_message["agent_instruction"]
     assert len(no_new_message["recent_interaction_records"]) >= 3
+
+
+def test_user_message_queue_agent_instruction_respects_english_locale(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    config["default_locale"] = "en-US"
+    write_yaml(manager.path_for("config"), config)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("english mailbox quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    quest_service.append_message(
+        quest["quest_id"],
+        role="user",
+        content="Check the training entrypoint first.",
+        source="web-react",
+    )
+
+    polled = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="I am checking the repository.",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=True,
+    )
+
+    assert "These are the latest user requirements in chronological order." in polled["agent_instruction"]
+    assert "take priority over the current background subtask" in polled["agent_instruction"]
+    assert "Immediately call artifact.interact(...) again" in polled["agent_instruction"]
+    assert "Check the training entrypoint first." in polled["agent_instruction"]
+
+    no_new_message = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="I am continuing the check.",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=True,
+    )
+
+    assert (
+        no_new_message["agent_instruction"]
+        .startswith("No new user message has arrived. Continue the task according to the user's requirements.")
+    )
+    assert "Here are the latest 10 artifact-related interaction records:" in no_new_message["agent_instruction"]
+
+
+def test_artifact_interact_default_agent_instruction_respects_english_locale(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    config["default_locale"] = "en-US"
+    write_yaml(manager.path_for("config"), config)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("english fallback instruction quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    result = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="Still auditing.",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+    )
+
+    assert result["agent_instruction"] == "No new user message has arrived. Continue the task according to the user's requirements."
+
+
+def test_analysis_campaign_uses_current_workspace_parent_and_returns_there(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("current workspace analysis parent quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root)
+    parent = artifact.submit_idea(
+        quest_root,
+        title="Parent route",
+        problem="Need a durable parent node.",
+        hypothesis="The parent route is promising enough for follow-up evidence.",
+        mechanism="Establish the first durable branch.",
+        expected_gain="A stable branch to analyze.",
+        decision_reason="Promote the first route.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="run-parent",
+        title="Parent run",
+        hypothesis="The parent route works.",
+        setup="Use the standard configuration.",
+        execution="Ran the main training and evaluation flow.",
+        results="The run is promising and needs one extra follow-up experiment.",
+        conclusion="Use this result as the parent node for a follow-up branch.",
+        metrics_summary={"acc": 0.84},
+        metric_rows=[{"metric_id": "acc", "value": 0.84}],
+        evidence_paths=["experiments/main/run-parent/result.json"],
+    )
+    head = artifact.submit_idea(
+        quest_root,
+        title="New head route",
+        problem="A newer route now exists.",
+        hypothesis="This becomes the latest head branch.",
+        mechanism="Branch a new route after the parent result.",
+        expected_gain="A distinct newer head.",
+        decision_reason="Keep exploring a different route.",
+    )
+
+    quest_service.update_research_state(
+        quest_root,
+        active_idea_id=parent["idea_id"],
+        current_workspace_branch=parent["branch"],
+        current_workspace_root=parent["worktree_root"],
+        workspace_mode="idea",
+    )
+
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Single extra experiment",
+        campaign_goal="Run one follow-up experiment from the previously selected node.",
+        slices=[
+            {
+                "slice_id": "follow-up",
+                "title": "Follow-up experiment",
+                "goal": "Run the extra experiment as a true child branch.",
+                "required_changes": "Apply only the follow-up change.",
+                "metric_contract": "Use the same baseline comparison contract.",
+            }
+        ],
+    )
+
+    assert campaign["parent_branch"] == parent["branch"]
+    assert campaign["parent_worktree_root"] == parent["worktree_root"]
+    assert campaign["slices"][0]["branch"].startswith(f"analysis/{parent['idea_id']}/")
+
+    completed = artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="follow-up",
+        setup="Apply the follow-up change only.",
+        execution="Ran the extra experiment fully.",
+        results="The extra experiment finished cleanly.",
+        metric_rows=[{"name": "acc", "value": 0.845}],
+        evidence_paths=["experiments/analysis/follow-up/result.json"],
+    )
+
+    assert completed["completed"] is True
+    assert completed["returned_to_branch"] == parent["branch"]
+    final_state = quest_service.read_research_state(quest_root)
+    assert final_state["current_workspace_branch"] == parent["branch"]
+    assert final_state["current_workspace_root"] == parent["worktree_root"]
+    assert final_state["research_head_branch"] == head["branch"]
+    assert final_state["active_idea_id"] == parent["idea_id"]

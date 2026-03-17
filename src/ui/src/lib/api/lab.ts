@@ -199,6 +199,15 @@ export type LabQuestGraphNode = {
   node_id: string
   branch_name: string
   parent_branch?: string | null
+  branch_no?: string | null
+  idea_title?: string | null
+  idea_problem?: string | null
+  next_target?: string | null
+  foundation_ref?: Record<string, unknown> | null
+  foundation_reason?: string | null
+  foundation_label?: string | null
+  latest_main_experiment?: Record<string, unknown> | null
+  experiment_count?: number | null
   branch_class?: 'main' | 'idea' | 'analysis' | 'paper' | null
   node_kind?: 'branch' | 'baseline_root' | 'placeholder' | null
   placeholder?: boolean | null
@@ -401,6 +410,12 @@ export type LabQuestSelectionContext = {
   selection_ref: string
   quest_id: string
   branch_name?: string | null
+  branch_no?: string | null
+  parent_branch?: string | null
+  foundation_ref?: Record<string, unknown> | null
+  foundation_reason?: string | null
+  foundation_label?: string | null
+  idea_title?: string | null
   stage_key?: string | null
   edge_id?: string | null
   agent_instance_id?: string | null
@@ -1708,6 +1723,27 @@ function buildLocalBranchGraphNodes(
   return nodes
 }
 
+export function resolveLocalBaselineAnchorNode(
+  nodes: LabQuestGraphNode[],
+  summaryBranch?: string | null
+): LabQuestGraphNode | null {
+  const operationalNodes = nodes.filter(
+    (node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder'
+  )
+  if (!operationalNodes.length) return null
+
+  const rootNode = operationalNodes.find((node) => !String(node.parent_branch || '').trim())
+  if (rootNode) return rootNode
+
+  const mainNode = operationalNodes.find((node) => node.branch_name === 'main')
+  if (mainNode) return mainNode
+
+  const activeNode = operationalNodes.find((node) => node.branch_name === (summaryBranch || 'main'))
+  if (activeNode) return activeNode
+
+  return operationalNodes[0] ?? null
+}
+
 function buildLocalBranchGraphEdges(
   summary: QuestSummary,
   nodes: LabQuestGraphNode[],
@@ -1725,9 +1761,7 @@ function buildLocalBranchGraphEdges(
     })
   })
 
-  const firstOperationalNode =
-    nodes.find((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder' && node.branch_name === (summary.branch || 'main')) ||
-    nodes.find((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder')
+  const firstOperationalNode = resolveLocalBaselineAnchorNode(nodes, summary.branch || 'main')
   if (firstOperationalNode) {
     edges.unshift({
       edge_id: `${baselineRootId}->${firstOperationalNode.node_id}`,
@@ -2010,6 +2044,63 @@ function extractTraceMetrics(trace?: LabQuestNodeTrace | null) {
   return asRecordValue(details?.metrics_summary)
 }
 
+function formatFoundationLabel(node: GitBranchNode) {
+  const foundation = node.foundation_ref
+  if (!foundation || typeof foundation !== 'object' || Array.isArray(foundation)) {
+    return node.parent_ref || null
+  }
+  const kind = asStringValue((foundation as Record<string, unknown>).kind)
+  const ref = asStringValue((foundation as Record<string, unknown>).ref)
+  const branch = asStringValue((foundation as Record<string, unknown>).branch)
+  if (kind && ref) return `${kind} · ${ref}`
+  if (branch) return branch
+  return node.parent_ref || null
+}
+
+function resolveBranchScopePaths(node: GitBranchNode): string[] | null {
+  const scopes: string[] = []
+  const push = (value?: string | null) => {
+    const normalized = String(value || '').trim().replace(/^\/+|\/+$/g, '')
+    if (!normalized || scopes.includes(normalized)) return
+    scopes.push(normalized)
+  }
+
+  push('brief.md')
+  push('plan.md')
+  push('status.md')
+  push('SUMMARY.md')
+  push('artifacts/ideas')
+  push('artifacts/runs')
+  push('artifacts/reports')
+
+  if (node.idea_id) {
+    push(`memory/ideas/${node.idea_id}`)
+    push('literature')
+  }
+  const latestRun = node.latest_main_experiment
+  if (latestRun && typeof latestRun === 'object' && !Array.isArray(latestRun)) {
+    const runId = asStringValue((latestRun as Record<string, unknown>).run_id)
+    if (runId) push(`experiments/main/${runId}`)
+  }
+  if (String(node.branch_kind || '').trim().toLowerCase() === 'analysis') {
+    push('experiments/analysis')
+  }
+  if (String(node.branch_kind || '').trim().toLowerCase() === 'paper' || node.next_target === 'write') {
+    push('paper')
+  }
+  const foundation = node.foundation_ref
+  if (foundation && typeof foundation === 'object' && !Array.isArray(foundation)) {
+    const kind = asStringValue((foundation as Record<string, unknown>).kind)
+    const ref = asStringValue((foundation as Record<string, unknown>).ref)
+    if (kind === 'baseline' && ref) {
+      push(`baselines/imported/${ref}`)
+      push(`baselines/local/${ref}`)
+    }
+  }
+
+  return scopes.length ? scopes : null
+}
+
 function mapGitNodeToLabQuestGraphNode(
   questId: string,
   summary: QuestSummary,
@@ -2028,6 +2119,15 @@ function mapGitNodeToLabQuestGraphNode(
     node_id: node.ref,
     branch_name: node.ref,
     parent_branch: node.parent_ref ?? null,
+    branch_no: node.branch_no ?? null,
+    idea_title: node.idea_title ?? null,
+    idea_problem: node.idea_problem ?? null,
+    next_target: node.next_target ?? null,
+    foundation_ref: node.foundation_ref ?? null,
+    foundation_reason: node.foundation_reason ?? null,
+    foundation_label: formatFoundationLabel(node),
+    latest_main_experiment: node.latest_main_experiment ?? null,
+    experiment_count: node.experiment_count ?? null,
     branch_class: resolveBranchClass(node),
     node_kind: 'branch',
     placeholder: false,
@@ -2049,7 +2149,7 @@ function mapGitNodeToLabQuestGraphNode(
     baseline_state: resolveBaselineGate(summary),
     runtime_state: node.current ? normalizeLabWorkingStatus(summary.status) : 'idle',
     target_label: node.label,
-    scope_paths: traceWorktreeRelPath ? [traceWorktreeRelPath] : null,
+    scope_paths: resolveBranchScopePaths(node),
     compare_base: resolveBranchCompareBase(node),
     compare_head: node.ref,
     node_summary: {
@@ -2253,12 +2353,16 @@ async function loadLocalQuestNodeTraces(
   projectId: string
 ): Promise<LabQuestNodeTraceListResponse | null> {
   try {
-    const summary = await loadLocalQuestSummary(projectId)
-    const artifacts = await loadLocalQuestArtifacts(projectId)
-    const events = await loadLocalQuestEvents(projectId)
-    return buildLocalTracePayload(summary, artifacts, events)
+    return await questClient.nodeTraces(projectId)
   } catch {
-    return null
+    try {
+      const summary = await loadLocalQuestSummary(projectId)
+      const artifacts = await loadLocalQuestArtifacts(projectId)
+      const events = await loadLocalQuestEvents(projectId)
+      return buildLocalTracePayload(summary, artifacts, events)
+    } catch {
+      return null
+    }
   }
 }
 
@@ -3284,7 +3388,9 @@ export async function getLabQuestGraph(
   if (await shouldUseLocalQuestLab(projectId)) {
     const summary = await loadLocalQuestSummary(projectId)
     const branches = await loadLocalQuestBranches(projectId)
-    const nodeTraces = await loadLocalQuestNodeTraces(projectId)
+    const requestedView = params?.view ?? 'branch'
+    const nodeTraces =
+      requestedView === 'branch' ? null : await loadLocalQuestNodeTraces(projectId)
     return buildLocalQuestGraphResponse(summary, branches, params, nodeTraces)
   }
   try {

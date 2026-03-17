@@ -189,7 +189,7 @@ export default function HeroScene({ progress, stageIndex, reducedMotion, isMobil
   return (
     <div
       ref={layerRef}
-      className="relative mx-auto w-full max-w-full origin-top scale-100 translate-y-4 overflow-hidden sm:translate-y-6 lg:origin-top-left lg:scale-[0.9] lg:translate-y-8 lg:overflow-visible xl:translate-y-10"
+      className="relative mx-auto w-full max-w-full origin-top scale-100 translate-y-4 overflow-hidden sm:translate-y-6 lg:origin-top lg:scale-[0.94] lg:translate-y-4 lg:overflow-visible xl:scale-[0.97] xl:translate-y-6"
       style={{ aspectRatio: '1536 / 600' }}
     >
       <div className="pointer-events-none absolute left-1/2 top-3 z-40 max-w-[85%] -translate-x-1/2 rounded-full bg-white/80 px-3 py-1 text-center text-[9px] uppercase tracking-[0.18em] text-[#6F6B66] shadow-[0_6px_16px_rgba(45,42,38,0.12)] backdrop-blur sm:left-auto sm:top-4 sm:max-w-none sm:translate-x-0 sm:text-left sm:text-[10px] sm:tracking-[0.2em] sm:right-4">

@@ -10,6 +10,7 @@ import type {
   StatusEventData,
   ToolEventData,
 } from '@/lib/types/chat-events'
+import { deriveMcpIdentity } from '@/lib/mcpIdentity'
 import type { FeedEnvelope, SessionPayload } from '@/types'
 
 const QUEST_SESSION_PREFIX = 'quest:'
@@ -301,25 +302,13 @@ function normalizeQuestToolEvent(
 ): AgentSSEEvent | null {
   const dataRecord = asRecord(update.data)
   const rawToolName = asString(dataRecord?.tool_name)
-  const derivedIdentity = (() => {
-    const explicitServer = asString(dataRecord?.mcp_server)
-    const explicitTool = asString(dataRecord?.mcp_tool)
-    if (explicitServer || explicitTool) {
-      return { mcpServer: explicitServer, mcpTool: explicitTool }
-    }
-    const raw = (rawToolName || '').trim().toLowerCase()
-    for (const prefix of ['memory', 'artifact', 'bash_exec']) {
-      if (raw.startsWith(`${prefix}.`)) {
-        return {
-          mcpServer: prefix,
-          mcpTool: raw.slice(prefix.length + 1),
-        }
-      }
-    }
-    return { mcpServer: undefined, mcpTool: undefined }
-  })()
-  const mcpServer = derivedIdentity.mcpServer
-  const mcpTool = derivedIdentity.mcpTool
+  const derivedIdentity = deriveMcpIdentity(
+    rawToolName,
+    asString(dataRecord?.mcp_server),
+    asString(dataRecord?.mcp_tool)
+  )
+  const mcpServer = derivedIdentity.server
+  const mcpTool = derivedIdentity.tool
   const rawMetadata = asRecord(dataRecord?.metadata) ?? {}
   const metadata: EventMetadata = buildEventMetadata(questId, sessionId, {
     ...rawMetadata,

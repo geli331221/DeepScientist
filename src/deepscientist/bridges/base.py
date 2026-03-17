@@ -44,6 +44,7 @@ class BaseConnectorBridge:
             "message": self.render_text(payload.get("text"), payload.get("attachments")),
             "reply_to_message_id": payload.get("reply_to_message_id"),
             "attachments": payload.get("attachments") or [],
+            "connector_hints": payload.get("connector_hints") or {},
             "quest_id": payload.get("quest_id"),
             "quest_root": payload.get("quest_root"),
             "importance": payload.get("importance"),
@@ -96,8 +97,11 @@ class BaseConnectorBridge:
             if isinstance(item, str):
                 attachment_lines.append(f"- {item}")
             elif isinstance(item, dict):
-                candidate = item.get("path") or item.get("url") or item.get("label") or json.dumps(item, ensure_ascii=False)
-                attachment_lines.append(f"- {candidate}")
+                if str(item.get("path_error") or "").strip():
+                    continue
+                candidate = item.get("label") or item.get("path") or item.get("url")
+                if candidate:
+                    attachment_lines.append(f"- {candidate}")
         if not attachment_lines:
             return base
         if base:

@@ -11,14 +11,17 @@ It absorbs the essential old DeepScientist reproducer discipline into one stage 
 ## Interaction discipline
 
 - Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the latest user instruction bundle before continuing baseline work.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only at real checkpoints, and normally no more frequently than every 5 to 15 tool calls.
-- Each progress update must state completed work, the durable output touched, and the immediate next step.
-- Message templates are references only. Adapt to the actual context and vary wording so updates feel respectful, human, and non-robotic.
+- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before continuing baseline work.
+- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
+- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or an occasional keepalive during truly long work. Do not update by tool-call cadence.
+- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
+- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- Message templates are references only. Adapt to the actual context and vary wording so updates feel natural and non-robotic.
 - Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
 - For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, wait up to 1 day when feasible, then choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest baseline progress update before assuming the task changed completely.
 - Prefer `bash_exec` for setup, reproduction, and verification commands so each baseline action keeps a durable quest-local session id and log trail.
+- When the baseline route is durably chosen, confirmed, waived, or blocked with a clear next action, send one richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` update that says whether the baseline is trusted, blocked, or waived, why that matters, and what the next stage is.
 
 ## Non-negotiable rules
 
@@ -188,6 +191,7 @@ Quest-local paths:
 - reproduced baseline root: `<quest_root>/baselines/local/<baseline_id>/`
 - attached or imported baseline root: `<quest_root>/baselines/imported/<baseline_id>/`
 - attachment record: `<quest_root>/baselines/imported/<baseline_id>/attachment.yaml`
+- canonical baseline metric contract JSON: `<baseline_root>/json/metric_contract.json`
 - baseline artifact record: `<quest_root>/artifacts/baselines/<artifact_id>.json`
 - baseline reports: `<quest_root>/artifacts/reports/<artifact_id>.json`
 - confirmed baseline reference: `quest.yaml -> confirmed_baseline_ref`
@@ -198,6 +202,7 @@ Global reusable registry paths:
 - canonical baseline entry: `~/DeepScientist/config/baselines/entries/<baseline_id>.yaml`
 
 Do not invent parallel durable locations when these runtime contracts already exist.
+Do not leave the authoritative metric contract only in chat, memory, or prose once the baseline is accepted.
 
 ## Baseline id and variant rules
 
@@ -555,6 +560,8 @@ Recommended monitoring cadence for long-running work:
 The exact mechanism should prefer `bash_exec(mode='await' | 'detach' | 'read' | 'list' | 'kill', ...)`, but the behavioral rule stays the same:
 do not report completion until the run is actually done and the outputs are real.
 After each meaningful check, notify the user through `artifact.interact(kind='progress', ...)` with current status, latest evidence, and the next monitoring point.
+Do this after every completed wait cycle for important long-running work; do not skip several sleep windows without reporting.
+When structured progress markers are available, include `eta` and preferably `next_reply_at` or `next_check_at` so the UI can show the next expected update time.
 
 Do not silently widen scope from “baseline reproduction” into “new method exploration”.
 
@@ -1016,6 +1023,8 @@ Useful tags include:
 - `type:environment-incident`
 - `topic:<dataset-or-method>`
 
+When calling `memory.write(...)`, pass `tags` as an array like `["stage:baseline", "baseline:<baseline_id>", "type:repro-lesson"]`, not as one comma-joined string.
+
 Recommended read timing:
 
 - before route selection:
@@ -1102,6 +1111,7 @@ The handoff packet should make these items obvious:
 - `baseline_variant_id` when relevant
 - route used: attach/import/reproduce/repair
 - trusted metrics
+- canonical metric contract JSON path
 - verification outcome
 - reusable or quest-local only
 - canonical output paths

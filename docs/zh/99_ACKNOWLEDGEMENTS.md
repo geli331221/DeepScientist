@@ -1,0 +1,29 @@
+# 99 致谢：项目来源与感谢
+
+DeepScientist 的构思、架构设计与实现过程中，受到了许多优秀研究系统、开源项目与研究者工作的启发与帮助。在此表示诚挚感谢。
+
+## 项目致谢
+
+特别感谢以下项目为 DeepScientist 提供的重要启发、参考与研究背景：
+
+- The AI Scientist
+- The AI Scientist v2
+- AlphaEvolve
+- OpenEvolve
+- EvoScientist
+
+这些项目在自动化科研、开放式探索、进化式搜索、实验组织与智能研究代理等方向上的探索，为 DeepScientist 的设计提供了重要参照。
+
+## 个人致谢
+
+同时，特别感谢以下老师和同学的支持、讨论、启发与贡献：
+
+- Shichen Li
+- Guangsheng Bao
+- Fuchen Shen
+- Wenyang Gao
+- Luodan Zhang
+- Junshu Pan
+- Panzhong Lu
+
+谨向以上项目与个人致以感谢。

@@ -6,9 +6,11 @@ SOURCE_ROOT="$SCRIPT_DIR"
 DEFAULT_BASE_DIR="${DEEPSCIENTIST_BASE_DIR:-${DEEPSCIENTIST_HOME:-$HOME/DeepScientist}}"
 ENV_INSTALL_DIR="${DEEPSCIENTIST_INSTALL_DIR:-}"
 ENV_BIN_DIR="${DEEPSCIENTIST_BIN_DIR:-}"
+ENV_WITH_TINYTEX="${DEEPSCIENTIST_WITH_TINYTEX:-}"
 BASE_DIR="$DEFAULT_BASE_DIR"
 INSTALL_DIR=""
 BIN_DIR="${ENV_BIN_DIR:-$HOME/.local/bin}"
+WITH_TINYTEX=0
 DIR_SET=0
 INSTALL_DIR_SET=0
 BIN_DIR_SET=0
@@ -18,12 +20,13 @@ usage() {
 DeepScientist installer
 
 Usage:
-  bash install.sh [--dir BASE_DIR] [--install-dir INSTALL_DIR] [--bin-dir BIN_DIR]
+  bash install.sh [--dir BASE_DIR] [--install-dir INSTALL_DIR] [--bin-dir BIN_DIR] [--with-tinytex]
 
 Options:
   --dir PATH          Base install directory. Code is installed into PATH/cli.
   --install-dir PATH  Exact install directory for the bundled CLI tree.
   --bin-dir PATH      Directory for launcher wrappers.
+  --with-tinytex      Also install a lightweight TinyTeX pdflatex runtime after DeepScientist is installed.
   -h, --help          Show this help message.
 
 Defaults:
@@ -34,7 +37,8 @@ Defaults:
 Notes:
   - This installer deploys the current working tree into a separate install directory.
   - Runtime data lives under ~/DeepScientist by default.
-  - `DEEPSCIENTIST_BASE_DIR`, `DEEPSCIENTIST_INSTALL_DIR`, and `DEEPSCIENTIST_BIN_DIR`
+  - `DEEPSCIENTIST_BASE_DIR`, `DEEPSCIENTIST_INSTALL_DIR`, `DEEPSCIENTIST_BIN_DIR`,
+    and `DEEPSCIENTIST_WITH_TINYTEX`
     can be used from `npm run install:local` as well.
 EOF
 }
@@ -68,6 +72,10 @@ while [ $# -gt 0 ]; do
       BIN_DIR_SET=1
       shift 2
       ;;
+    --with-tinytex)
+      WITH_TINYTEX=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -79,6 +87,14 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$WITH_TINYTEX" -eq 0 ]; then
+  case "$(printf '%s' "$ENV_WITH_TINYTEX" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      WITH_TINYTEX=1
+      ;;
+  esac
+fi
 
 if [ "$DIR_SET" -eq 1 ] && [ "$INSTALL_DIR_SET" -eq 1 ]; then
   echo "--dir and --install-dir cannot be used together" >&2
@@ -102,6 +118,59 @@ fi
 
 print_step() {
   printf '[install] %s\n' "$1"
+}
+
+has_optional_latex_compiler() {
+  local compiler
+  for compiler in pdflatex xelatex lualatex; do
+    if command -v "$compiler" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_optional_latex_notice() {
+  if has_optional_latex_compiler; then
+    local detected=""
+    if command -v pdflatex >/dev/null 2>&1; then
+      detected="pdflatex"
+    elif command -v xelatex >/dev/null 2>&1; then
+      detected="xelatex"
+    else
+      detected="lualatex"
+    fi
+    printf 'Optional LaTeX runtime: detected `%s` on PATH.\n' "$detected"
+    return
+  fi
+
+  printf '\n'
+  printf 'Optional LaTeX runtime: not detected.\n'
+  printf 'DeepScientist still installs and runs normally.\n'
+  printf 'You only need LaTeX if you want to compile paper PDFs locally from the web workspace.\n'
+  printf 'Recommended lightweight option:\n'
+  printf '  %s latex install-runtime\n' "$BIN_DIR/ds"
+  printf '\n'
+  printf 'System package alternatives:\n'
+
+  if command -v apt-get >/dev/null 2>&1; then
+    printf '  Debian/Ubuntu:\n'
+    printf '  sudo apt-get update && sudo apt-get install -y texlive-latex-base texlive-latex-recommended texlive-fonts-recommended texlive-bibtex-extra\n'
+  elif command -v dnf >/dev/null 2>&1; then
+    printf '  Fedora/RHEL:\n'
+    printf '  sudo dnf install -y texlive-scheme-basic texlive-collection-latex texlive-bibtex\n'
+  elif command -v yum >/dev/null 2>&1; then
+    printf '  CentOS/RHEL:\n'
+    printf '  sudo yum install -y texlive-scheme-basic texlive-collection-latex texlive-bibtex\n'
+  elif command -v pacman >/dev/null 2>&1; then
+    printf '  Arch Linux:\n'
+    printf '  sudo pacman -S --needed texlive-basic texlive-latex\n'
+  elif command -v brew >/dev/null 2>&1; then
+    printf '  macOS with Homebrew:\n'
+    printf '  brew install --cask mactex-no-gui\n'
+  else
+    printf '  Install a TeX distribution that provides `pdflatex` and `bibtex`.\n'
+  fi
 }
 
 resolve_path() {
@@ -161,6 +230,7 @@ copy_source_tree() {
     tar -C "$SOURCE_ROOT" -cf - \
       --exclude='./.git' \
       --exclude='./.pytest_cache' \
+      --exclude='./node_modules' \
       --exclude='./ui' \
       --exclude='./src/ui/node_modules' \
       --exclude='./src/ui/dist' \
@@ -179,6 +249,7 @@ prune_tree() {
   rm -rf \
     "$target/.git" \
     "$target/.pytest_cache" \
+    "$target/node_modules" \
     "$target/ui" \
     "$target/src/ui/node_modules" \
     "$target/src/ui/dist" \
@@ -195,6 +266,11 @@ build_ui() {
   npm --prefix "$1/src/ui" install --include=dev --no-audit --no-fund
   npm --prefix "$1/src/ui" run build
   rm -rf "$1/src/ui/node_modules" "$1/src/ui/lib/node_modules"
+}
+
+install_root_runtime() {
+  print_step "Installing root runtime dependencies in install tree"
+  npm --prefix "$1" install --omit=dev --no-audit --no-fund
 }
 
 build_tui() {
@@ -255,6 +331,7 @@ print_step "Preparing staging directory"
 mkdir -p "$BASE_DIR"
 copy_source_tree "$STAGING_DIR"
 prune_tree "$STAGING_DIR"
+install_root_runtime "$STAGING_DIR"
 build_ui "$STAGING_DIR"
 build_tui "$STAGING_DIR"
 write_install_wrappers "$STAGING_DIR"
@@ -276,6 +353,14 @@ print_step "Install complete"
 printf 'Install dir: %s\n' "$INSTALL_DIR"
 printf 'Bin dir: %s\n' "$BIN_DIR"
 printf 'Run: %s\n' "$BIN_DIR/ds"
+printf 'Start web workspace: %s\n' "$BIN_DIR/ds --web"
+printf 'Default start: %s\n' "$BIN_DIR/ds"
+printf 'When `ds` starts, it prints the local Web URL and opens it automatically when supported.\n'
+if [ "$WITH_TINYTEX" -eq 1 ]; then
+  print_step "Installing TinyTeX pdflatex runtime"
+  "$INSTALL_DIR/bin/ds" latex install-runtime
+fi
+print_optional_latex_notice
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   printf 'Add to PATH if needed: export PATH="%s:$PATH"\n' "$BIN_DIR"
 fi

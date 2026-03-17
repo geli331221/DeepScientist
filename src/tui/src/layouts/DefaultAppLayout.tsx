@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from 'react'
 import { Box, measureElement, type DOMElement } from 'ink'
+import stringWidth from 'string-width'
 import type { ConfigScreenItem } from '../components/ConfigScreen.js'
 import { MainContent } from '../components/MainContent.js'
 import { Composer } from '../components/Composer.js'
@@ -34,6 +35,18 @@ type DefaultAppLayoutProps = {
   onChange: (next: string) => void
   onSubmit: (override?: string) => void
   onCancel: () => void
+  onQuestPanelMove?: (direction: 1 | -1) => void
+  onQuestPanelConfirm?: () => void
+  onQuestPanelCancel?: () => void
+}
+
+const estimateWrappedRows = (value: string, width: number): number => {
+  const safeWidth = Math.max(1, width)
+  const lines = value.length > 0 ? value.split('\n') : ['']
+  return lines.reduce((count, line) => {
+    const measured = Math.max(1, stringWidth(line || ''))
+    return count + Math.max(1, Math.ceil(measured / safeWidth))
+  }, 0)
 }
 
 export const DefaultAppLayout: React.FC<DefaultAppLayoutProps> = ({
@@ -60,11 +73,15 @@ export const DefaultAppLayout: React.FC<DefaultAppLayoutProps> = ({
   onChange,
   onSubmit,
   onCancel,
+  onQuestPanelMove,
+  onQuestPanelConfirm,
+  onQuestPanelCancel,
 }) => {
   const { columns, rows } = useTerminalSize()
   const composerRef = useRef<DOMElement>(null)
   const [composerHeight, setComposerHeight] = useState(0)
   const useAlternateBuffer = isAlternateBufferEnabled()
+  const composerMeasureRows = estimateWrappedRows(input, Math.max(12, columns - 6))
 
   useLayoutEffect(() => {
     if (composerRef.current) {
@@ -74,9 +91,9 @@ export const DefaultAppLayout: React.FC<DefaultAppLayoutProps> = ({
   }, [
     activeQuestId,
     columns,
+    composerMeasureRows,
     configMode,
     connectionState,
-    input,
     questPanelMode,
     rows,
     session?.acp_session?.session_id,
@@ -124,6 +141,9 @@ export const DefaultAppLayout: React.FC<DefaultAppLayoutProps> = ({
           baseUrl={baseUrl}
           connectionState={connectionState}
           availableHeight={mainHeight}
+          onQuestPanelMove={onQuestPanelMove}
+          onQuestPanelConfirm={onQuestPanelConfirm}
+          onQuestPanelCancel={onQuestPanelCancel}
         />
       </Box>
       {gap > 0 ? <Box height={gap} flexShrink={0} /> : null}
@@ -159,7 +179,7 @@ export const DefaultAppLayout: React.FC<DefaultAppLayoutProps> = ({
               ? 'Use arrows to choose a quest, then press Enter'
               : activeQuestId
               ? 'Send a message to the active quest or type /command'
-              : 'Type a request to create a quest, or /use <quest_id> to bind one'
+              : 'Type /new <goal> to create a quest, or /use <quest_id> to bind one'
           }
         />
       </Box>

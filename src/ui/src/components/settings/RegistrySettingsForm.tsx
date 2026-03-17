@@ -45,6 +45,11 @@ const copy = {
     testResult: 'Test',
     emptyValidation: 'No issues.',
     emptyTest: 'No issues.',
+    probeSummary: 'Probe summary',
+    resolvedBinary: 'Resolved binary',
+    exitCode: 'Exit code',
+    stdout: 'Stdout',
+    stderr: 'Stderr',
     runnerId: 'Runner ID',
     serverId: 'Server ID',
     connectorsTitle: 'Connectors',
@@ -86,6 +91,11 @@ const copy = {
     testResult: '测试',
     emptyValidation: '没有问题。',
     emptyTest: '没有问题。',
+    probeSummary: '探测摘要',
+    resolvedBinary: '实际二进制',
+    exitCode: '退出码',
+    stdout: '标准输出',
+    stderr: '标准错误',
     runnerId: '运行器 ID',
     serverId: '服务 ID',
     connectorsTitle: '连接器',
@@ -494,6 +504,11 @@ function RunnerCard({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-xl font-semibold tracking-tight">{catalogEntry?.label || runnerName}</h3>
+                {runnerName === 'claude' ? (
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.14em] text-amber-700 dark:text-amber-200">
+                    TODO
+                  </span>
+                ) : null}
                 {testItem ? (
                   <span className="text-xs text-muted-foreground">{testItem.ok ? t.ok : t.needsWork}</span>
                 ) : null}
@@ -539,6 +554,58 @@ function RunnerCard({
             onChange={(nextEnv) => onChange({ ...config, env: nextEnv })}
           />
         </div>
+        {testItem ? (
+          <div className="md:col-span-2 rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
+            <div className="mb-3 text-sm font-medium">{t.testResult}</div>
+            {testItem.errors.length === 0 && testItem.warnings.length === 0 ? (
+              <div className="text-sm text-muted-foreground">{t.emptyTest}</div>
+            ) : (
+              <div className="space-y-2">
+                {testItem.errors.map((item) => (
+                  <div key={item} className="border-l-2 border-rose-500/60 pl-3 text-sm text-rose-700 dark:text-rose-300">
+                    {item}
+                  </div>
+                ))}
+                {testItem.warnings.map((item) => (
+                  <div key={item} className="border-l-2 border-amber-500/60 pl-3 text-sm text-amber-700 dark:text-amber-200">
+                    {item}
+                  </div>
+                ))}
+              </div>
+            )}
+            {typeof testItem.details?.summary === 'string' && testItem.details.summary ? (
+              <div className="mt-4 text-sm text-muted-foreground">
+                <span className="font-medium text-foreground/80">{t.probeSummary}:</span> {String(testItem.details.summary)}
+              </div>
+            ) : null}
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {typeof testItem.details?.resolved_binary === 'string' && testItem.details.resolved_binary ? (
+                <div className="text-xs leading-6 text-muted-foreground">
+                  <div className="font-medium text-foreground/80">{t.resolvedBinary}</div>
+                  <div className="break-all">{String(testItem.details.resolved_binary)}</div>
+                </div>
+              ) : null}
+              {testItem.details?.exit_code !== undefined ? (
+                <div className="text-xs leading-6 text-muted-foreground">
+                  <div className="font-medium text-foreground/80">{t.exitCode}</div>
+                  <div>{String(testItem.details.exit_code)}</div>
+                </div>
+              ) : null}
+              {typeof testItem.details?.stdout_excerpt === 'string' && testItem.details.stdout_excerpt ? (
+                <div className="md:col-span-2 text-xs leading-6 text-muted-foreground">
+                  <div className="font-medium text-foreground/80">{t.stdout}</div>
+                  <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-[16px] border border-black/[0.06] bg-white/[0.4] p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">{String(testItem.details.stdout_excerpt)}</pre>
+                </div>
+              ) : null}
+              {typeof testItem.details?.stderr_excerpt === 'string' && testItem.details.stderr_excerpt ? (
+                <div className="md:col-span-2 text-xs leading-6 text-muted-foreground">
+                  <div className="font-medium text-foreground/80">{t.stderr}</div>
+                  <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-[16px] border border-black/[0.06] bg-white/[0.4] p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">{String(testItem.details.stderr_excerpt)}</pre>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
     </section>
   )
@@ -751,8 +818,14 @@ export function RegistrySettingsForm({
                     binary: nextName,
                     config_dir: '',
                     model: '',
+                    model_reasoning_effort: '',
                     approval_policy: 'on-request',
                     sandbox_mode: 'workspace-write',
+                    retry_on_failure: true,
+                    retry_max_attempts: 5,
+                    retry_initial_backoff_sec: 1,
+                    retry_backoff_multiplier: 2,
+                    retry_max_backoff_sec: 8,
                     env: {},
                   },
                 })

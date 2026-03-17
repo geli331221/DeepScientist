@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 from contextlib import contextmanager
 import hashlib
 import subprocess
 import json
 import mimetypes
 import re
+import threading
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -16,11 +18,13 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 from ..artifact.metrics import build_metrics_timeline, normalize_metrics_summary
+from ..config import ConfigManager
 from ..connector_runtime import conversation_identity_key, normalize_conversation_id
 from ..gitops import current_branch, export_git_graph, head_commit, init_repo
 from ..home import repo_root
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, read_text, read_yaml, resolve_within, run_command, sha256_text, slugify, utc_now, write_json, write_text, write_yaml
 from ..skills import SkillInstaller
+from ..web_search import extract_web_search_payload
 from .layout import (
     QUEST_DIRECTORIES,
     gitignore,
@@ -31,6 +35,7 @@ from .layout import (
     initial_summary,
 )
 from .node_traces import QuestNodeTraceManager
+from .stage_views import QuestStageViewBuilder
 
 _UNSET = object()
 _NUMERIC_QUEST_ID_PATTERN = re.compile(r"^\d{1,10}$")
@@ -43,9 +48,36 @@ class QuestService:
         self.home = home
         self.quests_root = home / "quests"
         self.skill_installer = skill_installer
+        self._file_cache_lock = threading.Lock()
+        self._file_cache: dict[str, dict[str, Any]] = {}
+        self._jsonl_cache_lock = threading.Lock()
+        self._jsonl_cache: dict[str, dict[str, Any]] = {}
+        self._snapshot_cache_lock = threading.Lock()
+        self._snapshot_cache: dict[str, dict[str, Any]] = {}
+        self._codex_history_cache_lock = threading.Lock()
+        self._codex_history_cache: dict[str, dict[str, Any]] = {}
+        self._runtime_state_locks_lock = threading.Lock()
+        self._runtime_state_locks: dict[str, threading.Lock] = {}
 
     def _quest_root(self, quest_id: str) -> Path:
         return self.quests_root / quest_id
+
+    def preferred_locale(self, quest_root: Path | None = None) -> str:
+        if quest_root is not None:
+            try:
+                quest_yaml = self.read_quest_yaml(quest_root)
+            except Exception:
+                quest_yaml = {}
+            if isinstance(quest_yaml, dict):
+                for key in ("locale", "default_locale", "user_locale", "user_language", "language"):
+                    value = str(quest_yaml.get(key) or "").strip()
+                    if value:
+                        return value.lower()
+        config = ConfigManager(self.home).load_named("config")
+        return str(config.get("default_locale") or "zh-CN").lower()
+
+    def localized_copy(self, *, zh: str, en: str, quest_root: Path | None = None) -> str:
+        return zh if self.preferred_locale(quest_root).startswith("zh") else en
 
     @staticmethod
     def _quest_yaml_path(quest_root: Path) -> Path:
@@ -58,6 +90,10 @@ class QuestService:
         return self.home / "runtime" / "quest_id_state.lock"
 
     @staticmethod
+    def _runtime_state_lock_path(quest_root: Path) -> Path:
+        return quest_root / ".ds" / "runtime_state.lock"
+
+    @staticmethod
     def _normalize_baseline_gate(value: str) -> str:
         normalized = str(value or "").strip().lower()
         if normalized not in {"pending", "confirmed", "waived"}:
@@ -65,7 +101,7 @@ class QuestService:
         return normalized
 
     def read_quest_yaml(self, quest_root: Path) -> dict[str, Any]:
-        payload = read_yaml(self._quest_yaml_path(quest_root), {})
+        payload = self._read_cached_yaml(self._quest_yaml_path(quest_root), {})
         if not isinstance(payload, dict):
             payload = {}
         normalized = dict(payload)
@@ -89,6 +125,7 @@ class QuestService:
             "current_workspace_branch": None,
             "current_workspace_root": None,
             "active_idea_md_path": None,
+            "active_idea_draft_path": None,
             "active_analysis_campaign_id": None,
             "analysis_parent_branch": None,
             "analysis_parent_worktree_root": None,
@@ -100,10 +137,11 @@ class QuestService:
 
     def read_research_state(self, quest_root: Path) -> dict[str, Any]:
         self._initialize_runtime_files(quest_root)
-        payload = read_json(self._research_state_path(quest_root), self._default_research_state(quest_root))
+        defaults = self._default_research_state(quest_root)
+        payload = self._read_cached_json(self._research_state_path(quest_root), defaults)
         if not isinstance(payload, dict):
-            payload = self._default_research_state(quest_root)
-        merged = {**self._default_research_state(quest_root), **payload}
+            payload = defaults
+        merged = {**defaults, **payload}
         worktree_root = str(merged.get("research_head_worktree_root") or "").strip()
         if worktree_root and not Path(worktree_root).exists():
             merged["research_head_worktree_root"] = None
@@ -183,7 +221,7 @@ class QuestService:
                     if resolved_key in seen_paths:
                         continue
                     seen_paths.add(resolved_key)
-                    item = read_json(path, {})
+                    item = self._read_cached_json(path, {})
                     artifacts.append(
                         {
                             "kind": folder.name,
@@ -202,8 +240,7 @@ class QuestService:
         )
         return artifacts
 
-    @staticmethod
-    def _active_baseline_attachment(quest_root: Path, workspace_root: Path) -> dict[str, Any] | None:
+    def _active_baseline_attachment(self, quest_root: Path, workspace_root: Path) -> dict[str, Any] | None:
         attachments: list[dict[str, Any]] = []
         seen_paths: set[str] = set()
         for root in (workspace_root, quest_root):
@@ -215,7 +252,7 @@ class QuestService:
                 if key in seen_paths:
                     continue
                 seen_paths.add(key)
-                payload = read_yaml(path, {})
+                payload = self._read_cached_yaml(path, {})
                 if isinstance(payload, dict) and payload:
                     attachments.append(payload)
         if not attachments:
@@ -281,6 +318,23 @@ class QuestService:
                 if fcntl is not None:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _runtime_state_lock(self, quest_root: Path):
+        lock_key = str(quest_root.resolve())
+        with self._runtime_state_locks_lock:
+            thread_lock = self._runtime_state_locks.setdefault(lock_key, threading.Lock())
+        with thread_lock:
+            lock_path = self._runtime_state_lock_path(quest_root)
+            ensure_dir(lock_path.parent)
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def _scan_next_numeric_quest_id(self) -> int:
         max_numeric_id = 0
         if not self.quests_root.exists():
@@ -341,6 +395,12 @@ class QuestService:
             self._write_quest_id_state_locked(next_numeric_id + 1)
             return quest_id
 
+    def preview_next_numeric_quest_id(self) -> str:
+        with self._quest_id_state_lock():
+            state = self._read_quest_id_state_locked()
+            next_numeric_id = int(state.get("next_numeric_id") or 1)
+            return self._format_numeric_quest_id(next_numeric_id)
+
     def _reserve_numeric_quest_id(self, quest_id: str) -> None:
         numeric_value = self._parse_numeric_quest_id(quest_id)
         if numeric_value is None:
@@ -396,6 +456,10 @@ class QuestService:
         write_text(quest_root / "status.md", initial_status())
         write_text(quest_root / "SUMMARY.md", initial_summary())
         write_text(quest_root / ".gitignore", gitignore())
+        self._write_active_user_requirements(
+            quest_root,
+            latest_requirement=None,
+        )
         init_repo(quest_root)
         if self.skill_installer is not None:
             self.skill_installer.sync_quest(quest_root)
@@ -412,17 +476,345 @@ class QuestService:
             return items
         for quest_yaml in sorted(self.quests_root.glob("*/quest.yaml")):
             quest_id = quest_yaml.parent.name
-            items.append(self.snapshot(quest_id))
+            items.append(self.summary_compact(quest_id))
         return sorted(items, key=lambda item: item.get("updated_at", ""), reverse=True)
 
-    def snapshot(self, quest_id: str) -> dict:
+    def _path_states(self, paths: list[Path]) -> tuple[tuple[str, tuple[int, int, int] | None], ...]:
+        states: list[tuple[str, tuple[int, int, int] | None]] = []
+        for path in paths:
+            try:
+                label = str(path.relative_to(self.home))
+            except ValueError:
+                label = str(path)
+            states.append((label, self._path_state(path)))
+        return tuple(states)
+
+    def _glob_states(self, root: Path, pattern: str) -> tuple[tuple[str, tuple[int, int, int] | None], ...]:
+        if not root.exists():
+            return ()
+        states: list[tuple[str, tuple[int, int, int] | None]] = []
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file():
+                continue
+            try:
+                label = str(path.relative_to(root))
+            except ValueError:
+                label = path.name
+            states.append((label, self._path_state(path)))
+        return tuple(states)
+
+    def _artifact_collection_state(self, quest_root: Path) -> tuple[tuple[str, tuple[tuple[str, tuple[int, int, int] | None], ...]], ...]:
+        states: list[tuple[str, tuple[tuple[str, tuple[int, int, int] | None], ...]]] = []
+        for root in self.workspace_roots(quest_root):
+            artifacts_root = root / "artifacts"
+            if not artifacts_root.exists():
+                continue
+            try:
+                label = str(root.relative_to(quest_root))
+            except ValueError:
+                label = str(root)
+            states.append((label, self._glob_states(artifacts_root, "*/*.json")))
+        return tuple(states)
+
+    def _codex_meta_state(self, quest_root: Path) -> tuple[tuple[str, tuple[int, int, int] | None], ...]:
+        return self._glob_states(quest_root / ".ds" / "codex_history", "*/meta.json")
+
+    def _baseline_attachment_state(self, quest_root: Path) -> tuple[tuple[str, tuple[tuple[str, tuple[int, int, int] | None], ...]], ...]:
+        states: list[tuple[str, tuple[tuple[str, tuple[int, int, int] | None], ...]]] = []
+        for root in self.workspace_roots(quest_root):
+            attachment_root = root / "baselines" / "imported"
+            if not attachment_root.exists():
+                continue
+            try:
+                label = str(root.relative_to(quest_root))
+            except ValueError:
+                label = str(root)
+            states.append((label, self._glob_states(attachment_root, "*/attachment.yaml")))
+        return tuple(states)
+
+    def _snapshot_state(self, quest_root: Path) -> tuple[Any, ...]:
+        core_paths = [
+            self._quest_yaml_path(quest_root),
+            quest_root / "status.md",
+            quest_root / ".ds" / "runtime_state.json",
+            quest_root / ".ds" / "research_state.json",
+            quest_root / ".ds" / "user_message_queue.json",
+            quest_root / ".ds" / "interaction_state.json",
+            quest_root / ".ds" / "bindings.json",
+            quest_root / ".ds" / "conversations" / "main.jsonl",
+            quest_root / ".ds" / "bash_exec" / "summary.json",
+        ]
+        return (
+            self._path_states(core_paths),
+            self._artifact_collection_state(quest_root),
+            self._codex_meta_state(quest_root),
+            self._baseline_attachment_state(quest_root),
+        )
+
+    def _compact_summary_state(self, quest_root: Path) -> tuple[Any, ...]:
+        core_paths = [
+            self._quest_yaml_path(quest_root),
+            quest_root / "status.md",
+            quest_root / ".ds" / "runtime_state.json",
+            quest_root / ".ds" / "research_state.json",
+            quest_root / ".ds" / "interaction_state.json",
+            quest_root / ".ds" / "bindings.json",
+            quest_root / ".ds" / "bash_exec" / "summary.json",
+        ]
+        return (
+            self._path_states(core_paths),
+            self._baseline_attachment_state(quest_root),
+        )
+
+    def summary_compact(self, quest_id: str) -> dict[str, Any]:
         quest_root = self._quest_root(quest_id)
+        cache_key = f"compact:{self._cache_key_for_path(quest_root)}"
+        state = self._compact_summary_state(quest_root)
+        with self._snapshot_cache_lock:
+            cached = self._snapshot_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return copy.deepcopy(cached.get("payload"))
+
+        quest_yaml = self.read_quest_yaml(quest_root)
+        research_state = self.read_research_state(quest_root)
+        workspace_root = self.active_workspace_root(quest_root)
+        runtime_state = self._read_runtime_state(quest_root)
+        interaction_state = self._read_interaction_state(quest_root)
+        open_requests = [
+            dict(item)
+            for item in (interaction_state.get("open_requests") or [])
+            if str(item.get("status") or "") in {"waiting", "answered"}
+        ]
+        waiting_interaction_id = self._latest_waiting_interaction_id(open_requests)
+        default_reply_interaction_id = str(interaction_state.get("default_reply_interaction_id") or "").strip() or None
+        recent_threads = [dict(item) for item in (interaction_state.get("recent_threads") or [])][-5:]
+        if not default_reply_interaction_id:
+            default_reply_interaction_id = self._default_reply_interaction_id(
+                open_requests=open_requests,
+                recent_threads=recent_threads,
+            )
+        pending_decisions = [
+            str(item.get("artifact_id") or item.get("interaction_id") or "")
+            for item in open_requests
+            if str(item.get("status") or "") == "waiting"
+            and (item.get("artifact_id") or item.get("interaction_id"))
+        ]
+        attachment = self._active_baseline_attachment(quest_root, workspace_root)
+        active_baseline_id = None
+        active_baseline_variant_id = None
+        if attachment:
+            active_baseline_id = attachment.get("source_baseline_id")
+            active_baseline_variant_id = attachment.get("source_variant_id")
+        elif isinstance(quest_yaml.get("confirmed_baseline_ref"), dict):
+            confirmed_ref = dict(quest_yaml.get("confirmed_baseline_ref") or {})
+            active_baseline_id = confirmed_ref.get("baseline_id")
+            active_baseline_variant_id = confirmed_ref.get("variant_id")
+
+        status_line = "Quest created."
+        status_text = self._read_cached_text(quest_root / "status.md").strip().splitlines()
+        if status_text:
+            for line in status_text:
+                line = line.strip().lstrip("#").strip()
+                if line and line.lower() not in {"status", "summary"}:
+                    status_line = line
+                    break
+
+        from ..bash_exec import BashExecService
+
+        bash_summary = BashExecService(self.home).summary(quest_root)
+        payload = {
+            "quest_id": quest_yaml.get("quest_id", quest_id),
+            "title": quest_yaml.get("title", quest_id),
+            "quest_root": str(quest_root.resolve()),
+            "status": runtime_state.get("display_status") or runtime_state.get("status") or quest_yaml.get("status", "idle"),
+            "runtime_status": runtime_state.get("status") or quest_yaml.get("status", "idle"),
+            "display_status": runtime_state.get("display_status") or runtime_state.get("status") or quest_yaml.get("status", "idle"),
+            "active_anchor": quest_yaml.get("active_anchor", "baseline"),
+            "baseline_gate": quest_yaml.get("baseline_gate", "pending"),
+            "confirmed_baseline_ref": quest_yaml.get("confirmed_baseline_ref"),
+            "requested_baseline_ref": quest_yaml.get("requested_baseline_ref"),
+            "startup_contract": quest_yaml.get("startup_contract"),
+            "runner": quest_yaml.get("default_runner", "codex"),
+            "active_baseline_id": active_baseline_id,
+            "active_baseline_variant_id": active_baseline_variant_id,
+            "active_run_id": runtime_state.get("active_run_id"),
+            "pending_decisions": pending_decisions,
+            "waiting_interaction_id": waiting_interaction_id,
+            "default_reply_interaction_id": default_reply_interaction_id,
+            "pending_user_message_count": int(runtime_state.get("pending_user_message_count") or 0),
+            "stop_reason": runtime_state.get("stop_reason"),
+            "active_interaction_id": runtime_state.get("active_interaction_id"),
+            "last_artifact_interact_at": runtime_state.get("last_artifact_interact_at"),
+            "last_delivered_batch_id": runtime_state.get("last_delivered_batch_id"),
+            "last_delivered_at": runtime_state.get("last_delivered_at"),
+            "bound_conversations": (self._read_cached_json(quest_root / ".ds" / "bindings.json", {}).get("sources") or ["local:default"]),
+            "created_at": quest_yaml.get("created_at"),
+            "updated_at": quest_yaml.get("updated_at"),
+            "branch": research_state.get("current_workspace_branch") or research_state.get("research_head_branch"),
+            "summary": {
+                "status_line": status_line,
+                "latest_metric": None,
+                "latest_bash_session": bash_summary.get("latest_session"),
+            },
+            "counts": {
+                "memory_cards": 0,
+                "artifacts": 0,
+                "pending_decision_count": len(pending_decisions),
+                "analysis_run_count": 0,
+                "pending_user_message_count": int(runtime_state.get("pending_user_message_count") or 0),
+                "bash_session_count": int(bash_summary.get("session_count") or 0),
+                "bash_running_count": int(bash_summary.get("running_count") or 0),
+            },
+            "recent_artifacts": [],
+            "recent_runs": [],
+        }
+        with self._snapshot_cache_lock:
+            self._snapshot_cache[cache_key] = {
+                "state": state,
+                "payload": copy.deepcopy(payload),
+            }
+        return payload
+
+    def _read_cached_jsonl(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            cache_key = str(path.resolve())
+            with self._jsonl_cache_lock:
+                self._jsonl_cache.pop(cache_key, None)
+            return []
+        cache_key = str(path.resolve())
+        stat = path.stat()
+        state = (
+            stat.st_ino,
+            getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+            stat.st_size,
+        )
+        with self._jsonl_cache_lock:
+            cached = self._jsonl_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return cached.get("records") or []
+        items: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                items.append(payload)
+        with self._jsonl_cache_lock:
+            self._jsonl_cache[cache_key] = {
+                "state": state,
+                "records": items,
+            }
+        return items
+
+    @staticmethod
+    def _path_state(path: Path) -> tuple[int, int, int] | None:
+        if not path.exists():
+            return None
+        stat = path.stat()
+        return (
+            stat.st_ino,
+            getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+            stat.st_size,
+        )
+
+    @staticmethod
+    def _cache_key_for_path(path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except FileNotFoundError:
+            return str(path.absolute())
+
+    def _read_cached_path(
+        self,
+        path: Path,
+        *,
+        default: Any,
+        loader: Any,
+    ) -> Any:
+        cache_key = self._cache_key_for_path(path)
+        state = self._path_state(path)
+        if state is None:
+            with self._file_cache_lock:
+                self._file_cache.pop(cache_key, None)
+            return copy.deepcopy(default)
+        with self._file_cache_lock:
+            cached = self._file_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return copy.deepcopy(cached.get("value"))
+        value = loader(path, default)
+        with self._file_cache_lock:
+            self._file_cache[cache_key] = {
+                "state": state,
+                "value": value,
+            }
+        return copy.deepcopy(value)
+
+    def _read_cached_json(self, path: Path, default: Any = None) -> Any:
+        return self._read_cached_path(path, default=default, loader=read_json)
+
+    def _read_cached_yaml(self, path: Path, default: Any = None) -> Any:
+        return self._read_cached_path(path, default=default, loader=read_yaml)
+
+    def _read_cached_text(self, path: Path, default: str = "") -> str:
+        value = self._read_cached_path(path, default=default, loader=read_text)
+        return str(value) if value is not None else default
+
+    def _parse_codex_history_cached(
+        self,
+        history_root: Path,
+        *,
+        quest_id: str,
+        run_id: str,
+        skill_id: str | None,
+    ) -> list[dict[str, Any]]:
+        history_path = history_root / "events.jsonl"
+        cache_key = f"{self._cache_key_for_path(history_path)}::{quest_id}::{run_id}::{skill_id or ''}"
+        state = self._path_state(history_path)
+        if state is None:
+            with self._codex_history_cache_lock:
+                self._codex_history_cache.pop(cache_key, None)
+            return []
+        with self._codex_history_cache_lock:
+            cached = self._codex_history_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return copy.deepcopy(cached.get("entries") or [])
+        entries = _parse_codex_history(
+            history_root,
+            quest_id=quest_id,
+            run_id=run_id,
+            skill_id=skill_id,
+        )
+        with self._codex_history_cache_lock:
+            self._codex_history_cache[cache_key] = {
+                "state": state,
+                "entries": copy.deepcopy(entries),
+            }
+        return entries
+
+    def snapshot_fast(self, quest_id: str) -> dict:
+        return self._snapshot(quest_id)
+
+    def snapshot(self, quest_id: str) -> dict:
+        return self._snapshot(quest_id)
+
+    def _snapshot(self, quest_id: str) -> dict:
+        quest_root = self._quest_root(quest_id)
+        cache_key = f"snapshot:{self._cache_key_for_path(quest_root)}"
+        state = self._snapshot_state(quest_root)
+        with self._snapshot_cache_lock:
+            cached = self._snapshot_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return copy.deepcopy(cached.get("payload"))
         workspace_root = self.active_workspace_root(quest_root)
         research_state = self.read_research_state(quest_root)
         quest_yaml = self.read_quest_yaml(quest_root)
         graph_dir = quest_root / "artifacts" / "graphs"
         graph_svg = graph_dir / "git-graph.svg"
-        history = read_jsonl(quest_root / ".ds" / "conversations" / "main.jsonl")
+        history = self._read_cached_jsonl(quest_root / ".ds" / "conversations" / "main.jsonl")
         artifacts = []
         recent_runs = []
         memory_cards = list((workspace_root / "memory").glob("**/*.md"))
@@ -494,7 +886,7 @@ class QuestService:
         codex_history_root = quest_root / ".ds" / "codex_history"
         if codex_history_root.exists():
             for meta_path in sorted(codex_history_root.glob("*/meta.json")):
-                run_data = read_json(meta_path, {})
+                run_data = self._read_cached_json(meta_path, {})
                 if run_data:
                     recent_runs.append(run_data)
                     if latest_metric is None and run_data.get("summary"):
@@ -508,7 +900,7 @@ class QuestService:
             active_baseline_id = confirmed_ref.get("baseline_id")
             active_baseline_variant_id = confirmed_ref.get("variant_id")
         status_line = "Quest created."
-        status_text = read_text(quest_root / "status.md").strip().splitlines()
+        status_text = self._read_cached_text(quest_root / "status.md").strip().splitlines()
         if status_text:
             for line in status_text:
                 line = line.strip().lstrip("#").strip()
@@ -519,9 +911,8 @@ class QuestService:
         from ..bash_exec import BashExecService
 
         bash_service = BashExecService(self.home)
-        bash_sessions = bash_service.list_sessions(quest_root, limit=500)
-        bash_running = [item for item in bash_sessions if str(item.get("status") or "") in {"running", "terminating"}]
-        latest_bash_session = bash_sessions[0] if bash_sessions else None
+        bash_summary = bash_service.summary(quest_root)
+        latest_bash_session = bash_summary.get("latest_session")
         paths = {
             "brief": str(workspace_root / "brief.md"),
             "plan": str(workspace_root / "plan.md"),
@@ -533,6 +924,7 @@ class QuestService:
             "active_workspace_root": str(workspace_root),
             "user_message_queue": str(self._message_queue_path(quest_root)),
             "interaction_journal": str(self._interaction_journal_path(quest_root)),
+            "active_user_requirements": str(self._active_user_requirements_path(quest_root)),
             "bash_exec_root": str(quest_root / ".ds" / "bash_exec"),
         }
         counts = {
@@ -546,8 +938,8 @@ class QuestService:
                 or item.get("run_kind") == "analysis-campaign"
             ),
             "pending_user_message_count": int(runtime_state.get("pending_user_message_count") or 0),
-            "bash_session_count": len(bash_sessions),
-            "bash_running_count": len(bash_running),
+            "bash_session_count": int(bash_summary.get("session_count") or 0),
+            "bash_running_count": int(bash_summary.get("running_count") or 0),
         }
         guidance = None
         try:
@@ -564,7 +956,7 @@ class QuestService:
             )
         except Exception:
             guidance = None
-        return {
+        payload = {
             "quest_id": quest_yaml.get("quest_id", quest_id),
             "title": quest_yaml.get("title", quest_id),
             "quest_root": str(quest_root.resolve()),
@@ -584,6 +976,7 @@ class QuestService:
             "current_workspace_root": research_state.get("current_workspace_root"),
             "active_idea_id": research_state.get("active_idea_id"),
             "active_idea_md_path": research_state.get("active_idea_md_path"),
+            "active_idea_draft_path": research_state.get("active_idea_draft_path"),
             "active_analysis_campaign_id": research_state.get("active_analysis_campaign_id"),
             "analysis_parent_branch": research_state.get("analysis_parent_branch"),
             "analysis_parent_worktree_root": research_state.get("analysis_parent_worktree_root"),
@@ -601,11 +994,12 @@ class QuestService:
             "pending_user_message_count": int(runtime_state.get("pending_user_message_count") or 0),
             "stop_reason": runtime_state.get("stop_reason"),
             "active_interaction_id": runtime_state.get("active_interaction_id"),
+            "retry_state": runtime_state.get("retry_state"),
             "last_transition_at": runtime_state.get("last_transition_at"),
             "last_artifact_interact_at": runtime_state.get("last_artifact_interact_at"),
             "last_delivered_batch_id": runtime_state.get("last_delivered_batch_id"),
             "last_delivered_at": runtime_state.get("last_delivered_at"),
-            "bound_conversations": (read_json(quest_root / ".ds" / "bindings.json", {}).get("sources") or ["local:default"]),
+            "bound_conversations": (self._read_cached_json(quest_root / ".ds" / "bindings.json", {}).get("sources") or ["local:default"]),
             "created_at": quest_yaml.get("created_at"),
             "updated_at": quest_yaml.get("updated_at"),
             "branch": current_branch(workspace_root),
@@ -626,6 +1020,12 @@ class QuestService:
             "recent_runs": recent_runs[-5:],
             "guidance": guidance,
         }
+        with self._snapshot_cache_lock:
+            self._snapshot_cache[cache_key] = {
+                "state": state,
+                "payload": copy.deepcopy(payload),
+            }
+        return payload
 
     def append_message(
         self,
@@ -634,6 +1034,7 @@ class QuestService:
         content: str,
         source: str = "local",
         *,
+        attachments: list[dict[str, Any]] | None = None,
         run_id: str | None = None,
         skill_id: str | None = None,
         reply_to_interaction_id: str | None = None,
@@ -649,6 +1050,8 @@ class QuestService:
             "source": source,
             "created_at": timestamp,
         }
+        if isinstance(attachments, list) and attachments:
+            record["attachments"] = [dict(item) for item in attachments if isinstance(item, dict)]
         if run_id:
             record["run_id"] = run_id
         if skill_id:
@@ -781,11 +1184,16 @@ class QuestService:
                 "reply_to_interaction_id": resolved_reply_to_interaction_id,
                 "client_message_id": record.get("client_message_id"),
                 "delivery_state": record.get("delivery_state"),
+                "attachments": record.get("attachments") or [],
                 "created_at": timestamp,
             },
         )
         if role == "user":
             self._enqueue_user_message(quest_root, record)
+            self._write_active_user_requirements(
+                quest_root,
+                latest_requirement=record,
+            )
             quest_data = read_yaml(quest_root / "quest.yaml", {})
             runtime_state = self._read_runtime_state(quest_root)
             status = str(runtime_state.get("status") or quest_data.get("status") or "")
@@ -795,7 +1203,7 @@ class QuestService:
                 still_waiting = any(str(item.get("status") or "") == "waiting" for item in (interaction_state.get("open_requests") or []))
                 if not still_waiting:
                     next_status = "running"
-            elif status in {"stopped", "paused"}:
+            elif status in {"stopped", "paused", "completed"}:
                 next_status = "active"
             if next_status != status:
                 self.update_runtime_state(
@@ -832,15 +1240,29 @@ class QuestService:
         stop_reason: str | None | object = _UNSET,
     ) -> dict:
         quest_root = self._quest_root(quest_id)
-        payload: dict[str, Any] = {
-            "quest_root": quest_root,
-            "active_run_id": None,
-        }
-        if status is not None:
-            payload["status"] = status
-        if stop_reason is not _UNSET:
-            payload["stop_reason"] = stop_reason
-        self.update_runtime_state(**payload)
+        self.update_runtime_state(
+            quest_root=quest_root,
+            active_run_id=None,
+            status=status if status is not None else _UNSET,
+            stop_reason=stop_reason,
+            retry_state=None,
+        )
+        return self.snapshot(quest_id)
+
+    def mark_completed(
+        self,
+        quest_id: str,
+        *,
+        stop_reason: str = "completed_by_user_approval",
+    ) -> dict:
+        quest_root = self._quest_root(quest_id)
+        self.update_runtime_state(
+            quest_root=quest_root,
+            status="completed",
+            active_run_id=None,
+            active_interaction_id=None,
+            stop_reason=stop_reason,
+        )
         return self.snapshot(quest_id)
 
     def bind_source(self, quest_id: str, source: str) -> dict:
@@ -1109,11 +1531,12 @@ class QuestService:
         return reconciled
 
     def history(self, quest_id: str, limit: int = 100) -> list[dict]:
-        return read_jsonl(self._quest_root(quest_id) / ".ds" / "conversations" / "main.jsonl")[-limit:]
+        return self._read_cached_jsonl(self._quest_root(quest_id) / ".ds" / "conversations" / "main.jsonl")[-limit:]
 
     def workflow(self, quest_id: str) -> dict:
+        quest_root = self._quest_root(quest_id)
+        workspace_root = self.active_workspace_root(quest_root)
         snapshot = self.snapshot(quest_id)
-        documents = self.list_documents(quest_id)
         entries: list[dict] = []
         changed_files: list[dict] = []
         seen_files: set[str] = set()
@@ -1134,14 +1557,13 @@ class QuestService:
                 }
             )
 
-        for document in documents:
-            if document.get("document_id") in {"brief.md", "plan.md", "status.md", "SUMMARY.md"}:
-                add_file(
-                    document.get("path"),
-                    source="document",
-                    document_id=document.get("document_id"),
-                    writable=document.get("writable"),
-                )
+        for relative in ("brief.md", "plan.md", "status.md", "SUMMARY.md"):
+            add_file(
+                str(workspace_root / relative),
+                source="document",
+                document_id=relative,
+                writable=True,
+            )
 
         recent_runs = snapshot.get("recent_runs") or []
         for run in recent_runs:
@@ -1164,7 +1586,7 @@ class QuestService:
             history_root = run.get("history_root")
             if history_root:
                 entries.extend(
-                    _parse_codex_history(
+                    self._parse_codex_history_cached(
                         Path(str(history_root)),
                         quest_id=quest_id,
                         run_id=run_id,
@@ -1200,7 +1622,7 @@ class QuestService:
         }
 
     def events(self, quest_id: str, *, after: int = 0, limit: int = 200, tail: bool = False) -> dict:
-        records = read_jsonl(self._quest_root(quest_id) / ".ds" / "events.jsonl")
+        records = self._read_cached_jsonl(self._quest_root(quest_id) / ".ds" / "events.jsonl")
         normalized_limit = max(limit, 0)
         if tail and normalized_limit > 0:
             start = max(len(records) - normalized_limit, 0)
@@ -1270,6 +1692,26 @@ class QuestService:
             }
         raise FileNotFoundError(f"Unknown node trace `{selection_ref}`.")
 
+    def stage_view(self, quest_id: str, selection: dict[str, Any] | None = None) -> dict[str, Any]:
+        quest_root = self._quest_root(quest_id)
+        resolved_selection = dict(selection or {})
+        selection_ref = str(resolved_selection.get("selection_ref") or "").strip()
+        selection_type = str(resolved_selection.get("selection_type") or "stage_node").strip() or None
+        trace = None
+        if selection_ref:
+            try:
+                trace_payload = self.node_trace(quest_id, selection_ref, selection_type=selection_type)
+                trace = trace_payload.get("trace") if isinstance(trace_payload, dict) else None
+            except FileNotFoundError:
+                trace = None
+        return QuestStageViewBuilder(
+            self,
+            quest_root,
+            snapshot=self.snapshot(quest_id),
+            selection=resolved_selection,
+            trace=trace if isinstance(trace, dict) else None,
+        ).build()
+
     def metrics_timeline(self, quest_id: str) -> dict:
         quest_root = self._quest_root(quest_id)
         workspace_root = self.active_workspace_root(quest_root)
@@ -1336,7 +1778,13 @@ class QuestService:
             )
         return documents
 
-    def explorer(self, quest_id: str, revision: str | None = None, mode: str | None = None) -> dict:
+    def explorer(
+        self,
+        quest_id: str,
+        revision: str | None = None,
+        mode: str | None = None,
+        profile: str | None = None,
+    ) -> dict:
         if revision:
             return self._revision_explorer(quest_id, revision=revision, mode=mode or "ref")
 
@@ -1354,6 +1802,7 @@ class QuestService:
             workspace_root,
             git_status=git_status,
             changed_paths=changed_paths,
+            profile=profile,
         )
         sections = self._group_explorer_sections(root_nodes)
 
@@ -1365,6 +1814,7 @@ class QuestService:
                 "revision": None,
                 "label": "Latest",
                 "read_only": False,
+                "profile": profile,
             },
             "sections": sections,
         }
@@ -1503,7 +1953,8 @@ class QuestService:
                 },
             }
 
-        path, writable, scope, source_kind = self._resolve_document(workspace_root, document_id)
+        resolution_root = quest_root if document_id.startswith("questpath::") else workspace_root
+        path, writable, scope, source_kind = self._resolve_document(resolution_root, document_id)
         renderer_hint, mime_type = self._renderer_hint_for(path)
         is_text = self._is_text_document(path, mime_type, renderer_hint)
         content = read_text(path) if is_text else ""
@@ -1573,6 +2024,8 @@ class QuestService:
             _prefix, revision, relative = (document_id.split("::", 2) + ["", "", ""])[:3]
             return relative.lstrip("/") or None, revision or None
         if document_id.startswith("path::"):
+            return document_id.split("::", 1)[1].lstrip("/") or None, None
+        if document_id.startswith("questpath::"):
             return document_id.split("::", 1)[1].lstrip("/") or None, None
         if document_id.startswith("memory::"):
             relative = document_id.split("::", 1)[1].lstrip("/")
@@ -1651,10 +2104,11 @@ class QuestService:
         asset_name = f"{safe_stem}-{generate_id('asset').split('-', 1)[1]}{asset_suffix}"
         asset_relative_dir = self._markdown_asset_directory(base_relative)
         asset_relative = (asset_relative_dir / asset_name).as_posix()
-        asset_path = resolve_within(workspace_root, asset_relative)
+        asset_root = quest_root if document_id.startswith("questpath::") else workspace_root
+        asset_path = resolve_within(asset_root, asset_relative)
         ensure_dir(asset_path.parent)
         asset_path.write_bytes(content)
-        asset_document_id = f"path::{asset_relative}"
+        asset_document_id = f"{'questpath' if document_id.startswith('questpath::') else 'path'}::{asset_relative}"
         relative_markdown_path = self._relative_path_from_base(base_relative, asset_relative)
         return {
             "ok": True,
@@ -1770,9 +2224,8 @@ class QuestService:
                 return interaction_id
         return None
 
-    @staticmethod
-    def _read_interaction_state(quest_root: Path) -> dict[str, Any]:
-        state = read_json(quest_root / ".ds" / "interaction_state.json", {})
+    def _read_interaction_state(self, quest_root: Path) -> dict[str, Any]:
+        state = self._read_cached_json(quest_root / ".ds" / "interaction_state.json", {})
         state.setdefault("open_requests", [])
         state.setdefault("recent_threads", [])
         return state
@@ -1794,6 +2247,10 @@ class QuestService:
         return quest_root / ".ds" / "interaction_journal.jsonl"
 
     @staticmethod
+    def _active_user_requirements_path(quest_root: Path) -> Path:
+        return quest_root / "memory" / "knowledge" / "active-user-requirements.md"
+
+    @staticmethod
     def _default_message_queue() -> dict[str, Any]:
         return {
             "version": 1,
@@ -1801,9 +2258,15 @@ class QuestService:
             "completed": [],
         }
 
-    def _default_runtime_state(self, quest_root: Path) -> dict[str, Any]:
-        quest_yaml = read_yaml(quest_root / "quest.yaml", {})
-        queue_payload = read_json(self._message_queue_path(quest_root), self._default_message_queue())
+    def _default_runtime_state(
+        self,
+        quest_root: Path,
+        *,
+        quest_yaml: dict[str, Any] | None = None,
+        queue_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        quest_yaml = dict(quest_yaml or self.read_quest_yaml(quest_root))
+        queue_payload = dict(queue_payload or self._read_message_queue(quest_root))
         pending_count = len((queue_payload or {}).get("pending") or [])
         timestamp = quest_yaml.get("updated_at") or quest_yaml.get("created_at") or utc_now()
         status = str(quest_yaml.get("status") or "idle")
@@ -1819,10 +2282,11 @@ class QuestService:
             "pending_user_message_count": pending_count,
             "last_delivered_batch_id": None,
             "last_delivered_at": None,
+            "retry_state": None,
         }
 
     def _default_agent_status(self, quest_root: Path) -> dict[str, Any]:
-        quest_yaml = read_yaml(quest_root / "quest.yaml", {})
+        quest_yaml = self.read_quest_yaml(quest_root)
         timestamp = quest_yaml.get("updated_at") or quest_yaml.get("created_at") or utc_now()
         return {
             "version": 1,
@@ -1851,7 +2315,7 @@ class QuestService:
             write_json(agent_status_path, self._default_agent_status(quest_root))
 
     def _read_message_queue(self, quest_root: Path) -> dict[str, Any]:
-        payload = read_json(self._message_queue_path(quest_root), self._default_message_queue())
+        payload = self._read_cached_json(self._message_queue_path(quest_root), self._default_message_queue())
         if not isinstance(payload, dict):
             payload = self._default_message_queue()
         payload.setdefault("version", 1)
@@ -1864,12 +2328,19 @@ class QuestService:
 
     def _read_runtime_state(self, quest_root: Path) -> dict[str, Any]:
         self._initialize_runtime_files(quest_root)
-        payload = read_json(self._runtime_state_path(quest_root), self._default_runtime_state(quest_root))
+        quest_yaml = self.read_quest_yaml(quest_root)
+        queue_payload = self._read_message_queue(quest_root)
+        defaults = self._default_runtime_state(
+            quest_root,
+            quest_yaml=quest_yaml,
+            queue_payload=queue_payload,
+        )
+        payload = self._read_cached_json(self._runtime_state_path(quest_root), defaults)
         if not isinstance(payload, dict):
-            payload = self._default_runtime_state(quest_root)
-        defaults = self._default_runtime_state(quest_root)
+            payload = defaults
         merged = {**defaults, **payload}
         merged["pending_user_message_count"] = int(merged.get("pending_user_message_count") or 0)
+        merged["retry_state"] = dict(merged.get("retry_state") or {}) if isinstance(merged.get("retry_state"), dict) else None
         return merged
 
     def _write_runtime_state(self, quest_root: Path, payload: dict[str, Any]) -> None:
@@ -1889,56 +2360,60 @@ class QuestService:
         last_delivered_batch_id: str | None | object = _UNSET,
         last_delivered_at: str | None | object = _UNSET,
         display_status: str | None | object = _UNSET,
+        retry_state: dict[str, Any] | None | object = _UNSET,
     ) -> dict[str, Any]:
-        state = self._read_runtime_state(quest_root)
-        now = utc_now()
-        status_changed = False
-        run_changed = False
+        with self._runtime_state_lock(quest_root):
+            state = self._read_runtime_state(quest_root)
+            now = utc_now()
+            status_changed = False
+            run_changed = False
 
-        if status is not _UNSET:
-            normalized_status = str(status or state.get("status") or "idle")
-            state["status"] = normalized_status
-            status_changed = True
-            if display_status is _UNSET:
-                state["display_status"] = normalized_status
-        if display_status is not _UNSET:
-            state["display_status"] = str(display_status or state.get("status") or "idle")
-        if active_run_id is not _UNSET:
-            state["active_run_id"] = str(active_run_id).strip() if active_run_id else None
-            run_changed = True
-        if stop_reason is not _UNSET:
-            state["stop_reason"] = str(stop_reason).strip() if stop_reason else None
-        elif status is not _UNSET and str(state.get("status") or "") not in {"stopped", "paused", "error"}:
-            state["stop_reason"] = None
-        if active_interaction_id is not _UNSET:
-            state["active_interaction_id"] = str(active_interaction_id).strip() if active_interaction_id else None
-        if last_artifact_interact_at is not _UNSET:
-            state["last_artifact_interact_at"] = last_artifact_interact_at
-        if pending_user_message_count is not _UNSET:
-            state["pending_user_message_count"] = max(0, int(pending_user_message_count))
-        if last_delivered_batch_id is not _UNSET:
-            state["last_delivered_batch_id"] = str(last_delivered_batch_id).strip() if last_delivered_batch_id else None
-        if last_delivered_at is not _UNSET:
-            state["last_delivered_at"] = last_delivered_at
-        if last_transition_at is not _UNSET:
-            state["last_transition_at"] = last_transition_at
-        elif status_changed or run_changed:
-            state["last_transition_at"] = now
-
-        self._write_runtime_state(quest_root, state)
-
-        if status_changed or run_changed:
-            quest_data = read_yaml(quest_root / "quest.yaml", {})
             if status is not _UNSET:
-                quest_data["status"] = state["status"]
+                normalized_status = str(status or state.get("status") or "idle")
+                state["status"] = normalized_status
+                status_changed = True
+                if display_status is _UNSET:
+                    state["display_status"] = normalized_status
+            if display_status is not _UNSET:
+                state["display_status"] = str(display_status or state.get("status") or "idle")
             if active_run_id is not _UNSET:
-                if state.get("active_run_id"):
-                    quest_data["active_run_id"] = state["active_run_id"]
-                else:
-                    quest_data.pop("active_run_id", None)
-            quest_data["updated_at"] = now
-            write_yaml(quest_root / "quest.yaml", quest_data)
-        return state
+                state["active_run_id"] = str(active_run_id).strip() if active_run_id else None
+                run_changed = True
+            if stop_reason is not _UNSET:
+                state["stop_reason"] = str(stop_reason).strip() if stop_reason else None
+            elif status is not _UNSET and str(state.get("status") or "") not in {"stopped", "paused", "error", "completed"}:
+                state["stop_reason"] = None
+            if active_interaction_id is not _UNSET:
+                state["active_interaction_id"] = str(active_interaction_id).strip() if active_interaction_id else None
+            if last_artifact_interact_at is not _UNSET:
+                state["last_artifact_interact_at"] = last_artifact_interact_at
+            if pending_user_message_count is not _UNSET:
+                state["pending_user_message_count"] = max(0, int(pending_user_message_count))
+            if last_delivered_batch_id is not _UNSET:
+                state["last_delivered_batch_id"] = str(last_delivered_batch_id).strip() if last_delivered_batch_id else None
+            if last_delivered_at is not _UNSET:
+                state["last_delivered_at"] = last_delivered_at
+            if retry_state is not _UNSET:
+                state["retry_state"] = dict(retry_state) if isinstance(retry_state, dict) else None
+            if last_transition_at is not _UNSET:
+                state["last_transition_at"] = last_transition_at
+            elif status_changed or run_changed:
+                state["last_transition_at"] = now
+
+            self._write_runtime_state(quest_root, state)
+
+            if status_changed or run_changed:
+                quest_data = read_yaml(quest_root / "quest.yaml", {})
+                if status is not _UNSET:
+                    quest_data["status"] = state["status"]
+                if active_run_id is not _UNSET:
+                    if state.get("active_run_id"):
+                        quest_data["active_run_id"] = state["active_run_id"]
+                    else:
+                        quest_data.pop("active_run_id", None)
+                quest_data["updated_at"] = now
+                write_yaml(quest_root / "quest.yaml", quest_data)
+            return state
 
     def _enqueue_user_message(self, quest_root: Path, record: dict[str, Any]) -> dict[str, Any]:
         queue_payload = self._read_message_queue(quest_root)
@@ -1950,6 +2425,7 @@ class QuestService:
             "content": record.get("content") or "",
             "created_at": record.get("created_at"),
             "reply_to_interaction_id": record.get("reply_to_interaction_id"),
+            "attachments": [dict(item) for item in (record.get("attachments") or []) if isinstance(item, dict)],
             "status": "queued",
         }
         queue_payload["pending"] = [*list(queue_payload.get("pending") or []), queue_record]
@@ -1968,6 +2444,72 @@ class QuestService:
             },
         )
         return queue_record
+
+    def _write_active_user_requirements(
+        self,
+        quest_root: Path,
+        *,
+        latest_requirement: dict[str, Any] | None,
+    ) -> Path:
+        quest_yaml = self.read_quest_yaml(quest_root)
+        quest_goal = str(quest_yaml.get("title") or quest_yaml.get("quest_id") or quest_root.name).strip()
+        user_messages = [
+            item
+            for item in read_jsonl(quest_root / ".ds" / "conversations" / "main.jsonl")
+            if str(item.get("role") or "") == "user"
+        ]
+        latest = latest_requirement or (user_messages[-1] if user_messages else None)
+        lines = [
+            "# Active User Requirements",
+            "",
+            f"- updated_at: {utc_now()}",
+            f"- quest_id: {quest_yaml.get('quest_id') or quest_root.name}",
+            "",
+            "## Long-Term Goal",
+            "",
+            quest_goal or "No long-term goal recorded yet.",
+            "",
+            "## Working Rule",
+            "",
+            "Treat the requirements in this file as higher priority than stale background plans.",
+            "",
+            "## Latest Added Requirement",
+            "",
+        ]
+        if latest:
+            lines.extend(
+                [
+                    f"- source: {latest.get('source') or 'local'}",
+                    f"- created_at: {latest.get('created_at') or utc_now()}",
+                    "",
+                    str(latest.get("content") or "").strip() or "No latest requirement text was captured.",
+                    "",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "No explicit user requirement has been recorded yet.",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Active Requirement History",
+                "",
+            ]
+        )
+        if user_messages:
+            for index, item in enumerate(user_messages[-12:], start=1):
+                source = str(item.get("source") or "local").strip() or "local"
+                created_at = str(item.get("created_at") or "").strip() or "unknown"
+                content = str(item.get("content") or "").strip() or "(empty)"
+                lines.append(f"{index}. [{source}] [{created_at}] {content}")
+        else:
+            lines.append("1. No user messages yet.")
+        path = self._active_user_requirements_path(quest_root)
+        write_text(path, "\n".join(lines).rstrip() + "\n")
+        return path
 
     def claim_pending_user_message_for_turn(
         self,
@@ -2092,6 +2634,8 @@ class QuestService:
         message: str,
         response_phase: str | None = None,
         reply_mode: str | None = None,
+        surface_actions: list[dict[str, Any]] | None = None,
+        connector_hints: dict[str, Any] | None = None,
         created_at: str | None = None,
     ) -> dict[str, Any]:
         timestamp = created_at or utc_now()
@@ -2105,6 +2649,8 @@ class QuestService:
             "message": message,
             "response_phase": response_phase,
             "reply_mode": reply_mode,
+            "surface_actions": [dict(item) for item in (surface_actions or []) if isinstance(item, dict)],
+            "connector_hints": dict(connector_hints) if isinstance(connector_hints, dict) else {},
             "created_at": timestamp,
         }
         append_jsonl(self._interaction_journal_path(quest_root), payload)
@@ -2189,13 +2735,49 @@ class QuestService:
                 "created_at": item.get("created_at"),
                 "text": item.get("content") or "",
                 "content": item.get("content") or "",
+                "attachments": [dict(attachment) for attachment in (item.get("attachments") or []) if isinstance(attachment, dict)],
                 "reply_to_interaction_id": item.get("reply_to_interaction_id"),
             }
             for item in delivered_messages
         ]
         if delivered_messages:
             lines = [
-                "这是最新用户的要求（按时间顺序拼接）。在确保完成用户之前要求的前提下，完成当前的任务：",
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="这是最新用户的要求（按时间顺序拼接）。这些消息优先于当前后台子任务：",
+                    en="These are the latest user requirements in chronological order. They take priority over the current background subtask:",
+                ),
+                "",
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="- 先暂停当前非必要子任务，不要继续沿着旧计划埋头推进。",
+                    en="- Pause any non-essential current subtask instead of continuing the stale plan blindly.",
+                ),
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="- 立即再调用一次 artifact.interact(...)，明确告知你已经收到这些用户消息。",
+                    en="- Immediately call artifact.interact(...) again to confirm that you received these user messages.",
+                ),
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="- 如果可以直接回答，就在这次 follow-up artifact.interact(...) 里直接完整回答。",
+                    en="- If you can answer directly, give the full answer in that follow-up artifact.interact(...).",
+                ),
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="- 如果暂时不能直接回答，就在这次 follow-up artifact.interact(...) 里说明你将先处理该用户请求，给出简短计划、最近回传点与预计输出。",
+                    en="- If you cannot answer directly yet, explain in that follow-up artifact.interact(...) that you will handle this user request first, and include a short plan, nearest report-back point, and expected output.",
+                ),
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="- 完成该用户请求后，再立刻调用 artifact.interact(...) 汇报完整结果。",
+                    en="- After completing that user request, immediately call artifact.interact(...) again with the full result.",
+                ),
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="- 只有在用户新消息没有改变任务主线时，才恢复原来的后台任务。",
+                    en="- Resume the older background task only if the new user message did not change the main objective.",
+                ),
                 "",
             ]
             for index, item in enumerate(delivered_messages, start=1):
@@ -2204,9 +2786,17 @@ class QuestService:
             agent_instruction = "\n".join(lines).strip()
         else:
             lines = [
-                "当前用户并没有发送任何消息，请按照用户的要求继续进行任务。",
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="当前用户并没有发送任何消息，请按照用户的要求继续进行任务。",
+                    en="No new user message has arrived. Continue the task according to the user's requirements.",
+                ),
                 "",
-                "以下是最近 10 次与 artifact 交互相关的记录：",
+                self.localized_copy(
+                    quest_root=quest_root,
+                    zh="以下是最近 10 次与 artifact 交互相关的记录：",
+                    en="Here are the latest 10 artifact-related interaction records:",
+                ),
             ]
             if recent_records:
                 for index, item in enumerate(recent_records[-10:], start=1):
@@ -2221,7 +2811,13 @@ class QuestService:
                             f"{index}. [user][{item.get('conversation_id') or item.get('source') or 'local'}][{created_at}] {item.get('content') or ''}"
                         )
             else:
-                lines.append("1. 暂无历史交互记录。")
+                lines.append(
+                    self.localized_copy(
+                        quest_root=quest_root,
+                        zh="1. 暂无历史交互记录。",
+                        en="1. No recent interaction records.",
+                    )
+                )
             agent_instruction = "\n".join(lines).strip()
 
         return {
@@ -2252,6 +2848,13 @@ class QuestService:
                 raise ValueError("Document ID escapes skills root.")
             return path, False, "skill", "skill"
         if document_id.startswith("path::"):
+            relative = document_id.split("::", 1)[1]
+            path = resolve_within(quest_root, relative)
+            if not path.exists() or not path.is_file():
+                raise FileNotFoundError(f"Unknown quest file `{relative}`.")
+            scope, writable = QuestService._classify_path_scope(quest_root, path)
+            return path, writable, scope, scope
+        if document_id.startswith("questpath::"):
             relative = document_id.split("::", 1)[1]
             path = resolve_within(quest_root, relative)
             if not path.exists() or not path.is_file():
@@ -2434,6 +3037,8 @@ class QuestService:
         *,
         git_status: dict[str, str],
         changed_paths: dict[str, dict],
+        profile: str | None = None,
+        depth: int = 0,
     ) -> list[dict]:
         if not root.exists():
             return []
@@ -2453,6 +3058,9 @@ class QuestService:
             try:
                 if self._skip_explorer_path(quest_root, path):
                     continue
+                relative = path.relative_to(quest_root).as_posix()
+                if self._skip_explorer_profile_relative(relative, profile):
+                    continue
             except OSError:
                 continue
             try:
@@ -2460,7 +3068,19 @@ class QuestService:
             except OSError:
                 continue
             if is_dir:
-                children = self._tree_children(quest_root, path, git_status=git_status, changed_paths=changed_paths)
+                truncate_children = self._truncate_explorer_directory(relative, profile=profile, depth=depth)
+                children = (
+                    []
+                    if truncate_children
+                    else self._tree_children(
+                        quest_root,
+                        path,
+                        git_status=git_status,
+                        changed_paths=changed_paths,
+                        profile=profile,
+                        depth=depth + 1,
+                    )
+                )
                 nodes.append(
                     self._directory_node(
                         quest_root,
@@ -2491,12 +3111,14 @@ class QuestService:
         except (OSError, ValueError):
             relative = path.name
             scope = "quest"
+        folder_kind = self._folder_kind_for(path, relative)
         return {
             "id": f"dir::{relative}",
             "name": path.name,
             "path": relative,
             "kind": "directory",
             "scope": scope,
+            "folder_kind": folder_kind,
             "children": children,
             "git_status": git_status.get(relative),
             "recently_changed": relative in changed_paths,
@@ -2551,6 +3173,38 @@ class QuestService:
         return "__pycache__" in parts or ".pytest_cache" in parts
 
     @staticmethod
+    def _skip_explorer_profile_relative(relative: str, profile: str | None) -> bool:
+        if profile != "mobile":
+            return False
+        normalized = relative.strip("/")
+        if not normalized:
+            return False
+        parts = PurePosixPath(normalized).parts
+        top = parts[0] if parts else normalized
+        if top in {".codex", ".claude", ".ds", "tmp", "userfiles", "artifacts"}:
+            return True
+        if top.startswith(".") and normalized not in {".gitignore"}:
+            return True
+        return False
+
+    @staticmethod
+    def _truncate_explorer_directory(relative: str, *, profile: str | None, depth: int) -> bool:
+        if profile != "mobile":
+            return False
+        normalized = relative.strip("/")
+        if not normalized:
+            return False
+        parts = PurePosixPath(normalized).parts
+        top = parts[0] if parts else normalized
+        if top == "memory":
+            return False
+        if top == "baselines":
+            return depth >= 1
+        if top in {"literature", "paper", "experiments", "handoffs"}:
+            return depth >= 2
+        return depth >= 1
+
+    @staticmethod
     def _classify_path_scope(quest_root: Path, path: Path) -> tuple[str, bool]:
         relative = path.relative_to(quest_root).as_posix()
         return QuestService._classify_relative_scope(relative)
@@ -2575,6 +3229,34 @@ class QuestService:
     @staticmethod
     def _open_kind_for(path: Path) -> str:
         return QuestService._renderer_hint_for(path)[0]
+
+    @staticmethod
+    def _folder_kind_for(path: Path, relative: str) -> str | None:
+        try:
+            if not path.exists() or not path.is_dir():
+                return None
+        except OSError:
+            return None
+        if QuestService._looks_like_latex_folder(path, relative):
+            return "latex"
+        return None
+
+    @staticmethod
+    def _looks_like_latex_folder(path: Path, relative: str) -> bool:
+        normalized = str(relative or "").strip().replace("\\", "/")
+        if not normalized:
+            return False
+        try:
+            if (path / "main.tex").is_file():
+                return True
+        except OSError:
+            return False
+        if normalized.startswith(".ds/"):
+            return False
+        try:
+            return any(item.is_file() and item.suffix.lower() == ".tex" for item in path.iterdir())
+        except OSError:
+            return False
 
     @staticmethod
     def _renderer_hint_for(path: Path) -> tuple[str, str]:
@@ -2671,31 +3353,6 @@ def _dedupe_history_texts(values: list[object]) -> list[str]:
         seen.add(text)
         ordered.append(text)
     return ordered
-
-
-def _extract_web_search_payload(item: dict) -> dict:
-    action = item.get("action") if isinstance(item.get("action"), dict) else {}
-    raw_queries = action.get("queries") if isinstance(action, dict) else None
-    queries = _dedupe_history_texts(
-        [
-            *(raw_queries if isinstance(raw_queries, list) else []),
-            action.get("query") if isinstance(action, dict) else "",
-            item.get("query"),
-        ]
-    )
-    query = ""
-    if isinstance(item.get("query"), str) and item.get("query").strip():
-        query = item.get("query").strip()
-    elif queries:
-        query = queries[0]
-    payload: dict[str, Any] = {
-        "query": query,
-        "queries": queries,
-        "action_type": action.get("type") if isinstance(action, dict) else None,
-    }
-    if isinstance(action, dict) and action:
-        payload["action"] = action
-    return payload
 
 
 def _tool_call_id(event: dict, item: dict) -> str:
@@ -2868,7 +3525,7 @@ def _parse_codex_history(history_root: Path, *, quest_id: str, run_id: str, skil
         if item_type == "web_search":
             tool_call_id = _tool_call_id(event, item)
             tool_name = "web_search"
-            search_payload = _extract_web_search_payload(item)
+            search_payload = extract_web_search_payload(item)
             known_tool_names[tool_call_id] = tool_name
             if event_type == "item.started":
                 entries.append(

@@ -356,7 +356,15 @@ function createLocalUserFeedItem(content: string): FeedItem {
 
 function shouldRefreshForUpdate(raw: Record<string, unknown>): boolean {
   const eventType = String(raw.event_type ?? '')
-  if (eventType === 'runner.turn_finish' || eventType === 'runner.turn_error' || eventType === 'quest.control') {
+  if (
+    eventType === 'runner.turn_finish' ||
+    eventType === 'runner.turn_error' ||
+    eventType === 'runner.turn_retry_started' ||
+    eventType === 'runner.turn_retry_scheduled' ||
+    eventType === 'runner.turn_retry_aborted' ||
+    eventType === 'runner.turn_retry_exhausted' ||
+    eventType === 'quest.control'
+  ) {
     return true
   }
   if (String(raw.kind ?? '') !== 'artifact') {
@@ -386,6 +394,9 @@ function openBrowser(url: string) {
 
 function buildProjectsUrl(baseUrl: string) {
   const target = new URL(baseUrl)
+  if (target.hostname === '0.0.0.0') {
+    target.hostname = '127.0.0.1'
+  }
   target.pathname = '/projects'
   target.search = ''
   return target.toString()
@@ -396,6 +407,9 @@ function buildProjectUrl(baseUrl: string, questId: string | null) {
     return buildProjectsUrl(baseUrl)
   }
   const target = new URL(baseUrl)
+  if (target.hostname === '0.0.0.0') {
+    target.hostname = '127.0.0.1'
+  }
   target.pathname = `/projects/${questId}`
   target.search = ''
   return target.toString()
@@ -584,9 +598,9 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
           cursorRef.current = 0
           setConnectionState('connected')
           if (nextQuests.length === 0) {
-            setStatusLine('Home · no quests yet · send text to create the first quest.')
+            setStatusLine('Home · no quests yet · use `/new <goal>` to create the first quest.')
           } else {
-            setStatusLine('Home · selected quest ready · bare text continues that quest, `/new` creates another.')
+            setStatusLine('Home · selected quest ready · use `/use <quest_id>` to bind or `/new <goal>` to create another.')
           }
           return
         }
@@ -854,17 +868,16 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
       if (quests.length === 0) {
         return
       }
+      if (activeQuestId) {
+        return
+      }
       const currentId = activeQuestId || browseQuestId
       const index = quests.findIndex((quest) => quest.quest_id === currentId)
       const nextIndex = index < 0 ? 0 : (index + direction + quests.length) % quests.length
       const nextQuestId = quests[nextIndex]?.quest_id ?? null
-      if (activeQuestId) {
-        void focusQuest(nextQuestId ?? quests[0].quest_id)
-        return
-      }
       setBrowseQuestId(nextQuestId)
     },
-    [activeQuestId, browseQuestId, configItems.length, configMode, focusQuest, panelQuests, questPanelMode, quests]
+    [activeQuestId, browseQuestId, configItems.length, configMode, panelQuests, questPanelMode, quests]
   )
 
   useEffect(() => {
@@ -1075,13 +1088,11 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
           return
         }
         if (slash?.name === '/resume') {
-          const target = slash.arg
-            ? resolveQuestToken(slash.arg, quests)
-            : quests.find((quest) => quest.quest_id === (activeQuestId || browseQuestId)) ?? null
-          if (!slash.arg && !target) {
+          if (!slash.arg) {
             openQuestPanel('resume')
             return
           }
+          const target = resolveQuestToken(slash.arg, quests)
           if (!target) {
             setStatusLine(`Unknown quest · ${slash.arg}`)
             return
@@ -1159,18 +1170,10 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
             return
           }
           if (quests.length === 0) {
-            const payload = await client.createQuest(baseUrl, text)
-            setStatusLine(`Created ${payload.snapshot.quest_id}`)
-            await focusQuest(payload.snapshot.quest_id)
+            setStatusLine('Home mode · use `/new <goal>` to create the first quest.')
             return
           }
-          const targetQuestId = browseQuestId || quests[0]?.quest_id || null
-          if (!targetQuestId) {
-            setStatusLine('No quest available.')
-            return
-          }
-          await client.sendChat(baseUrl, targetQuestId, text)
-          await focusQuest(targetQuestId)
+          setStatusLine('Home mode · use `/use <quest_id>` to bind a quest before sending messages.')
           return
         }
 
@@ -1284,6 +1287,10 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
   )
 
   useInput((value, key) => {
+    const canBrowseSelection = configMode === 'browse' || Boolean(questPanelMode)
+    const canBrowseHomeQuests = !activeQuestId && input.length === 0
+    const submitRequested = key.return || value === '\r' || value === '\n'
+
     if (key.ctrl && value === 'c') {
       exit()
       return
@@ -1309,11 +1316,39 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
       leaveQuest()
       return
     }
-    if ((key.upArrow || key.leftArrow) && input.length === 0) {
+    if (key.escape) {
+      if (configMode === 'edit') {
+        setConfigMode('browse')
+        setConfigEditor(null)
+        setInput('')
+        setStatusLine('Config edit cancelled.')
+        return
+      }
+      if (configMode === 'browse') {
+        closeConfigScreen('Config browser closed.')
+        return
+      }
+      if (questPanelMode) {
+        closeQuestPanel('Quest browser closed.')
+        return
+      }
+      setInput('')
+      return
+    }
+    if (submitRequested) {
+      if (configMode === 'browse' && input.trim().length === 0) {
+        const selected = configItems[configIndex] ?? null
+        if (selected) {
+          void openConfigEditor(selected)
+        }
+        return
+      }
+    }
+    if (key.upArrow && ((configMode === 'browse') || canBrowseHomeQuests)) {
       cycleQuest(-1)
       return
     }
-    if ((key.downArrow || key.rightArrow || key.tab) && input.length === 0) {
+    if ((key.downArrow || key.tab) && ((configMode === 'browse') || canBrowseHomeQuests)) {
       cycleQuest(1)
       return
     }
@@ -1348,6 +1383,15 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
       questPanelMode={questPanelMode}
       questPanelQuests={panelQuests}
       questPanelIndex={questPanelIndex}
+      onQuestPanelMove={(direction) => {
+        cycleQuest(direction)
+      }}
+      onQuestPanelConfirm={() => {
+        void handleQuestPanelSelection()
+      }}
+      onQuestPanelCancel={() => {
+        closeQuestPanel('Quest browser closed.')
+      }}
       onChange={setInput}
       onSubmit={(override) => {
         const submitted = override ?? input

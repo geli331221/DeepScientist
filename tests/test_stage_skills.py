@@ -20,6 +20,13 @@ EXPECTED_STAGE_SKILLS = {
     "decision",
 }
 
+EXPECTED_COMPANION_SKILLS = {
+    "figure-polish",
+    "intake-audit",
+    "review",
+    "rebuttal",
+}
+
 
 def test_src_stage_skills_exist_and_are_nontrivial() -> None:
     root = repo_root() / "src" / "skills"
@@ -30,13 +37,35 @@ def test_src_stage_skills_exist_and_are_nontrivial() -> None:
         assert len(text.splitlines()) >= 40, f"{path} is unexpectedly thin"
 
 
+def test_companion_skills_exist_and_are_nontrivial() -> None:
+    root = repo_root() / "src" / "skills"
+    for skill_id in EXPECTED_COMPANION_SKILLS:
+        path = root / skill_id / "SKILL.md"
+        assert path.exists(), f"missing {path}"
+        text = path.read_text(encoding="utf-8")
+        assert len(text.splitlines()) >= 30, f"{path} is unexpectedly thin"
+
+
 def test_skill_discovery_prefers_src_skills() -> None:
     bundles = discover_skill_bundles(repo_root())
     discovered = {bundle.skill_id for bundle in bundles}
     assert EXPECTED_STAGE_SKILLS.issubset(discovered)
+    assert EXPECTED_COMPANION_SKILLS.issubset(discovered)
     for bundle in bundles:
         if bundle.skill_id in EXPECTED_STAGE_SKILLS:
             assert Path(bundle.skill_md).is_relative_to(repo_root() / "src" / "skills")
+
+
+def test_new_companion_skill_reference_files_exist() -> None:
+    root = repo_root() / "src" / "skills"
+    assert (root / "intake-audit" / "references" / "state-audit-template.md").exists()
+    assert (root / "review" / "references" / "review-report-template.md").exists()
+    assert (root / "review" / "references" / "revision-log-template.md").exists()
+    assert (root / "review" / "references" / "experiment-todo-template.md").exists()
+    assert (root / "rebuttal" / "references" / "action-plan-template.md").exists()
+    assert (root / "rebuttal" / "references" / "evidence-update-template.md").exists()
+    assert (root / "rebuttal" / "references" / "review-matrix-template.md").exists()
+    assert (root / "rebuttal" / "references" / "response-letter-template.md").exists()
 
 
 def test_idea_skill_requires_memory_first_literature_survey() -> None:
@@ -72,8 +101,13 @@ def test_quest_creation_syncs_all_stage_skills(temp_home: Path) -> None:
     codex_skills = sorted((quest_root / ".codex" / "skills").glob("deepscientist-*"))
     claude_skills = sorted((quest_root / ".claude" / "agents").glob("deepscientist-*.md"))
 
-    assert {path.name.removeprefix("deepscientist-") for path in codex_skills} == EXPECTED_STAGE_SKILLS
-    assert {path.stem.removeprefix("deepscientist-") for path in claude_skills} == EXPECTED_STAGE_SKILLS
+    synced_codex = {path.name.removeprefix("deepscientist-") for path in codex_skills}
+    synced_claude = {path.stem.removeprefix("deepscientist-") for path in claude_skills}
+
+    assert EXPECTED_STAGE_SKILLS.issubset(synced_codex)
+    assert EXPECTED_STAGE_SKILLS.issubset(synced_claude)
+    assert EXPECTED_COMPANION_SKILLS.issubset(synced_codex)
+    assert EXPECTED_COMPANION_SKILLS.issubset(synced_claude)
 
 
 def test_skill_resync_repairs_frontmatter_and_removes_stale_files(temp_home: Path) -> None:
@@ -156,6 +190,16 @@ def test_all_stage_skills_document_blocking_decision_request_options_and_timeout
         assert "wait up to 1 day" in text
 
 
+def test_all_stage_skills_document_mailbox_preemption_and_acknowledgement() -> None:
+    root = repo_root() / "src" / "skills"
+    for skill_id in EXPECTED_STAGE_SKILLS:
+        text = (root / skill_id / "SKILL.md").read_text(encoding="utf-8")
+        assert "highest-priority user instruction bundle" in text
+        assert "Immediately follow any non-empty mailbox poll" in text
+        assert "real user-visible progress" in text
+        assert "Do not update by tool-call cadence." in text
+
+
 def test_all_stage_skills_require_stage_start_memory_retrieval_and_stage_end_memory_write() -> None:
     root = repo_root() / "src" / "skills"
     for skill_id in ("scout", "baseline", "idea", "experiment", "analysis-campaign", "write", "finalize"):
@@ -173,7 +217,125 @@ def test_experiment_skill_requires_outcome_status_in_memory_writes() -> None:
     assert "`idea_id`, `branch`, and `run_id`" in text
 
 
+def test_long_running_skills_require_next_reply_time_reporting() -> None:
+    root = repo_root() / "src" / "skills"
+    experiment_text = (root / "experiment" / "SKILL.md").read_text(encoding="utf-8")
+    baseline_text = (root / "baseline" / "SKILL.md").read_text(encoding="utf-8")
+    campaign_text = (root / "analysis-campaign" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "estimated next reply time" in experiment_text
+    assert "next_reply_at" in experiment_text
+    assert "every completed wait cycle" in baseline_text
+    assert "next expected update time" in baseline_text
+    assert "estimated next reply time" in campaign_text
+
+
+def test_stage_skills_document_palette_requirements_for_connector_and_paper_outputs() -> None:
+    root = repo_root() / "src" / "skills"
+    experiment_text = (root / "experiment" / "SKILL.md").read_text(encoding="utf-8")
+    campaign_text = (root / "analysis-campaign" / "SKILL.md").read_text(encoding="utf-8")
+    write_text = (root / "write" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "sage-clay" in experiment_text
+    assert "mist-stone" in experiment_text
+    assert "dust-rose" in experiment_text
+    assert "Connector-facing chart requirements" in experiment_text
+
+    assert "sage-clay" in campaign_text
+    assert "mist-stone" in campaign_text
+    assert "Connector-facing campaign chart requirements" in campaign_text
+
+    assert "mist-stone" in write_text
+    assert "sage-clay" in write_text
+    assert "Paper-figure requirements" in write_text
+    assert "#F3EEE8" in experiment_text
+    assert "#7F8F84" in campaign_text
+    assert "#B88C8C" in write_text
+    assert "system prompt" in experiment_text
+    assert "system prompt" in campaign_text
+    assert "system prompt Morandi plotting template" in write_text
+
+
+def test_write_skill_documents_reviewer_first_reader_first_contract_and_references() -> None:
+    root = repo_root() / "src" / "skills" / "write"
+    text = (root / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "reviewer-first pass" in text
+    assert "reader-centered" in text
+    assert "paper/reviewer_first_pass.md" in text
+    assert "paper/section_contracts.md" in text
+    assert "paper/figure_storyboard.md" in text
+    assert "paper/related_work_map.md" in text
+    assert "paper/proofing/language_issues.md" in text
+    assert (root / "references" / "reviewer-first-writing.md").exists()
+    assert (root / "references" / "section-contracts.md").exists()
+    assert (root / "references" / "sentence-level-proofing.md").exists()
+
+
+def test_experiment_and_analysis_references_cover_evidence_ladder_and_campaign_design() -> None:
+    root = repo_root() / "src" / "skills"
+    experiment_text = (root / "experiment" / "SKILL.md").read_text(encoding="utf-8")
+    campaign_text = (root / "analysis-campaign" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "references/evidence-ladder.md" in experiment_text
+    assert "auxiliary/dev" in experiment_text
+    assert "main/test" in experiment_text
+    assert "minimum -> solid -> maximum" in experiment_text
+    assert (root / "experiment" / "references" / "evidence-ladder.md").exists()
+
+    assert "references/campaign-design.md" in campaign_text
+    assert "claim-carrying" in campaign_text
+    assert "supporting" in campaign_text
+    assert (root / "analysis-campaign" / "references" / "campaign-design.md").exists()
+
+
+def test_figure_polish_skill_requires_render_inspect_revise_workflow_and_style_asset() -> None:
+    text = (repo_root() / "src" / "skills" / "figure-polish" / "SKILL.md").read_text(encoding="utf-8")
+    style_asset = repo_root() / "src" / "skills" / "figure-polish" / "assets" / "deepscientist-academic.mplstyle"
+
+    assert "render-inspect-revise" in text
+    assert "open the rendered figure yourself" in text
+    assert "Do not treat a figure as final" in text
+    assert "main message obvious" in text
+    assert "color-vision-deficient" in text
+    assert style_asset.exists()
+
+
 def test_idea_skill_requires_review_of_prior_ideas_and_experiment_outcomes() -> None:
     text = (repo_root() / "src" / "skills" / "idea" / "SKILL.md").read_text(encoding="utf-8")
     assert "review prior quest idea records and experiment outcomes" in text
     assert "reference material, not as the active idea contract" in text
+
+
+def test_stage_skills_document_new_branch_lineage_semantics() -> None:
+    idea_text = (repo_root() / "src" / "skills" / "idea" / "SKILL.md").read_text(encoding="utf-8")
+    experiment_text = (repo_root() / "src" / "skills" / "experiment" / "SKILL.md").read_text(encoding="utf-8")
+    decision_text = (repo_root() / "src" / "skills" / "decision" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "lineage_intent='continue_line'" in idea_text
+    assert "lineage_intent='branch_alternative'" in idea_text
+    assert "new canvas node" in idea_text
+    assert "maintenance-only compatibility" in idea_text
+
+    assert "new durable idea branch" in experiment_text
+    assert "fixed round node" in experiment_text
+    assert "accepted idea -> `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)`" in decision_text
+
+
+def test_analysis_campaign_skill_requires_one_slice_campaign_for_single_extra_experiment() -> None:
+    text = (repo_root() / "src" / "skills" / "analysis-campaign" / "SKILL.md").read_text(encoding="utf-8")
+    assert "one-slice campaign" in text
+    assert "current workspace/result node" in text
+
+
+def test_review_and_rebuttal_skills_route_extra_evidence_into_shared_campaign_protocol() -> None:
+    review_text = (repo_root() / "src" / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
+    rebuttal_text = (repo_root() / "src" / "skills" / "rebuttal" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "shared supplementary-experiment protocol" in review_text
+    assert "one-slice campaign" in review_text
+    assert "Do not invent a separate review-only experiment workflow." in review_text
+
+    assert "shared supplementary-experiment protocol" in rebuttal_text
+    assert "do not invent a rebuttal-only experiment system" in rebuttal_text
+    assert "artifact.resolve_runtime_refs(...)" in rebuttal_text

@@ -14,12 +14,14 @@ from urllib.request import Request, urlopen
 from .artifact import ArtifactService
 from .config import ConfigManager
 from .daemon import DaemonApp
+from .doctor import render_doctor_report, run_doctor
 from .home import default_home, ensure_home_layout, repo_root
 from .memory import MemoryService
 from .prompts import PromptBuilder
 from .quest import QuestService
 from .registries import BaselineRegistry
 from .runners import CodexRunner, RunRequest, get_runner_factory, register_builtin_runners
+from .runtime_tools import RuntimeToolService
 from .runtime_logs import JsonlLogger
 from .shared import ensure_dir, read_yaml
 from .skills import SkillInstaller
@@ -76,8 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_parser = subparsers.add_parser("graph")
     graph_parser.add_argument("quest_id")
 
-    metrics_parser = subparsers.add_parser("metrics")
-    metrics_parser.add_argument("target")
+    subparsers.add_parser("doctor", aliases=["docker"])
 
     push_parser = subparsers.add_parser("push")
     push_parser.add_argument("quest_id")
@@ -94,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_attach.add_argument("--quest-id", required=True)
     baseline_attach.add_argument("--baseline-id", required=True)
     baseline_attach.add_argument("--variant-id", default=None)
+
+    latex_parser = subparsers.add_parser("latex")
+    latex_subparsers = latex_parser.add_subparsers(dest="latex_command", required=True)
+    latex_subparsers.add_parser("status")
+    latex_subparsers.add_parser("install-runtime")
 
     config_parser = subparsers.add_parser("config")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
@@ -355,27 +361,10 @@ def graph_command(home: Path, quest_id: str) -> int:
     return 0
 
 
-def metrics_command(home: Path, target: str) -> int:
-    if (home / "quests" / target / "quest.yaml").exists():
-        quest_root = home / "quests" / target
-        runs = sorted((quest_root / "artifacts" / "runs").glob("*.json"))
-        payload = []
-        from .shared import read_json
-
-        for path in runs:
-            item = read_json(path, {})
-            payload.append(
-                {
-                    "run_id": item.get("run_id"),
-                    "run_kind": item.get("run_kind"),
-                    "exit_code": item.get("exit_code"),
-                    "summary": item.get("summary"),
-                }
-            )
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-    print(json.dumps({"message": "Run-level metrics lookup is not implemented yet."}, ensure_ascii=False, indent=2))
-    return 0
+def doctor_command(home: Path) -> int:
+    report = run_doctor(home, repo_root=repo_root())
+    sys.stdout.write(render_doctor_report(report))
+    return 0 if report.get("ok") else 1
 
 
 def push_command(home: Path, quest_id: str) -> int:
@@ -413,6 +402,20 @@ def baseline_attach_command(home: Path, quest_id: str, baseline_id: str, variant
     result = ArtifactService(home).attach_baseline(home / "quests" / quest_id, baseline_id, variant_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") else 1
+
+
+def latex_status_command(home: Path) -> int:
+    ensure_home_layout(home)
+    payload = RuntimeToolService(home).status("tinytex")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("ok") else 1
+
+
+def latex_install_runtime_command(home: Path) -> int:
+    ensure_home_layout(home)
+    payload = RuntimeToolService(home).install("tinytex")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("ok") else 1
 
 
 def config_show_command(home: Path, name: str) -> int:
@@ -469,8 +472,8 @@ def main(argv: list[str] | None = None) -> int:
         return approve_command(home, args.quest_id, args.decision_id, args.reason)
     if args.command == "graph":
         return graph_command(home, args.quest_id)
-    if args.command == "metrics":
-        return metrics_command(home, args.target)
+    if args.command in {"doctor", "docker"}:
+        return doctor_command(home)
     if args.command == "push":
         return push_command(home, args.quest_id)
     if args.command == "memory" and args.memory_command == "search":
@@ -479,6 +482,10 @@ def main(argv: list[str] | None = None) -> int:
         return baseline_list_command(home)
     if args.command == "baseline" and args.baseline_command == "attach":
         return baseline_attach_command(home, args.quest_id, args.baseline_id, args.variant_id)
+    if args.command == "latex" and args.latex_command == "status":
+        return latex_status_command(home)
+    if args.command == "latex" and args.latex_command == "install-runtime":
+        return latex_install_runtime_command(home)
     if args.command == "config" and args.config_command == "show":
         return config_show_command(home, args.name)
     if args.command == "config" and args.config_command == "edit":

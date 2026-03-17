@@ -60,7 +60,6 @@ import { applyChatEvent } from '@/lib/plugins/ai-manus/lib/chat-event-reducer'
 type LabCopilotPanelProps = {
   projectId: string
   readOnly: boolean
-  shareReadOnly?: boolean
   cliStatus: 'online' | 'offline' | 'unbound'
   templates: LabTemplate[]
   agents: LabAgentInstance[]
@@ -913,7 +912,6 @@ export function LabCopilotHeader({
 export default function LabCopilotPanel({
   projectId,
   readOnly,
-  shareReadOnly,
   cliStatus,
   templates,
   agents,
@@ -1178,9 +1176,8 @@ export default function LabCopilotPanel({
     }
   }, [copilotMeta?.hasHistory, endPiOnboarding, piOnboardingActive])
 
-  const shareReadOnlyMode = Boolean(shareReadOnly)
   const cliReadOnly = cliStatus !== 'online'
-  const labReadOnly = readOnly || shareReadOnlyMode || cliReadOnly
+  const labReadOnly = readOnly || cliReadOnly
   const mentionsEnabled = !labReadOnly && !(mode === 'direct' && shouldShowInitTemplate)
   const mentionablesOverride = React.useMemo(() => {
     return agents.map((agent) => {
@@ -1454,20 +1451,15 @@ export default function LabCopilotPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {shareReadOnlyMode ? (
-        <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-[var(--lab-text-secondary)]">
-          Copilot is disabled in shared view.
-        </div>
-      ) : (
-        <>
-          {cliReadOnly ? (
-            <div className="border-b border-[var(--lab-border)] px-5 py-2 text-xs text-[var(--lab-text-secondary)]">
-              {cliStatus === 'unbound'
-                ? 'Bind an execution server to activate Lab Copilot.'
-                : 'Your execution server is offline. Messages will be sent once it reconnects.'}
-            </div>
-          ) : null}
-          <AnimatePresence mode="wait" initial={false}>
+      <>
+        {cliReadOnly ? (
+          <div className="border-b border-[var(--lab-border)] px-5 py-2 text-xs text-[var(--lab-text-secondary)]">
+            {cliStatus === 'unbound'
+              ? 'Bind an execution server to activate Lab Copilot.'
+              : 'Your execution server is offline. Messages will be sent once it reconnects.'}
+          </div>
+        ) : null}
+        <AnimatePresence mode="wait" initial={false}>
             {mode === 'direct' ? (
               <motion.div key="direct" className="flex flex-1 min-h-0 flex-col overflow-hidden" {...modeMotion}>
                 <div className="flex-1 min-h-0 overflow-hidden">
@@ -1616,9 +1608,8 @@ export default function LabCopilotPanel({
                 />
               </motion.div>
             ) : null}
-          </AnimatePresence>
-        </>
-      )}
+        </AnimatePresence>
+      </>
     </div>
   )
 }

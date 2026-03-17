@@ -13,4 +13,10 @@ describe('bash-progress helpers', () => {
     expect(getProgressPercent(progress)).toBe(70)
     expect(formatProgressLabel(progress)).toBe('7 samples')
   })
+
+  it('prefers next update countdown metadata', () => {
+    const progress = { current: 3, total: 10, next_reply_in: 90, eta: 300 }
+    expect(formatProgressMeta(progress)).toContain('next update in 1m 30s')
+    expect(formatProgressMeta(progress)).not.toContain('eta 5m')
+  })
 })

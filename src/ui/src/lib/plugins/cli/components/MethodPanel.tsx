@@ -26,7 +26,6 @@ type MethodPanelProps = {
   projectId: string
   serverId: string
   canCreate: boolean
-  authMode?: 'user' | 'share'
 }
 
 const createId = () => {
@@ -44,7 +43,7 @@ const formatTimestamp = (value?: string | null) => {
   return parsed.toLocaleString()
 }
 
-export function MethodPanel({ projectId, serverId, canCreate, authMode = 'user' }: MethodPanelProps) {
+export function MethodPanel({ projectId, serverId, canCreate }: MethodPanelProps) {
   const [methods, setMethods] = useState<CliMethodConfig[]>([])
   const [methodsLoading, setMethodsLoading] = useState(false)
   const [methodsError, setMethodsError] = useState<string | null>(null)
@@ -145,7 +144,6 @@ export function MethodPanel({ projectId, serverId, canCreate, authMode = 'user' 
   useCliSocket({
     projectId,
     serverId,
-    authMode,
     handlers: socketHandlers,
   })
 

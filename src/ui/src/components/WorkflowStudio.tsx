@@ -93,57 +93,62 @@ function ToolCard({ entry, questId }: { entry: WorkflowEntry; questId?: string }
   const Icon = theme.icon
   const isResult = entry.kind === 'tool_result'
   const summary = buildToolOperationContent(entry.kind, entry.tool_name || entry.title, entry.args, entry.output)
+  const hasExtraDetails = Boolean(
+    entry.tool_name || entry.status || entry.tool_call_id || entry.run_id || entry.args || entry.output
+  )
+  const title = isResult
+    ? `DeepScientist finished ${theme.label.toLowerCase()}`
+    : `DeepScientist is ${theme.verb.toLowerCase()}`
 
   return (
-    <article className="workflow-card rounded-[28px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.80),rgba(244,239,233,0.92))] p-4 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03))]">
-      <div className="mb-3 flex items-start gap-3">
-        <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-[18px] border border-black/10 dark:border-white/[0.12]', theme.tone)}>
+    <article className="workflow-card rounded-[24px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.80),rgba(244,239,233,0.92))] p-3.5 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03))]">
+      <div className="flex items-start gap-3">
+        <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-[16px] border border-black/10 dark:border-white/[0.12]', theme.tone)}>
           <Icon className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-semibold text-foreground">DeepScientist</div>
-            <Badge>{theme.label}</Badge>
-            {entry.tool_name ? <Badge>{entry.tool_name}</Badge> : null}
+            <div className="text-sm font-semibold text-foreground">{title}</div>
             {entry.status ? <Badge>{entry.status}</Badge> : null}
-            {entry.tool_call_id ? <Badge>{entry.tool_call_id}</Badge> : null}
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {isResult ? 'Tool result' : 'Tool call'}
-            {entry.run_id ? ` · ${entry.run_id}` : ''}
-            {entry.created_at ? ` · ${formatTime(entry.created_at)}` : ''}
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+            <span>{theme.label}</span>
+            {effect?.subject ? <span className="truncate">{effect.subject}</span> : null}
+            {entry.created_at ? <span>{formatTime(entry.created_at)}</span> : null}
           </div>
+          <div className="mt-2 text-sm leading-6 text-foreground">{summary}</div>
+          {hasExtraDetails ? (
+            <details className="mt-3 rounded-[18px] border border-black/[0.06] bg-black/[0.03] px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.04]">
+              <summary className="cursor-pointer list-none text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground [&::-webkit-details-marker]:hidden">
+                Details
+              </summary>
+              <div className="mt-3 space-y-3">
+                <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                  {entry.tool_name ? <Badge>{entry.tool_name}</Badge> : null}
+                  {entry.tool_call_id ? <Badge>{entry.tool_call_id}</Badge> : null}
+                  {entry.run_id ? <Badge>{entry.run_id}</Badge> : null}
+                </div>
+                {entry.args ? (
+                  <div>
+                    <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      Arguments
+                    </div>
+                    <pre className="feed-scrollbar overflow-x-auto text-[12px] leading-6 text-foreground">{entry.args}</pre>
+                  </div>
+                ) : null}
+                {entry.output ? (
+                  <div>
+                    <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      Output
+                    </div>
+                    <pre className="feed-scrollbar max-h-[220px] overflow-auto text-[12px] leading-6 text-foreground">{entry.output}</pre>
+                  </div>
+                ) : null}
+              </div>
+            </details>
+          ) : null}
         </div>
       </div>
-
-      {effect?.subject ? (
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <Badge>{effect.verb}</Badge>
-          <div className="rounded-full bg-black/[0.03] px-3 py-1.5 text-xs text-muted-foreground dark:bg-white/[0.05]">
-            {effect.subject}
-          </div>
-        </div>
-      ) : null}
-
-      <div className="mb-3 text-sm leading-7 text-foreground">{summary}</div>
-
-      {entry.args ? (
-        <div className="mb-3 overflow-hidden rounded-[22px] border border-black/[0.06] bg-black/[0.035] dark:border-white/[0.08] dark:bg-white/[0.04]">
-          <div className="border-b border-black/[0.06] px-3 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground dark:border-white/[0.08]">
-            Arguments
-          </div>
-          <pre className="feed-scrollbar overflow-x-auto px-3 py-3 text-[12px] leading-6 text-foreground">{entry.args}</pre>
-        </div>
-      ) : null}
-
-      {entry.output ? (
-        <div className="overflow-hidden rounded-[22px] border border-black/[0.06] bg-black/[0.035] dark:border-white/[0.08] dark:bg-white/[0.04]">
-          <div className="border-b border-black/[0.06] px-3 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground dark:border-white/[0.08]">
-            Output
-          </div>
-          <pre className="feed-scrollbar max-h-[260px] overflow-auto px-3 py-3 text-[12px] leading-6 text-foreground">{entry.output}</pre>
-        </div>
-      ) : null}
     </article>
   )
 }

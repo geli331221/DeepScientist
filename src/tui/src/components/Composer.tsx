@@ -88,6 +88,7 @@ export const Composer: React.FC<ComposerProps> = ({
       <InputPrompt
         value={input}
         placeholder={placeholder}
+        disabled={configMode === 'browse' || Boolean(selectionMode)}
         glowActive={false}
         onChange={onChange}
         onSubmit={onSubmit}
@@ -125,8 +126,8 @@ export const Composer: React.FC<ComposerProps> = ({
             : selectionMode
             ? 'Quest browser · ↑/↓ select · Enter confirm · Esc cancel'
             : mode === 'home'
-            ? 'Enter sends request · empty Enter binds selected quest · Ctrl+O web · Ctrl+B home'
-            : 'Enter sends message · Ctrl+R refresh · Ctrl+O web · Ctrl+G config'}
+            ? 'Enter binds selected quest · /new creates · ↑/↓ select quest · Tab next'
+            : 'Enter sends message · /projects browser · Ctrl+R refresh · Ctrl+G config'}
         </Text>
       )}
 

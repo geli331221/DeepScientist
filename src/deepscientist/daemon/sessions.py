@@ -22,6 +22,19 @@ class SessionStore:
         session.updated_at = utc_now()
         return session
 
+    def unbind(self, quest_id: str, source: str) -> bool:
+        session = self._sessions.get(quest_id)
+        if session is None:
+            return False
+        if source not in session.bound_sources:
+            return False
+        session.bound_sources.discard(source)
+        if not session.bound_sources:
+            self._sessions.pop(quest_id, None)
+            return True
+        session.updated_at = utc_now()
+        return True
+
     def snapshot(self) -> list[dict]:
         return [
             {

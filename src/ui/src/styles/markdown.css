@@ -99,6 +99,35 @@
   border: 0;
 }
 
+.wmde-markdown.ds-docs-markdown {
+  --ds-docs-code-bg: #0b0f17;
+  --ds-docs-code-fg: #edf2f7;
+  --ds-docs-code-border: rgba(8, 11, 15, 0.96);
+}
+
+.wmde-markdown.ds-docs-markdown pre {
+  background: var(--ds-docs-code-bg) !important;
+  color: var(--ds-docs-code-fg) !important;
+  border: 1px solid var(--ds-docs-code-border) !important;
+  box-shadow: none;
+}
+
+.wmde-markdown.ds-docs-markdown pre > code,
+.wmde-markdown.ds-docs-markdown pre code,
+.wmde-markdown.ds-docs-markdown pre tt,
+.wmde-markdown.ds-docs-markdown pre > code *,
+.wmde-markdown.ds-docs-markdown pre code *,
+.wmde-markdown.ds-docs-markdown pre tt * {
+  background: transparent !important;
+  color: inherit !important;
+}
+
+.wmde-markdown.ds-docs-markdown :not(pre) > code {
+  background: var(--ds-docs-code-bg) !important;
+  color: var(--ds-docs-code-fg) !important;
+  border: 1px solid rgba(8, 11, 15, 0.72);
+}
+
 .wmde-markdown blockquote {
   padding: 0 1em;
   color: var(--color-fg-muted);

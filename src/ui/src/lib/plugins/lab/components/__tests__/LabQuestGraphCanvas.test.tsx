@@ -177,4 +177,53 @@ describe('LabQuestGraphCanvas', () => {
     expect(await screen.findByText('1 memory note')).toBeInTheDocument()
     expect(screen.getByText('Longer warmup stabilizes the branch.')).toBeInTheDocument()
   })
+
+  it('keeps branch list clicks as selection-only without opening the stage page', async () => {
+    const fetchGraph = jest.fn().mockResolvedValue({
+      view: 'branch',
+      nodes: [
+        {
+          node_id: 'branch-1',
+          branch_name: 'main',
+          branch_no: '001',
+          idea_title: 'Branch Alpha',
+          next_target: 'Run ablation',
+          created_at: '2025-01-01T00:00:00Z',
+        },
+      ],
+      edges: [],
+      head_branch: 'main',
+      layout_json: {},
+    })
+    const fetchEvents = jest.fn().mockResolvedValue({ items: [], next_cursor: null })
+    const onBranchSelect = jest.fn()
+    const onStageOpen = jest.fn()
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <LabQuestGraphCanvas
+          projectId="project-1"
+          questId="quest-1"
+          fetchGraph={fetchGraph}
+          fetchEvents={fetchEvents}
+          onBranchSelect={onBranchSelect}
+          onStageOpen={onStageOpen}
+        />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(fetchGraph).toHaveBeenCalled()
+    })
+
+    const branchButton = container.querySelector('.lab-quest-branch-item') as HTMLButtonElement | null
+    expect(branchButton).not.toBeNull()
+    fireEvent.click(branchButton as HTMLButtonElement)
+
+    expect(onBranchSelect).toHaveBeenCalledWith('main')
+    expect(onStageOpen).not.toHaveBeenCalled()
+  })
 })

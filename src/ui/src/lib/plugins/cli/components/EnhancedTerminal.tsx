@@ -11,6 +11,7 @@ import { TerminalContextMenu } from './TerminalContextMenu'
 
 export function EnhancedTerminal({
   onInput,
+  onBinary,
   onResize,
   onReady,
   onProgress,
@@ -20,8 +21,10 @@ export function EnhancedTerminal({
   autoFocus = true,
   showHeader = true,
   scrollback,
+  convertEol,
 }: {
   onInput: (data: string) => void
+  onBinary?: (data: string) => void
   onResize: (cols: number, rows: number) => void
   onReady: (handlers: {
     write: (data: string, onComplete?: () => void) => void
@@ -40,11 +43,13 @@ export function EnhancedTerminal({
   autoFocus?: boolean
   showHeader?: boolean
   scrollback?: number
+  convertEol?: boolean
 }) {
   const enableAttach = process.env.NEXT_PUBLIC_CLI_ATTACH_ADDON === 'true'
   const scrollFollowThresholdPx = 120
   const { containerRef, fitAddonRef, terminalRef, write, clear, fit, search, serialize, resetProgress, scrollToBottom, focus } = useTerminal({
     onInput,
+    onBinary,
     onReady: (terminal) => {
       if (!keyHandlerAttachedRef.current) {
         terminal.attachCustomKeyEventHandler((event) => {
@@ -86,6 +91,7 @@ export function EnhancedTerminal({
     appearance,
     autoFocus,
     scrollback,
+    convertEol,
   })
   const getSize = useCallback(() => {
     if (!terminalRef.current?.element || !fitAddonRef.current) return null

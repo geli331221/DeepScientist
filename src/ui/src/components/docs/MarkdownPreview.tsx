@@ -5,7 +5,6 @@ import MarkdownPreviewLib from '@uiw/react-markdown-preview';
 import '@/styles/markdown.css';
 import { getDocAssetUrl } from '@/lib/docs';
 import { normalizeHeadingText, resolveRelativePosixPath, slugifyHeading } from '@/lib/docs/markdown';
-import { getShareSessionToken } from '@/lib/share-session';
 import { useThemeStore } from '@/lib/stores/theme';
 import rehypeKatex from 'rehype-katex';
 import remarkMath from 'remark-math';
@@ -106,8 +105,7 @@ function AuthenticatedReviewMarkdownImage({ src, alt, ...rest }: MarkdownImagePr
 
     const userToken =
       typeof window !== 'undefined' ? window.localStorage.getItem('ds_access_token')?.trim() : '';
-    const shareToken = getShareSessionToken()?.trim() || '';
-    const token = userToken || shareToken;
+    const token = userToken || '';
     if (!token) {
       setResolvedSrc(BLANK_IMAGE_DATA_URI);
       return () => {

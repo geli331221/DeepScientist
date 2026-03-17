@@ -59,8 +59,6 @@ import { TableBubbleMenu, TableToolbar } from "../lib/novel-selectors";
 import { getEditorMarkdown, setEditorMarkdown } from "../lib/markdown-utils";
 import { EditorLoading } from "./EditorLoading";
 import { NotebookToolbar } from "./NotebookToolbar";
-import { NotebookHistoryDialog } from "./NotebookHistoryDialog";
-import { NotebookCollaboratorsDialog } from "./NotebookCollaboratorsDialog";
 import {
   isSupportedNotebookAsset,
   resolveNotebookAssetUrl,
@@ -150,8 +148,6 @@ export default function NotebookEditor({
   const [isInitializing, setIsInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>("idle");
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [collaboratorsOpen, setCollaboratorsOpen] = useState(false);
   const [resetNonce, setResetNonce] = useState(0);
   const { diffEvent, clearDiff } = useFileDiffOverlay({
     fileId: notebookId ?? undefined,
@@ -731,15 +727,8 @@ export default function NotebookEditor({
     >
       <NotebookToolbar
         notebookId={!isInline && notebookId ? notebookId : ""}
-        readonly={isReadonly}
         autoSaveStatus={autoSaveStatus}
         getMarkdown={getCurrentMarkdown}
-        allowExport={!isInline && Boolean(notebookId)}
-        allowShare={!isInline && Boolean(notebookId)}
-        onShowHistory={!isInline && !isMarkdownDoc ? () => setHistoryOpen(true) : undefined}
-        onShowCollaborators={
-          !isInline && !isMarkdownDoc ? () => setCollaboratorsOpen(true) : undefined
-        }
       />
 
       {/* Main content area with padding like PDF viewer */}
@@ -899,24 +888,6 @@ export default function NotebookEditor({
           </div>
         </div>
       </div>
-
-      {!isMarkdownDoc ? (
-        <>
-          <NotebookHistoryDialog
-            open={historyOpen}
-            onOpenChange={setHistoryOpen}
-            notebookId={notebookId || ""}
-            editor={editor}
-            readonly={isReadonly}
-          />
-          <NotebookCollaboratorsDialog
-            open={collaboratorsOpen}
-            onOpenChange={setCollaboratorsOpen}
-            notebookId={notebookId || ""}
-            readonly={isReadonly}
-          />
-        </>
-      ) : null}
     </div>
   );
 }

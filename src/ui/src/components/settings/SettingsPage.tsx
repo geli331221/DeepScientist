@@ -1,5 +1,6 @@
 import { Loader2, Search } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import { MarkdownDocument } from '@/components/plugins/MarkdownDocument'
 import { ProjectsAppBar } from '@/components/projects/ProjectsAppBar'
@@ -99,6 +100,33 @@ function configHint(name: ConfigDocumentName, locale: Locale) {
   return CONFIG_META[name].hint[locale]
 }
 
+function normalizeHashAnchor(value?: string | null) {
+  return String(value || '')
+    .trim()
+    .replace(/^#/, '')
+}
+
+function settingsConfigPath(name: ConfigDocumentName | null) {
+  return name ? `/settings/${name}` : '/settings'
+}
+
+function scrollSettingsAnchor(root: HTMLElement | null, anchorId: string) {
+  if (!root || !anchorId) {
+    return false
+  }
+  const target = root.querySelector<HTMLElement>(`#${CSS.escape(anchorId)}`)
+  if (!target) {
+    return false
+  }
+  const top =
+    root.scrollTop +
+    target.getBoundingClientRect().top -
+    root.getBoundingClientRect().top -
+    16
+  root.scrollTo({ top: Math.max(top, 0), behavior: 'smooth' })
+  return true
+}
+
 export function SettingsPage({
   requestedConfigName,
   onRequestedConfigConsumed,
@@ -111,6 +139,8 @@ export function SettingsPage({
   locale: Locale
 }) {
   const t = copy[locale]
+  const location = useLocation()
+  const navigate = useNavigate()
   const [files, setFiles] = useState<ConfigFileEntry[]>([])
   const [connectors, setConnectors] = useState<ConnectorSnapshot[]>([])
   const [selectedName, setSelectedName] = useState<ConfigDocumentName | null>(requestedConfigName || null)
@@ -126,6 +156,7 @@ export function SettingsPage({
   const [saveMessage, setSaveMessage] = useState('')
   const [search, setSearch] = useState('')
   const lastKnownQqMainChatIdRef = useRef('')
+  const contentRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -195,6 +226,7 @@ export function SettingsPage({
   const isDirty = Boolean(
     document && JSON.stringify(document.meta?.structured_config || {}) !== JSON.stringify(structuredDraft)
   )
+  const selectedAnchorId = selectedName ? `settings-${selectedName}` : ''
 
   useEffect(() => {
     if (selectedName !== 'connectors') {
@@ -258,6 +290,41 @@ export function SettingsPage({
     }
   }, [document?.revision, isDirty, selectedName, structuredDraft.qq, t.qqAutoBound])
 
+  useEffect(() => {
+    const anchorId = normalizeHashAnchor(location.hash)
+    if (!anchorId || loading || !selectedName) {
+      return
+    }
+    let cancelled = false
+    const attemptScroll = (attempt: number) => {
+      if (cancelled) {
+        return
+      }
+      if (scrollSettingsAnchor(contentRef.current, anchorId)) {
+        return
+      }
+      if (attempt < 12) {
+        window.setTimeout(() => attemptScroll(attempt + 1), 80)
+      }
+    }
+    window.setTimeout(() => attemptScroll(0), 0)
+    return () => {
+      cancelled = true
+    }
+  }, [document?.revision, loading, location.hash, selectedName])
+
+  const handleSelectName = (name: ConfigDocumentName) => {
+    setSelectedName(name)
+    setSaveMessage('')
+    navigate(
+      {
+        pathname: settingsConfigPath(name),
+        hash: '',
+      },
+      { replace: location.pathname === settingsConfigPath(name) }
+    )
+  }
+
   const filteredFiles = useMemo(() => {
     const keyword = search.trim().toLowerCase()
     if (!keyword) {
@@ -283,6 +350,22 @@ export function SettingsPage({
   )
   const setStructuredConnectors = (next: Record<string, Record<string, unknown>>) => {
     setStructuredDraft(next as Record<string, unknown>)
+  }
+
+  const jumpToAnchor = (anchorId: string) => {
+    if (!selectedName || !anchorId) {
+      return
+    }
+    navigate(
+      {
+        pathname: settingsConfigPath(selectedName),
+        hash: `#${anchorId}`,
+      },
+      { replace: false }
+    )
+    window.setTimeout(() => {
+      scrollSettingsAnchor(contentRef.current, anchorId)
+    }, 0)
   }
 
   const connectorSummary = useMemo(() => {
@@ -343,15 +426,18 @@ export function SettingsPage({
     }
     setTestingConnectorName(connectorName)
     try {
-      setTestResult(
-        await client.testConfig('connectors', {
-          structured: structuredConnectors,
-          live: true,
-          delivery_targets: {
-            [connectorName]: target,
-          },
-        })
-      )
+      setTestResult(await client.testConfig('connectors', connectorName === 'lingzhu'
+        ? {
+            structured: structuredConnectors,
+            live: true,
+          }
+        : {
+            structured: structuredConnectors,
+            live: true,
+            delivery_targets: {
+              [connectorName]: target,
+            },
+          }))
     } finally {
       setTestingConnectorName(null)
     }
@@ -400,7 +486,7 @@ export function SettingsPage({
                   <button
                     key={file.name}
                     type="button"
-                    onClick={() => setSelectedName(name)}
+                    onClick={() => handleSelectName(name)}
                     className={cn(
                       'flex w-full items-center justify-between border-t border-black/[0.06] py-3 text-left transition first:border-t-0 dark:border-white/[0.08]',
                       selectedName === file.name ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
@@ -438,7 +524,7 @@ export function SettingsPage({
             </div>
           </aside>
 
-          <section className="feed-scrollbar min-h-0 overflow-y-auto py-6 xl:px-10">
+          <section ref={contentRef} className="feed-scrollbar min-h-0 overflow-y-auto py-6 xl:px-10">
             {loading ? (
               <div className="flex items-center gap-3 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -450,11 +536,23 @@ export function SettingsPage({
 
             {!loading && selectedName && selectedMeta ? (
               <>
-                <header className="flex flex-col gap-4 border-b border-black/[0.08] pb-5 xl:flex-row xl:items-start xl:justify-between dark:border-white/[0.08]">
+                <header
+                  id={selectedAnchorId || undefined}
+                  className="flex scroll-mt-4 flex-col gap-4 border-b border-black/[0.08] pb-5 xl:flex-row xl:items-start xl:justify-between dark:border-white/[0.08]"
+                >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <h1 className="text-3xl font-semibold tracking-tight">{selectedMeta.label[locale]}</h1>
                       <HintDot label={selectedMeta.hint[locale]} />
+                      {selectedAnchorId ? (
+                        <button
+                          type="button"
+                          onClick={() => jumpToAnchor(selectedAnchorId)}
+                          className="rounded-full border border-black/[0.08] bg-white/[0.44] px-2 py-1 text-[11px] text-muted-foreground transition hover:text-foreground dark:border-white/[0.12] dark:bg-white/[0.03]"
+                        >
+                          #{selectedAnchorId}
+                        </button>
+                      ) : null}
                       {isDirty ? <span className="text-xs text-muted-foreground">{t.dirty}</span> : null}
                     </div>
                     {document?.path ? <div className="mt-2 break-all text-xs text-muted-foreground">{document.path}</div> : null}
@@ -484,6 +582,7 @@ export function SettingsPage({
                       validation={validation}
                       testResult={testResult}
                       saving={saving}
+                      isDirty={isDirty}
                       validating={validating}
                       testingAll={testingAll}
                       testingConnectorName={testingConnectorName}
@@ -492,6 +591,7 @@ export function SettingsPage({
                       onValidate={() => void runValidate()}
                       onTestAll={() => void runTestAll()}
                       onTestConnector={(connectorName, deliveryTarget) => void runConnectorTest(connectorName, deliveryTarget)}
+                      onJumpToAnchor={jumpToAnchor}
                     />
                   </div>
                 ) : null}

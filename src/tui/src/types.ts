@@ -102,6 +102,11 @@ export type BashProgress = {
   current?: number
   total?: number
   percent?: number
+  eta?: number
+  next_reply_in?: number
+  next_check_in?: number
+  next_reply_at?: string
+  next_check_at?: string
   ts?: string
   [key: string]: unknown
 }

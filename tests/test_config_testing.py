@@ -24,6 +24,43 @@ def test_config_show_includes_help_markdown_and_testability(temp_home: Path) -> 
     assert "telegram" in payload["meta"]["structured_config"]
 
 
+def test_default_config_removes_report_palette_settings_and_keeps_qq_media_policy(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    config_payload = manager.load_named("config")
+    connectors_payload = manager.load_named("connectors")
+
+    assert "reports" not in config_payload
+
+    assert connectors_payload["qq"]["auto_send_main_experiment_png"] is True
+    assert connectors_payload["qq"]["auto_send_analysis_summary_png"] is True
+    assert connectors_payload["qq"]["auto_send_slice_png"] is True
+    assert connectors_payload["qq"]["auto_send_paper_pdf"] is True
+    assert connectors_payload["qq"]["enable_file_upload_experimental"] is False
+
+
+def test_config_normalization_strips_legacy_report_palette_block(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    normalized = manager._normalize_named_payload(
+        "config",
+        {
+            **manager.load_named("config"),
+            "reports": {
+                "default_palette": "mist-stone",
+                "qq_summary_palette": "sage-clay",
+                "paper_figure_palette": "mist-stone",
+            },
+        },
+    )
+
+    assert "reports" not in normalized
+
+
 def test_connectors_config_test_uses_system_probe(monkeypatch, temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
@@ -49,6 +86,21 @@ def test_connectors_config_test_uses_system_probe(monkeypatch, temp_home: Path) 
     assert item["details"]["identity"] == "DeepScientistBot"
 
 
+def test_connectors_config_validate_lingzhu_requires_auth_ak_and_warns_about_public_base_url(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["gateway_port"] = 18789
+
+    result = manager.validate_named_payload("connectors", connectors)
+
+    assert result["ok"] is False
+    assert any("lingzhu: requires `auth_ak`" in item for item in result["errors"])
+    assert any("public_base_url" in item for item in result["warnings"])
+
+
 def test_config_test_api_route_returns_items(monkeypatch, temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
@@ -71,6 +123,40 @@ def test_config_test_api_route_returns_items(monkeypatch, temp_home: Path) -> No
 
     assert payload["ok"] is True
     assert payload["items"][0]["name"] == "git"
+
+
+def test_connectors_config_test_supports_lingzhu_probe(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    connectors["lingzhu"]["gateway_port"] = 18789
+    connectors["lingzhu"]["public_base_url"] = "http://203.0.113.10:18789"
+
+    monkeypatch.setattr(
+        manager,
+        "_probe_lingzhu_health",
+        lambda config, timeout=5.0: {"ok": True, "status": "ok", "payload": {"status": "ok"}},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_probe_lingzhu_sse",
+        lambda config, timeout=8.0: {"ok": True, "content_type": "text/event-stream", "preview": "event: message\\ndata: {}"},
+    )
+
+    result = manager.test_named_payload("connectors", connectors, live=True)
+
+    assert result["ok"] is True
+    item = next(entry for entry in result["items"] if entry["name"] == "lingzhu")
+    assert item["details"]["transport"] == "openclaw_sse"
+    assert item["details"]["endpoint_url"] == "http://127.0.0.1:18789/metis/agent/api/sse"
+    assert item["details"]["public_endpoint_url"] == "http://203.0.113.10:18789/metis/agent/api/sse"
+    assert "authAk" in str(item["details"]["generated_openclaw_config"])
+    assert "autoReceiptAck" in str(item["details"]["generated_openclaw_config"])
+    assert "visibleProgressHeartbeat" in str(item["details"]["generated_openclaw_config"])
+    assert "Authorization: Bearer" in str(item["details"]["generated_curl"])
 
 
 def test_config_save_validate_and_test_accept_structured_connectors(monkeypatch, temp_home: Path) -> None:
@@ -318,3 +404,114 @@ def test_mcp_structured_config_normalizes_list_and_validates_required_fields(tem
     normalized = payload["parsed"]
     assert normalized["servers"]["browser"]["command"] == ["npx", "@example/browser-mcp"]
     assert normalized["servers"]["papers"]["url"] == "https://example.com/mcp"
+
+
+def test_runners_config_test_executes_live_codex_probe(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    runners = manager.load_named("runners")
+    runners["codex"]["enabled"] = True
+    runners["codex"]["binary"] = "codex"
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr(
+        manager,
+        "_probe_codex_runner",
+        lambda config: {
+            "ok": True,
+            "summary": "Codex startup probe completed.",
+            "warnings": [],
+            "errors": [],
+            "details": {
+                "resolved_binary": "/tmp/fake-codex",
+                "stdout_excerpt": '{"item":{"text":"HELLO"}}',
+            },
+        },
+    )
+
+    result = manager.test_named_payload("runners", runners, live=True)
+
+    assert result["ok"] is True
+    codex = next(item for item in result["items"] if item["name"] == "codex")
+    assert codex["details"]["resolved_binary"] == "/tmp/fake-codex"
+    assert codex["details"]["live_probe_executed"] is True
+    assert codex["details"]["stdout_excerpt"]
+
+
+def test_codex_bootstrap_probe_persists_success_state(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.setattr(
+        manager,
+        "_probe_codex_runner",
+        lambda config: {
+            "ok": True,
+            "summary": "Codex startup probe completed.",
+            "warnings": [],
+            "errors": [],
+            "details": {
+                "binary": "codex",
+                "resolved_binary": "/tmp/fake-codex",
+                "model": "gpt-5.4",
+                "approval_policy": "on-request",
+                "sandbox_mode": "workspace-write",
+                "reasoning_effort": "xhigh",
+                "checked_at": "2026-03-15T10:00:00+00:00",
+                "exit_code": 0,
+                "stdout_excerpt": '{"item":{"text":"HELLO"}}',
+                "stderr_excerpt": "",
+            },
+            "guidance": [],
+        },
+    )
+
+    result = manager.probe_codex_bootstrap(persist=True)
+    state = manager.codex_bootstrap_state()
+
+    assert result["ok"] is True
+    assert state["codex_ready"] is True
+    assert state["codex_last_checked_at"]
+    assert state["codex_last_result"]["summary"] == "Codex startup probe completed."
+
+
+def test_codex_bootstrap_probe_persists_failure_state(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.setattr(
+        manager,
+        "_probe_codex_runner",
+        lambda config: {
+            "ok": False,
+            "summary": "Codex startup probe failed.",
+            "warnings": ["Codex returned stderr during the startup probe."],
+            "errors": [
+                "Codex did not complete the startup hello probe successfully.",
+                "Run `codex` once and complete login before starting DeepScientist.",
+            ],
+            "details": {
+                "binary": "codex",
+                "resolved_binary": "/tmp/fake-codex",
+                "model": "gpt-5.4",
+                "approval_policy": "on-request",
+                "sandbox_mode": "workspace-write",
+                "reasoning_effort": "xhigh",
+                "checked_at": "2026-03-15T10:00:00+00:00",
+                "exit_code": 1,
+                "stdout_excerpt": "",
+                "stderr_excerpt": "Please login first",
+            },
+            "guidance": ["Run `codex` in a terminal and complete login or first-run setup."],
+        },
+    )
+
+    result = manager.probe_codex_bootstrap(persist=True)
+    state = manager.codex_bootstrap_state()
+
+    assert result["ok"] is False
+    assert state["codex_ready"] is False
+    assert "Please login first" in state["codex_last_result"]["stderr_excerpt"]

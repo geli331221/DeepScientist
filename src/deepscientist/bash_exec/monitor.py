@@ -19,11 +19,13 @@ from .service import (
     BASH_TERMINAL_PROMPT_PREFIX,
     BASH_STATUS_MARKER_PREFIX,
     _atomic_write_json,
+    _coerce_session_status,
     _parse_progress_marker,
 )
 from ..shared import append_jsonl, ensure_dir, read_json, read_jsonl, utc_now
 
 DEFAULT_STOP_GRACE_SECONDS = 5
+TERMINAL_IO_POLL_SECONDS = 0.02
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -36,8 +38,129 @@ def _read_meta(session_dir: Path) -> dict[str, Any]:
     return read_json(session_dir / "meta.json", {})
 
 
+def _summary_path(session_dir: Path) -> Path:
+    return session_dir.parent / "summary.json"
+
+
+def _summary_session_payload(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bash_id": meta.get("bash_id") or meta.get("id"),
+        "command": meta.get("command"),
+        "kind": meta.get("kind") or "exec",
+        "label": meta.get("label"),
+        "workdir": meta.get("workdir"),
+        "status": _coerce_session_status(meta.get("status")),
+        "exit_code": meta.get("exit_code"),
+        "stop_reason": meta.get("stop_reason"),
+        "started_at": meta.get("started_at"),
+        "finished_at": meta.get("finished_at"),
+        "updated_at": meta.get("updated_at"),
+        "last_progress": meta.get("last_progress"),
+    }
+
+
+def _summary_sort_key(session: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(session.get("updated_at") or ""),
+        str(session.get("started_at") or ""),
+        str(session.get("bash_id") or ""),
+    )
+
+
+def _is_active_status(value: object) -> bool:
+    return _coerce_session_status(value) in {"running", "terminating"}
+
+
+def _default_summary() -> dict[str, Any]:
+    return {
+        "session_count": 0,
+        "running_count": 0,
+        "latest_session": None,
+        "updated_at": utc_now(),
+    }
+
+
+def _load_summary(session_dir: Path) -> dict[str, Any] | None:
+    summary = read_json(_summary_path(session_dir), None)
+    if not isinstance(summary, dict):
+        return None
+    return {**_default_summary(), **summary}
+
+
+def _write_summary(session_dir: Path, summary: dict[str, Any]) -> None:
+    _atomic_write_json(
+        _summary_path(session_dir),
+        {
+            **_default_summary(),
+            **summary,
+            "updated_at": utc_now(),
+        },
+    )
+
+
+def _rebuild_summary(session_dir: Path) -> dict[str, Any]:
+    summary = _default_summary()
+    latest_session: dict[str, Any] | None = None
+    session_count = 0
+    running_count = 0
+    for meta_path in session_dir.parent.glob("*/meta.json"):
+        meta = read_json(meta_path, {})
+        if not isinstance(meta, dict) or not meta:
+            continue
+        session_count += 1
+        if _is_active_status(meta.get("status")):
+            running_count += 1
+        compact = _summary_session_payload(meta)
+        if latest_session is None or _summary_sort_key(compact) >= _summary_sort_key(latest_session):
+            latest_session = compact
+    summary["session_count"] = session_count
+    summary["running_count"] = running_count
+    summary["latest_session"] = latest_session
+    _write_summary(session_dir, summary)
+    return summary
+
+
+def _summary_payload_changed(previous: dict[str, Any], payload: dict[str, Any]) -> bool:
+    previous_compact = _summary_session_payload(previous)
+    payload_compact = _summary_session_payload(payload)
+    previous_compact.pop("updated_at", None)
+    payload_compact.pop("updated_at", None)
+    return previous_compact != payload_compact
+
+
+def _refresh_summary(session_dir: Path, previous: dict[str, Any], payload: dict[str, Any]) -> None:
+    summary = _load_summary(session_dir)
+    if summary is None:
+        summary = _rebuild_summary(session_dir)
+
+    old_exists = isinstance(previous, dict) and bool(previous)
+    if old_exists and not _summary_payload_changed(previous, payload):
+        return
+
+    old_running = _is_active_status(previous.get("status")) if old_exists else False
+    new_running = _is_active_status(payload.get("status"))
+    if not old_exists:
+        summary["session_count"] = int(summary.get("session_count") or 0) + 1
+    if old_running != new_running:
+        running_count = int(summary.get("running_count") or 0)
+        running_count += 1 if new_running else -1
+        summary["running_count"] = max(0, running_count)
+
+    compact = _summary_session_payload(payload)
+    latest_session = summary.get("latest_session")
+    if (
+        not isinstance(latest_session, dict)
+        or str(latest_session.get("bash_id") or "") == str(compact.get("bash_id") or "")
+        or _summary_sort_key(compact) >= _summary_sort_key(latest_session)
+    ):
+        summary["latest_session"] = compact
+    _write_summary(session_dir, summary)
+
+
 def _write_meta(session_dir: Path, payload: dict[str, Any]) -> None:
+    previous = _read_meta(session_dir)
     _atomic_write_json(session_dir / "meta.json", payload)
+    _refresh_summary(session_dir, previous, payload)
 
 
 def _safe_reason(reason: str | None) -> str:
@@ -79,7 +202,13 @@ def _terminate_process(process: subprocess.Popen[bytes], process_group_id: int |
         process.kill()
 
 
-def _drain_buffer(buffer: str, append_line) -> str:
+def _drain_buffer(
+    buffer: str,
+    append_line,
+    *,
+    flush_partial: bool = False,
+    carriage_mode: str = "marker",
+) -> str:
     while True:
         index_r = buffer.find("\r")
         index_n = buffer.find("\n")
@@ -92,11 +221,17 @@ def _drain_buffer(buffer: str, append_line) -> str:
                 append_line(segment)
             else:
                 buffer = buffer[index_r + 1 :]
-                append_line(f"{BASH_CARRIAGE_RETURN_PREFIX}{segment}")
+                if carriage_mode == "stream":
+                    append_line(segment, stream="carriage")
+                else:
+                    append_line(f"{BASH_CARRIAGE_RETURN_PREFIX}{segment}")
             continue
         segment = buffer[:index_n]
         buffer = buffer[index_n + 1 :]
         append_line(segment)
+    if flush_partial and buffer:
+        append_line(buffer, stream="partial")
+        return ""
     return buffer
 
 
@@ -121,13 +256,13 @@ def _parse_terminal_prompt_marker(line: str) -> dict[str, str] | None:
 def _format_terminal_prompt(meta: dict[str, Any], cwd_value: str) -> str:
     quest_root = Path(str(meta.get("quest_root") or ".")).expanduser().resolve()
     cwd_path = Path(str(cwd_value or quest_root)).expanduser().resolve()
+    home = Path.home().expanduser().resolve()
     try:
-        relative = cwd_path.relative_to(quest_root).as_posix()
-        display = "." if relative == "." else relative
+        relative = cwd_path.relative_to(home).as_posix()
+        display = "~" if relative == "." else f"~/{relative}"
     except ValueError:
         display = str(cwd_path)
-    quest_label = str(meta.get("quest_id") or quest_root.name or "quest")
-    return f"{quest_label}:{display}$ "
+    return f"{display}$ "
 
 
 def run_monitor(session_dir: Path) -> int:
@@ -199,7 +334,12 @@ def run_monitor(session_dir: Path) -> int:
         seq += 1
         timestamp = utc_now()
         with terminal_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+            if stream == "partial":
+                handle.write(line)
+            elif stream == "carriage":
+                handle.write(f"\r{line}")
+            else:
+                handle.write(f"{line}\n")
         _append_jsonl(
             log_path,
             {
@@ -310,7 +450,7 @@ def run_monitor(session_dir: Path) -> int:
                         },
                     )
 
-            ready, _unused_w, _unused_x = select.select([output_fd], [], [], 0.1)
+            ready, _unused_w, _unused_x = select.select([output_fd], [], [], TERMINAL_IO_POLL_SECONDS)
             if ready:
                 try:
                     chunk = os.read(output_fd, 4096)
@@ -318,7 +458,12 @@ def run_monitor(session_dir: Path) -> int:
                     chunk = b""
                 if chunk:
                     buffer += decoder.decode(chunk)
-                    buffer = _drain_buffer(buffer, append_line)
+                    buffer = _drain_buffer(
+                        buffer,
+                        append_line,
+                        flush_partial=session_kind == "terminal",
+                        carriage_mode="stream" if session_kind == "terminal" else "marker",
+                    )
             if process.poll() is not None:
                 break
 
@@ -330,10 +475,15 @@ def run_monitor(session_dir: Path) -> int:
             if not chunk:
                 break
             buffer += decoder.decode(chunk)
-            buffer = _drain_buffer(buffer, append_line)
+            buffer = _drain_buffer(
+                buffer,
+                append_line,
+                flush_partial=session_kind == "terminal",
+                carriage_mode="stream" if session_kind == "terminal" else "marker",
+            )
         buffer += decoder.decode(b"", final=True)
         if buffer:
-            append_line(buffer)
+            append_line(buffer, stream="partial" if session_kind == "terminal" else "stdout")
 
         if not stop_requested and not stop_reason and stop_request_path.exists():
             request = read_json(stop_request_path, {}) or {}

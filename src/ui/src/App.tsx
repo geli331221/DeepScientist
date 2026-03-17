@@ -13,14 +13,40 @@ function normalizeConfigName(value?: string): ConfigDocumentName | null {
   return null
 }
 
+function normalizeRequestedDocSlug(pathname: string): string | null {
+  const marker = '/docs'
+  if (!pathname.startsWith(marker)) {
+    return null
+  }
+  const raw = pathname.slice(marker.length).replace(/^\/+/, '').trim()
+  if (!raw) {
+    return null
+  }
+  return raw
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => decodeURIComponent(segment))
+    .join('/')
+}
+
 function DocsRoutePage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { locale } = useI18n()
 
   return (
     <DocsPage
       locale={locale}
-      onOpenSettings={(name?: ConfigDocumentName) => navigate('/settings', { state: { configName: name } })}
+      requestedDocumentSlug={normalizeRequestedDocSlug(location.pathname)}
+      onOpenSettings={(name?: ConfigDocumentName, hash?: string) =>
+        navigate(
+          {
+            pathname: name ? `/settings/${name}` : '/settings',
+            hash: hash ? (hash.startsWith('#') ? hash : `#${hash}`) : '',
+          },
+          { state: name && !hash ? { configName: name } : null }
+        )
+      }
     />
   )
 }
@@ -47,16 +73,8 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
-      <Route path="/login" element={<Navigate to="/" replace />} />
-      <Route path="/register" element={<Navigate to="/" replace />} />
-      <Route path="/projects" element={<Navigate to="/" replace />} />
       <Route path="/projects/:projectId" element={<ProjectWorkspacePage />} />
-      <Route path="/pricing" element={<Navigate to="/docs" replace />} />
-      <Route path="/blog" element={<Navigate to="/docs" replace />} />
-      <Route path="/terms" element={<Navigate to="/docs" replace />} />
-      <Route path="/refund" element={<Navigate to="/docs" replace />} />
-      <Route path="/privacy" element={<Navigate to="/docs" replace />} />
-      <Route path="/docs" element={<DocsRoutePage />} />
+      <Route path="/docs/*" element={<DocsRoutePage />} />
       <Route path="/settings" element={<SettingsRoutePage />} />
       <Route path="/settings/:configName" element={<SettingsRoutePage />} />
       <Route path="*" element={<Navigate to="/" replace />} />

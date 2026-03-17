@@ -2,12 +2,27 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from copy import deepcopy
 from pathlib import Path
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from ..connector_runtime import infer_connector_transport
-from ..shared import read_json, read_text, read_yaml, run_command, sha256_text, utc_now, which, write_text, write_yaml
+from ..home import repo_root
+from ..lingzhu_support import (
+    lingzhu_agent_id,
+    lingzhu_generated_curl,
+    lingzhu_generated_openclaw_config_text,
+    lingzhu_gateway_port,
+    lingzhu_health_url,
+    lingzhu_local_base_url,
+    lingzhu_probe_payload,
+    lingzhu_public_base_url,
+    lingzhu_sse_url,
+    lingzhu_supported_commands,
+)
+from ..shared import read_json, read_text, read_yaml, resolve_runner_binary, run_command, sha256_text, utc_now, which, write_text, write_yaml
 from .models import (
     CONFIG_NAMES,
     OPTIONAL_CONFIG_NAMES,
@@ -288,9 +303,21 @@ This page edits `~/DeepScientist/config/connectors.yaml` directly.
 - QQ only uses the built-in gateway direct path with `app_id` + `app_secret`
 - save credentials first, then ask the user to send one private QQ message to the bot
 - the daemon auto-detects that user's `openid` and saves it into `main_chat_id`
+- private QQ chats can then auto-follow the latest quest by default, unless disabled in settings
 - readiness test exchanges `access_token` and probes `/gateway`
 - active send targets use QQ user `openid` or group `group_openid`
 - the settings page also surfaces recently discovered targets from runtime activity
+- milestone delivery toggles default to enabled; adjust them only if you want less outbound push
+- the recommended first-run path is: save credentials -> send one QQ private message -> confirm `Detected OpenID` -> run a probe
+
+### Lingzhu
+
+- Lingzhu is configured as an OpenClaw companion endpoint, not as a full DeepScientist chat bridge
+- keep `transport: openclaw_sse`
+- set `gateway_port` to the OpenClaw HTTP gateway port, usually `18789`
+- generate and save `auth_ak`, then fill the same Bearer token into the Lingzhu platform
+- set `public_base_url` to a public IP or public domain before binding a real Rokid device
+- readiness test first probes `GET /metis/agent/api/health`, then runs a minimal SSE smoke request against `POST /metis/agent/api/sse`
 
 ## Safety
 
@@ -312,6 +339,7 @@ This page edits the main runtime file at `{home_text}/config/config.yaml`.
 - `logging.level`
 - `git.auto_checkpoint`
 - `cloud.enabled`
+- `bootstrap.codex_ready`
 
 ## Test behavior
 
@@ -323,6 +351,19 @@ The **Test** button checks:
 - whether the configured home path exists
 
 This is a safe local smoke test.
+
+## Codex startup gate
+
+- `bootstrap.codex_ready` starts as `false`
+- the launcher runs a real Codex hello probe before first daemon start
+- once Codex answers correctly, DeepScientist flips this flag to `true`
+- if the probe fails, DeepScientist writes the failure summary back into config and blocks startup
+
+## Figure and chart style policy
+
+- chart and paper-figure palettes are not configured in `config.yaml`
+- DeepScientist keeps a fixed Morandi palette guide in the system prompt and relevant stage skills
+- change visual defaults by editing the prompt / skill contract, not by adding per-install palette settings
 """
         if name == "runners":
             return f"""# Runner Config Guide
@@ -332,7 +373,12 @@ This page edits `{home_text}/config/runners.yaml`.
 ## Recommended v1 choice
 
 - keep `codex.enabled: true`
-- keep `claude.enabled: false` unless you are wiring the reserved TODO path
+- keep `claude.enabled: false`
+- `claude` remains TODO / reserved in the current open-source release and is not runnable yet
+- keep `codex.model_reasoning_effort: xhigh` unless you explicitly want a lighter default
+- keep `codex.retry_on_failure: true` so transient Codex failures can resume automatically
+- keep retry timing near `1s / 2x / 8s max` unless you have a strong reason to slow recovery down
+- DeepScientist hard-limits one turn to at most `5` total attempts, even if the config says more
 
 ## Test behavior
 
@@ -340,6 +386,8 @@ The **Test** button checks:
 
 - whether the configured runner binaries are on PATH
 - whether disabled runners are intentionally skipped
+- for Codex, it also runs a real hello probe so login and first-run setup problems surface before quest execution
+- it does not simulate the full failure/retry loop, so use quest runtime logs when debugging recovery behavior
 """
         if name == "plugins":
             return f"""# Plugin Config Guide
@@ -418,7 +466,7 @@ Use **Test** when the file exposes runtime dependencies.
         if name == "config":
             return self._test_core_config_payload(parsed)
         if name == "runners":
-            return self._test_runners_payload(parsed)
+            return self._test_runners_payload(parsed, live=live)
         return {
             "ok": True,
             "name": name,
@@ -431,6 +479,23 @@ Use **Test** when the file exposes runtime dependencies.
     def test_named_payload(self, name: str, payload: dict, *, live: bool = True, delivery_targets: dict | None = None) -> dict:
         rendered = self.render_named_payload(name, payload)
         return self.test_named_text(name, rendered, live=live, delivery_targets=delivery_targets)
+
+    def probe_codex_bootstrap(self, *, persist: bool = False, payload: dict | None = None) -> dict:
+        runners_payload = payload if isinstance(payload, dict) else self.load_named_normalized("runners")
+        codex_payload = runners_payload.get("codex") if isinstance(runners_payload.get("codex"), dict) else {}
+        result = self._probe_codex_runner(codex_payload)
+        if persist:
+            self._persist_codex_bootstrap_result(result)
+        return result
+
+    def codex_bootstrap_state(self) -> dict:
+        config = self.load_named_normalized("config")
+        bootstrap = config.get("bootstrap") if isinstance(config.get("bootstrap"), dict) else {}
+        return {
+            "codex_ready": bool(bootstrap.get("codex_ready", False)),
+            "codex_last_checked_at": bootstrap.get("codex_last_checked_at"),
+            "codex_last_result": bootstrap.get("codex_last_result") if isinstance(bootstrap.get("codex_last_result"), dict) else {},
+        }
 
     def git_readiness(self) -> dict:
         git_binary = which("git")
@@ -507,27 +572,42 @@ Use **Test** when the file exposes runtime dependencies.
             "items": items,
         }
 
-    def _test_runners_payload(self, payload: dict) -> dict:
+    def _test_runners_payload(self, payload: dict, *, live: bool) -> dict:
         items = []
         for name, config in payload.items():
             if not isinstance(config, dict):
                 continue
             enabled = bool(config.get("enabled", False))
             binary = str(config.get("binary") or name).strip()
-            exists = which(binary) is not None
+            resolved_binary = resolve_runner_binary(binary, runner_name=name)
+            exists = resolved_binary is not None
             warnings: list[str] = []
             if not enabled:
                 warnings.append("Runner is disabled and was skipped.")
             item_ok = (not enabled) or exists
-            items.append(
-                {
-                    "name": name,
-                    "ok": item_ok,
-                    "warnings": warnings,
-                    "errors": [] if item_ok else [f"Runner binary `{binary}` is not on PATH."],
-                    "details": {"binary": binary, "enabled": enabled},
-                }
-            )
+            item = {
+                "name": name,
+                "ok": item_ok,
+                "warnings": warnings,
+                "errors": [] if item_ok else [f"Runner binary `{binary}` is not available."],
+                "details": {
+                    "binary": binary,
+                    "resolved_binary": resolved_binary,
+                    "enabled": enabled,
+                    "live_probe_executed": False,
+                },
+            }
+            if enabled and name == "codex" and exists and live:
+                probe = self._probe_codex_runner(config)
+                item["ok"] = bool(probe.get("ok"))
+                item["warnings"] = [*warnings, *list(probe.get("warnings") or [])]
+                item["errors"] = list(probe.get("errors") or [])
+                details = item["details"] if isinstance(item.get("details"), dict) else {}
+                details.update(probe.get("details") or {})
+                details["summary"] = probe.get("summary")
+                details["live_probe_executed"] = True
+                item["details"] = details
+            items.append(item)
         return {
             "ok": all(item["ok"] for item in items),
             "name": "runners",
@@ -541,7 +621,7 @@ Use **Test** when the file exposes runtime dependencies.
         warnings: list[str] = []
         errors: list[str] = []
         routing = payload.get("_routing") if isinstance(payload.get("_routing"), dict) else {}
-        routing_policy = str(routing.get("artifact_delivery_policy") or "primary_plus_local").strip().lower()
+        routing_policy = str(routing.get("artifact_delivery_policy") or "fanout_all").strip().lower()
         preferred_connector = str(routing.get("primary_connector") or "").strip().lower()
         enabled_connectors: list[str] = []
 
@@ -650,6 +730,40 @@ Use **Test** when the file exposes runtime dependencies.
                         errors.append("whatsapp: `provider: meta` requires `phone_number_id`.")
                     if not self._has_secret(config, "verify_token", "verify_token_env"):
                         errors.append("whatsapp: `provider: meta` requires `verify_token` or `verify_token_env`.")
+            elif name == "lingzhu":
+                if transport != "openclaw_sse":
+                    errors.append("lingzhu: `transport` must stay `openclaw_sse`.")
+                if not str(config.get("local_host") or "").strip():
+                    warnings.append("lingzhu: `local_host` is empty; DeepScientist will fall back to `127.0.0.1`.")
+                if not self._has_secret(config, "auth_ak", "auth_ak_env"):
+                    errors.append("lingzhu: requires `auth_ak` for Bearer authentication.")
+                raw_gateway_port = str(config.get("gateway_port") or "").strip()
+                normalized_port = lingzhu_gateway_port(config)
+                if raw_gateway_port and str(normalized_port) != raw_gateway_port:
+                    errors.append("lingzhu: `gateway_port` must be a valid TCP port between 1 and 65535.")
+                raw_public_base_url = str(config.get("public_base_url") or "").strip()
+                public_base_url = lingzhu_public_base_url(config)
+                if raw_public_base_url and public_base_url is None:
+                    errors.append("lingzhu: `public_base_url` must be a valid `http://` or `https://` URL when set.")
+                raw_visible_progress_heartbeat_sec = str(
+                    config.get("visible_progress_heartbeat_sec") or ""
+                ).strip()
+                if raw_visible_progress_heartbeat_sec:
+                    try:
+                        visible_progress_heartbeat_sec = int(raw_visible_progress_heartbeat_sec)
+                    except ValueError:
+                        errors.append(
+                            "lingzhu: `visible_progress_heartbeat_sec` must be an integer between 5 and 120."
+                        )
+                    else:
+                        if visible_progress_heartbeat_sec < 5 or visible_progress_heartbeat_sec > 120:
+                            errors.append(
+                                "lingzhu: `visible_progress_heartbeat_sec` must be an integer between 5 and 120."
+                            )
+                if not raw_public_base_url:
+                    warnings.append(
+                        "lingzhu: set `public_base_url` to a public IP or public domain before filling values into the Lingzhu platform."
+                    )
 
         if preferred_connector and preferred_connector not in enabled_connectors:
             warnings.append(
@@ -814,12 +928,27 @@ Use **Test** when the file exposes runtime dependencies.
                             errors.append(str(gateway_payload.get("message") or "QQ gateway probe failed."))
                         else:
                             details["gateway_url"] = gateway_url
+            elif name == "lingzhu":
+                details.update(self._lingzhu_snapshot_details(config))
+                auth_ak = self._secret(config, "auth_ak", "auth_ak_env")
+                if not auth_ak:
+                    errors.append("Lingzhu requires `auth_ak` before it can accept Bearer-authenticated requests.")
+                elif live:
+                    health_probe = self._probe_lingzhu_health(config)
+                    details["health_probe"] = health_probe
+                    if not health_probe.get("ok", False):
+                        errors.append(str(health_probe.get("message") or "Lingzhu health probe failed."))
+                    else:
+                        sse_probe = self._probe_lingzhu_sse(config)
+                        details["sse_probe"] = sse_probe
+                        if not sse_probe.get("ok", False):
+                            errors.append(str(sse_probe.get("message") or "Lingzhu SSE probe failed."))
             else:
                 warnings.append(f"No dedicated system test exists for connector `{name}`.")
         except Exception as exc:  # pragma: no cover - network-dependent
             errors.append(str(exc))
 
-        if delivery_target:
+        if delivery_target and name != "lingzhu":
             delivery_message = str(delivery_target.get("text") or "").strip()
             chat_type = str(delivery_target.get("chat_type") or "direct").strip().lower()
             chat_id = str(delivery_target.get("chat_id") or "").strip()
@@ -841,7 +970,9 @@ Use **Test** when the file exposes runtime dependencies.
                 warnings.append("Delivery test chat_type must be `direct` or `group`.")
             elif not chat_id:
                 if name == "qq":
-                    warnings.append("Delivery test target is empty. For QQ direct sends, use a user `openid` or group `group_openid`.")
+                    warnings.append(
+                        "QQ readiness is healthy, but no OpenID has been learned yet. Save credentials, then send one private QQ message so DeepScientist can auto-detect and save the `openid`."
+                    )
                 else:
                     warnings.append("Delivery test is configured, but the target chat id is empty.")
             elif errors:
@@ -900,10 +1031,290 @@ Use **Test** when the file exposes runtime dependencies.
             "If you received it, the connector binding and outbound delivery path are working."
         )
 
+    def _probe_codex_runner(self, config: dict) -> dict:
+        checked_at = utc_now()
+        binary = str(config.get("binary") or "codex").strip() or "codex"
+        resolved_binary = resolve_runner_binary(binary, runner_name="codex")
+        details: dict[str, object] = {
+            "binary": binary,
+            "resolved_binary": resolved_binary,
+            "config_dir": str(config.get("config_dir") or "~/.codex"),
+            "model": str(config.get("model") or "gpt-5.4"),
+            "approval_policy": str(config.get("approval_policy") or "on-request"),
+            "sandbox_mode": str(config.get("sandbox_mode") or "workspace-write"),
+            "reasoning_effort": str(config.get("model_reasoning_effort") or "xhigh"),
+            "checked_at": checked_at,
+        }
+        if not resolved_binary:
+            return {
+                "ok": False,
+                "summary": "Codex probe failed before execution.",
+                "warnings": [],
+                "errors": [
+                    "Codex binary is not installed or could not be resolved.",
+                    "Install `@openai/codex` and ensure the `codex` CLI is available to DeepScientist.",
+                ],
+                "details": details,
+                "guidance": [
+                    "Run `npm install -g @researai/deepscientist` again so the bundled Codex dependency is installed.",
+                    "If you use a custom Codex path, set `runners.codex.binary` to that absolute executable path.",
+                ],
+            }
+
+        command = [
+            resolved_binary,
+            "--search",
+            "exec",
+            "--json",
+            "--cd",
+            str(repo_root()),
+            "--skip-git-repo-check",
+            "--model",
+            str(config.get("model") or "gpt-5.4"),
+        ]
+        approval_policy = str(config.get("approval_policy") or "on-request").strip()
+        if approval_policy:
+            command.extend(["-c", f'approval_policy="{approval_policy}"'])
+        reasoning_effort = str(config.get("model_reasoning_effort") or "xhigh").strip()
+        if reasoning_effort:
+            command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        sandbox_mode = str(config.get("sandbox_mode") or "workspace-write").strip()
+        if sandbox_mode:
+            command.extend(["--sandbox", sandbox_mode])
+        command.append("-")
+
+        env = os.environ.copy()
+        config_dir = str(config.get("config_dir") or "~/.codex").strip()
+        if config_dir:
+            env["CODEX_HOME"] = str(Path(config_dir).expanduser())
+        prompt = "Reply with exactly HELLO."
+
+        try:
+            result = subprocess.run(
+                command,
+                input=prompt,
+                cwd=str(repo_root()),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=90,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            details.update(
+                {
+                    "exit_code": None,
+                    "stdout_excerpt": self._compact_probe_text(exc.stdout or ""),
+                    "stderr_excerpt": self._compact_probe_text(exc.stderr or ""),
+                    "probe_command": command,
+                }
+            )
+            return {
+                "ok": False,
+                "summary": "Codex startup probe timed out.",
+                "warnings": [],
+                "errors": [
+                    "Codex did not answer the startup hello probe within 90 seconds.",
+                    "Run `codex` manually, complete login, then retry DeepScientist.",
+                ],
+                "details": details,
+                "guidance": [
+                    "Run `codex` manually to finish interactive login or first-run setup.",
+                    "Confirm the configured model is available to your account.",
+                ],
+            }
+
+        stdout_text = (result.stdout or "").strip()
+        stderr_text = (result.stderr or "").strip()
+        hello_seen = "HELLO" in stdout_text.upper()
+        ok = result.returncode == 0 and hello_seen
+        details.update(
+            {
+                "exit_code": result.returncode,
+                "stdout_excerpt": self._compact_probe_text(stdout_text),
+                "stderr_excerpt": self._compact_probe_text(stderr_text),
+                "probe_command": command,
+            }
+        )
+        warnings: list[str] = []
+        errors: list[str] = []
+        if not ok:
+            errors.append("Codex did not complete the startup hello probe successfully.")
+            if result.returncode == 0 and not hello_seen:
+                errors.append("Codex responded, but the reply did not contain the expected `HELLO` marker.")
+            if stderr_text:
+                warnings.append("Codex returned stderr during the startup probe.")
+            errors.append("Run `codex` once and complete login before starting DeepScientist.")
+        return {
+            "ok": ok,
+            "summary": "Codex startup probe completed." if ok else "Codex startup probe failed.",
+            "warnings": warnings,
+            "errors": errors,
+            "details": details,
+            "guidance": [] if ok else [
+                "Run `codex` in a terminal and complete login or first-run setup.",
+                "Then start DeepScientist again.",
+            ],
+        }
+
+    def _persist_codex_bootstrap_result(self, result: dict) -> None:
+        config = self.load_named_normalized("config")
+        bootstrap = config.get("bootstrap") if isinstance(config.get("bootstrap"), dict) else {}
+        details = result.get("details") if isinstance(result.get("details"), dict) else {}
+        bootstrap["codex_ready"] = bool(result.get("ok"))
+        bootstrap["codex_last_checked_at"] = details.get("checked_at") or utc_now()
+        bootstrap["codex_last_result"] = {
+            "ok": bool(result.get("ok")),
+            "summary": result.get("summary"),
+            "warnings": list(result.get("warnings") or []),
+            "errors": list(result.get("errors") or []),
+            "guidance": list(result.get("guidance") or []),
+            "binary": details.get("binary"),
+            "resolved_binary": details.get("resolved_binary"),
+            "model": details.get("model"),
+            "approval_policy": details.get("approval_policy"),
+            "sandbox_mode": details.get("sandbox_mode"),
+            "reasoning_effort": details.get("reasoning_effort"),
+            "exit_code": details.get("exit_code"),
+            "stdout_excerpt": details.get("stdout_excerpt"),
+            "stderr_excerpt": details.get("stderr_excerpt"),
+        }
+        config["bootstrap"] = bootstrap
+        self.save_named_payload("config", config)
+
+    @staticmethod
+    def _compact_probe_text(value: str, *, limit: int = 1200) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def lingzhu_snapshot(self, config: dict | None = None) -> dict:
+        resolved = dict(config or self.load_named_normalized("connectors").get("lingzhu") or {})
+        snapshot: dict[str, object] = {
+            "name": "lingzhu",
+            "display_mode": "companion_config",
+            "mode": "openclaw_companion",
+            "transport": "openclaw_sse",
+            "enabled": bool(resolved.get("enabled", False)),
+            "relay_url": None,
+            "main_chat_id": None,
+            "last_conversation_id": None,
+            "inbox_count": 0,
+            "outbox_count": 0,
+            "ignored_count": 0,
+            "binding_count": 0,
+            "target_count": 0,
+            "recent_conversations": [],
+            "recent_events": [],
+            "discovered_targets": [],
+            "details": self._lingzhu_snapshot_details(resolved),
+        }
+        if not snapshot["enabled"]:
+            snapshot["connection_state"] = "disabled"
+            snapshot["auth_state"] = "disabled"
+            return snapshot
+        snapshot["auth_state"] = "ready" if self._secret(resolved, "auth_ak", "auth_ak_env") else "missing_auth_ak"
+        health_probe = self._probe_lingzhu_health(resolved, timeout=1.5)
+        snapshot["details"]["health_probe"] = health_probe
+        if health_probe.get("ok", False):
+            snapshot["connection_state"] = "reachable"
+        else:
+            snapshot["connection_state"] = "offline"
+            if health_probe.get("message"):
+                snapshot["last_error"] = health_probe.get("message")
+        return snapshot
+
+    def _lingzhu_snapshot_details(self, config: dict) -> dict:
+        auth_ak = self._secret(config, "auth_ak", "auth_ak_env")
+        return {
+            "local_base_url": lingzhu_local_base_url(config),
+            "health_url": lingzhu_health_url(config),
+            "endpoint_url": lingzhu_sse_url(config),
+            "public_base_url": lingzhu_public_base_url(config),
+            "public_health_url": lingzhu_health_url(config, public=True),
+            "public_endpoint_url": lingzhu_sse_url(config, public=True),
+            "gateway_port": lingzhu_gateway_port(config),
+            "agent_id": lingzhu_agent_id(config),
+            "auth_ak_masked": self._mask_secret(auth_ak),
+            "generated_curl": lingzhu_generated_curl({**config, "auth_ak": auth_ak}),
+            "generated_openclaw_config": lingzhu_generated_openclaw_config_text({**config, "auth_ak": auth_ak}),
+            "packaged_bridge_dir": "assets/connectors/lingzhu/openclaw-bridge",
+            "packaged_template_path": "assets/connectors/lingzhu/openclaw.lingzhu.config.template.json",
+            "supported_commands": lingzhu_supported_commands(
+                experimental_enabled=bool(config.get("enable_experimental_native_actions", False))
+            ),
+            "public_ip_required": True,
+        }
+
+    def _probe_lingzhu_health(self, config: dict, *, timeout: float = 5.0) -> dict:
+        url = lingzhu_health_url(config)
+        if not url:
+            return {"ok": False, "message": "Lingzhu health URL is empty."}
+        try:
+            request = Request(url, method="GET", headers={"Accept": "application/json"})
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310
+                payload = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+                status_code = response.status
+            return {
+                "ok": True,
+                "status_code": status_code,
+                "status": payload.get("status"),
+                "payload": payload,
+            }
+        except URLError as exc:
+            return {"ok": False, "message": str(exc.reason or exc)}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    def _probe_lingzhu_sse(self, config: dict, *, timeout: float = 8.0) -> dict:
+        url = lingzhu_sse_url(config)
+        auth_ak = self._secret(config, "auth_ak", "auth_ak_env")
+        if not url:
+            return {"ok": False, "message": "Lingzhu SSE URL is empty."}
+        if not auth_ak:
+            return {"ok": False, "message": "Lingzhu auth_ak is empty."}
+        request = Request(
+            url,
+            method="POST",
+            headers={
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {auth_ak}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=json.dumps(lingzhu_probe_payload(config), ensure_ascii=False).encode("utf-8"),
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310
+                preview = response.read(512).decode("utf-8", errors="replace")
+                content_type = str(response.headers.get("Content-Type") or "")
+            ok = "text/event-stream" in content_type or "event:" in preview or "data:" in preview
+            return {
+                "ok": ok,
+                "content_type": content_type,
+                "preview": self._compact_probe_text(preview, limit=512),
+                "message": None if ok else "Lingzhu SSE probe did not return an event-stream payload.",
+            }
+        except URLError as exc:
+            return {"ok": False, "message": str(exc.reason or exc)}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= 8:
+            return "*" * len(text)
+        return f"{text[:4]}{'*' * (len(text) - 8)}{text[-4:]}"
+
     def _normalize_named_payload(self, name: str, payload: dict) -> dict:
         if not isinstance(payload, dict):
             return default_payload(name, self.home)
         prepared = deepcopy(payload)
+        if name == "config":
+            prepared.pop("reports", None)
         if name == "plugins":
             prepared = self._normalize_plugins_payload(prepared)
         elif name == "mcp_servers":
@@ -927,6 +1338,8 @@ Use **Test** when the file exposes runtime dependencies.
                     for legacy_key in ("mode", "relay_url", "relay_auth_token", "public_callback_url", "webhook_verify_signature"):
                         sanitized_payload.pop(legacy_key, None)
                     sanitized_payload["transport"] = "gateway_direct"
+                elif connector_name == "lingzhu":
+                    sanitized_payload["transport"] = "openclaw_sse"
                 elif "transport" not in sanitized_payload:
                     inferred_transport = infer_connector_transport(connector_name, {**base, **sanitized_payload})
                     if inferred_transport:

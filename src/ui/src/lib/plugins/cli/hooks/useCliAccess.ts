@@ -2,11 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { checkProjectAccess } from '@/lib/api/projects'
-import { listCliShares } from '@/lib/api/cli'
-import { useAuthStore } from '@/lib/stores/auth'
-import { isShareViewForProject } from '@/lib/share-session'
 import type { CliEditGranularity, CliPermissionLevel } from '../types/permissions'
-import { mapProjectRoleToPermission, maxPermission, resolveCliCapabilities } from '../types/permissions'
+import { mapProjectRoleToPermission, resolveCliCapabilities } from '../types/permissions'
 
 export function useCliAccess(options: {
   projectId?: string | null
@@ -14,16 +11,10 @@ export function useCliAccess(options: {
   readOnly?: boolean
 }) {
   const { projectId, serverId, readOnly } = options
-  const userId = useAuthStore((state) => state.user?.id)
   const [permission, setPermission] = useState<CliPermissionLevel>('none')
   const [granularity, setGranularity] = useState<CliEditGranularity | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const isShareView = useMemo(
-    () => Boolean(projectId && isShareViewForProject(projectId)),
-    [projectId]
-  )
 
   useEffect(() => {
     if (!projectId || !serverId) {
@@ -32,7 +23,7 @@ export function useCliAccess(options: {
       return
     }
 
-    if (readOnly || isShareView) {
+    if (readOnly) {
       setPermission('view')
       setGranularity(null)
       return
@@ -47,25 +38,8 @@ export function useCliAccess(options: {
         const access = await checkProjectAccess(projectId)
         if (cancelled) return
         const rolePermission = mapProjectRoleToPermission(access?.role)
-
-        let sharePermission: CliPermissionLevel = 'none'
-        let shareGranularity: CliEditGranularity | null = null
-        if (userId) {
-          try {
-            const shares = await listCliShares(projectId, serverId)
-            const match = shares.users.find((entry) => entry.user_id === userId)
-            if (match) {
-              sharePermission = match.permission as CliPermissionLevel
-              shareGranularity = match.edit_granularity ?? null
-            }
-          } catch {
-            // Ignore share fetch errors; fall back to project role.
-          }
-        }
-
-        const effectivePermission = maxPermission(rolePermission, sharePermission)
-        setPermission(effectivePermission)
-        setGranularity(effectivePermission === 'edit' ? shareGranularity : null)
+        setPermission(rolePermission)
+        setGranularity(null)
       } catch (err) {
         if (cancelled) return
         setPermission('none')
@@ -80,7 +54,7 @@ export function useCliAccess(options: {
     return () => {
       cancelled = true
     }
-  }, [projectId, serverId, readOnly, isShareView, userId])
+  }, [projectId, readOnly, serverId])
 
   const capabilities = useMemo(() => resolveCliCapabilities(permission, granularity), [permission, granularity])
 
@@ -90,6 +64,5 @@ export function useCliAccess(options: {
     capabilities,
     isLoading,
     error,
-    isShareView,
   }
 }

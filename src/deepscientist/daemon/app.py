@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from ..artifact import ArtifactService
 from ..bash_exec import BashExecService
+from ..bash_exec.runtime import TerminalClient
 from ..bridges import get_connector_bridge, register_builtin_connector_bridges
+from ..bridges.connectors import QQConnectorBridge
 from ..channels import QQRelayChannel, get_channel_factory, list_channel_names, register_builtin_channels
 from ..channels.discord_gateway import DiscordGatewayService
 from ..channels.feishu_long_connection import FeishuLongConnectionService
@@ -24,19 +30,30 @@ from ..connector_runtime import conversation_identity_key, normalize_conversatio
 from ..config import ConfigManager
 from ..home import repo_root
 from ..memory import MemoryService
+from ..latex_runtime import QuestLatexService
 from ..prompts import PromptBuilder
 from ..prompts.builder import STANDARD_SKILLS
 from ..quest import QuestService
 from ..runners import CodexRunner, RunRequest, get_runner_factory, register_builtin_runners
 from ..runtime_logs import JsonlLogger
-from ..shared import append_jsonl, generate_id, read_json, read_jsonl, read_text, resolve_within, utc_now, which
+from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, read_text, resolve_within, run_command, slugify, utc_now, which, write_json
 from ..skills import SkillInstaller
 from ..team import SingleTeamService
 from .api import ApiHandlers, match_route
 from .sessions import SessionStore
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request as WebSocketRequest
+from websockets.http11 import Response
+from websockets.sync.server import Server as WebSocketServer
+from websockets.sync.server import ServerConnection, serve as websocket_serve
+
+TERMINAL_STREAM_IDLE_SLEEP_SECONDS = 0.02
 
 
 class DaemonApp:
+    _MAX_INBOUND_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
     def __init__(self, home: Path) -> None:
         self.home = home.resolve()
         self.daemon_id = str(os.environ.get("DS_DAEMON_ID") or "").strip() or generate_id("daemon")
@@ -47,6 +64,7 @@ class DaemonApp:
         self.connectors_config = self.config_manager.load_named("connectors")
         self.skill_installer = SkillInstaller(self.repo_root, home)
         self.quest_service = QuestService(home, skill_installer=self.skill_installer)
+        self.latex_service = QuestLatexService(self.quest_service)
         self.memory_service = MemoryService(home)
         self.artifact_service = ArtifactService(home)
         self.bash_exec_service = BashExecService(home)
@@ -84,6 +102,10 @@ class DaemonApp:
         self._turn_lock = threading.Lock()
         self._turn_state: dict[str, dict[str, object]] = {}
         self._server: ThreadingHTTPServer | None = None
+        self._terminal_attach_server: WebSocketServer | None = None
+        self._terminal_attach_thread: threading.Thread | None = None
+        self._terminal_attach_host: str | None = None
+        self._terminal_attach_port: int | None = None
         self._shutdown_requested = threading.Event()
         self._qq_gateway: QQGatewayService | None = None
         self._telegram_polling: TelegramPollingService | None = None
@@ -92,6 +114,196 @@ class DaemonApp:
         self._feishu_long_connection: FeishuLongConnectionService | None = None
         self._whatsapp_local_session: WhatsAppLocalSessionService | None = None
         self.handlers = ApiHandlers(self)
+
+    def list_connector_statuses(self) -> list[dict[str, object]]:
+        items = [channel.status() for channel in self.channels.values()]
+        lingzhu_config = self.connectors_config.get("lingzhu")
+        if isinstance(lingzhu_config, dict):
+            items.append(self.config_manager.lingzhu_snapshot(lingzhu_config))
+        return items
+
+    def _process_terminal_attach_request(
+        self,
+        connection: ServerConnection,
+        request: WebSocketRequest,
+    ) -> Response | None:
+        query = parse_qs(urlparse(request.path).query)
+        token = str((query.get("token") or [""])[0] or "").strip()
+        if not token:
+            return Response(
+                400,
+                "Bad Request",
+                Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                b"Missing terminal attach token.",
+            )
+        attach_token, runtime = self.bash_exec_service.resolve_terminal_attach_token(token)
+        if attach_token is None:
+            return Response(
+                404,
+                "Not Found",
+                Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                b"Terminal attach token is invalid or expired.",
+            )
+        if runtime is None:
+            return Response(
+                409,
+                "Conflict",
+                Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                b"Terminal runtime is no longer active.",
+            )
+        setattr(connection, "_ds_terminal_attach_token", token)
+        return None
+
+    def _handle_terminal_attach_connection(self, connection: ServerConnection) -> None:
+        token_value = str(getattr(connection, "_ds_terminal_attach_token", "") or "").strip()
+        attach_token, runtime = self.bash_exec_service.consume_terminal_attach_token(token_value)
+        if attach_token is None or runtime is None:
+            try:
+                connection.close(code=1011, reason="terminal_attach_unavailable")
+            except Exception:
+                pass
+            return
+
+        send_lock = threading.Lock()
+        client = TerminalClient(
+            client_id=generate_id("tclient"),
+            send_text=connection.send,
+            send_binary=connection.send,
+            close=connection.close,
+            send_lock=send_lock,
+        )
+        runtime.attach_client(client)
+        try:
+            session = self.bash_exec_service.get_session(attach_token.quest_root, attach_token.bash_id)
+            with send_lock:
+                connection.send(
+                    json.dumps(
+                        {
+                            "type": "ready",
+                            "bash_id": attach_token.bash_id,
+                            "status": session.get("status"),
+                            "cwd": session.get("cwd"),
+                            "workdir": session.get("workdir"),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                for chunk in runtime.snapshot_replay():
+                    if chunk:
+                        connection.send(chunk)
+            while True:
+                try:
+                    message = connection.recv()
+                except ConnectionClosed:
+                    break
+                if message is None:
+                    break
+                if isinstance(message, bytes):
+                    runtime.write_binary_input(message)
+                    continue
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                message_type = str(payload.get("type") or "").strip().lower()
+                if message_type == "input":
+                    self.bash_exec_service.append_terminal_input(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                        data=str(payload.get("data") or ""),
+                        source="web-pty",
+                    )
+                    continue
+                if message_type == "binary_input":
+                    raw = str(payload.get("data") or "")
+                    if raw:
+                        runtime.write_binary_input(base64.b64decode(raw))
+                    continue
+                if message_type == "resize":
+                    cols = int(payload.get("cols") or 0)
+                    rows = int(payload.get("rows") or 0)
+                    self.bash_exec_service.resize_terminal_session(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                        cols=cols,
+                        rows=rows,
+                    )
+                    continue
+                if message_type == "detach":
+                    break
+                if message_type == "ping":
+                    with send_lock:
+                        connection.send(json.dumps({"type": "pong"}, ensure_ascii=False))
+        except Exception as exc:
+            try:
+                with send_lock:
+                    connection.send(
+                        json.dumps(
+                            {"type": "error", "message": str(exc)},
+                            ensure_ascii=False,
+                        )
+                    )
+            except Exception:
+                pass
+        finally:
+            runtime.detach_client(client.client_id)
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def _start_terminal_attach_server(self, host: str, port: int) -> None:
+        if self._terminal_attach_server is not None:
+            return
+        candidates: list[int] = []
+        if port > 0 and port < 65535:
+            candidates.append(port + 1)
+        candidates.append(0)
+        last_error: Exception | None = None
+        for candidate in candidates:
+            try:
+                server = websocket_serve(
+                    self._handle_terminal_attach_connection,
+                    host=host,
+                    port=candidate,
+                    process_request=self._process_terminal_attach_request,
+                    compression=None,
+                    max_size=None,
+                    max_queue=None,
+                )
+                self._terminal_attach_server = server
+                self._terminal_attach_host = host
+                self._terminal_attach_port = int(server.socket.getsockname()[1])
+                thread = threading.Thread(
+                    target=server.serve_forever,
+                    daemon=True,
+                    name="deepscientist-terminal-attach",
+                )
+                thread.start()
+                self._terminal_attach_thread = thread
+                return
+            except OSError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+
+    def _stop_terminal_attach_server(self) -> None:
+        server = self._terminal_attach_server
+        thread = self._terminal_attach_thread
+        self._terminal_attach_server = None
+        self._terminal_attach_thread = None
+        self._terminal_attach_host = None
+        self._terminal_attach_port = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
 
     def get_runner(self, name: str):
         normalized = str(name or "").strip().lower()
@@ -141,6 +353,7 @@ class DaemonApp:
         *,
         text: str,
         source: str,
+        attachments: list[dict[str, object]] | None = None,
         reply_to_interaction_id: str | None = None,
         client_message_id: str | None = None,
     ) -> dict:
@@ -151,12 +364,13 @@ class DaemonApp:
             role="user",
             content=text,
             source=source,
+            attachments=[dict(item) for item in (attachments or []) if isinstance(item, dict)],
             reply_to_interaction_id=reply_to_interaction_id,
             client_message_id=client_message_id,
         )
         snapshot = self.quest_service.snapshot(quest_id)
         runtime_status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip()
-        auto_resumed = previous_status in {"stopped", "paused"} and runtime_status not in {"stopped", "paused"}
+        auto_resumed = previous_status in {"stopped", "paused", "completed"} and runtime_status not in {"stopped", "paused", "completed"}
         if auto_resumed:
             self._append_control_event(
                 quest_id,
@@ -195,6 +409,7 @@ class DaemonApp:
         source: str = "local",
         announce_connector_binding: bool = True,
         exclude_conversation_id: str | None = None,
+        preferred_connector_conversation_id: str | None = None,
         requested_baseline_ref: dict[str, object] | None = None,
         startup_contract: dict[str, object] | None = None,
     ) -> dict:
@@ -243,12 +458,48 @@ class DaemonApp:
                 raise RuntimeError(
                     f"Quest creation failed because the requested baseline `{baseline_id}` could not be attached and confirmed: {exc}"
                 ) from exc
-        self._auto_bind_connectors_to_latest_quest(
-            snapshot["quest_id"],
-            source=source,
-            announce=announce_connector_binding,
-            exclude_conversation_id=exclude_conversation_id,
-        )
+        preferred_binding = normalize_conversation_id(preferred_connector_conversation_id)
+        preferred_parsed = parse_conversation_id(preferred_binding)
+        if (
+            preferred_binding
+            and preferred_parsed
+            and str(preferred_parsed.get("connector") or "").strip().lower() in self.channels
+            and str(preferred_parsed.get("connector") or "").strip().lower() != "local"
+        ):
+            connector_name = str(preferred_parsed.get("connector") or "").strip().lower()
+            result = self.update_quest_binding(snapshot["quest_id"], preferred_binding, force=True)
+            if isinstance(result, tuple):
+                self.logger.log(
+                    "warning",
+                    "quest.preferred_connector_binding_failed",
+                    quest_id=snapshot.get("quest_id"),
+                    conversation_id=preferred_binding,
+                    status=result[0],
+                    message=str(result[1].get("message") or "Unable to bind preferred connector target."),
+                )
+            elif announce_connector_binding:
+                channel = self._channel_with_bindings(connector_name)
+                channel.send(
+                    {
+                        "conversation_id": preferred_binding,
+                        "quest_id": snapshot["quest_id"],
+                        "kind": "ack",
+                        "message": self._quest_created_connector_message(
+                            connector_name,
+                            quest_id=snapshot["quest_id"],
+                            goal=goal,
+                            previous_quest_id=str(result.get("previous_quest_id") or "").strip() or None,
+                        ),
+                    }
+                )
+        elif not preferred_binding:
+            self._auto_bind_connectors_to_latest_quest(
+                snapshot["quest_id"],
+                goal=goal,
+                source=source,
+                announce=announce_connector_binding,
+                exclude_conversation_id=exclude_conversation_id,
+            )
         return snapshot
 
     def schedule_turn(self, quest_id: str, *, reason: str = "user_message") -> dict:
@@ -300,6 +551,7 @@ class DaemonApp:
         previous_snapshot = self.quest_service.snapshot(quest_id)
         runner_name = self._runner_name_for(previous_snapshot)
         interrupted = False
+        stopped_bash_session_ids: list[str] = []
         cancelled_pending = {
             "batch_id": None,
             "cancelled_count": 0,
@@ -315,6 +567,12 @@ class DaemonApp:
             state = self._turn_state.setdefault(quest_id, {"running": False, "pending": False})
             state["pending"] = False
             state["stop_requested"] = True
+        stopped_bash_session_ids = self._stop_active_bash_exec_sessions(
+            quest_id,
+            run_id=str(previous_snapshot.get("active_run_id") or "").strip() or None,
+            reason=f"quest_{action}",
+            user_id=source,
+        )
         if action == "stop":
             cancel_reason = "cancelled_by_daemon_shutdown" if source == "local-admin" else "cancelled_by_stop"
             cancelled_pending = self.quest_service.cancel_pending_user_messages(
@@ -329,6 +587,8 @@ class DaemonApp:
         summary = f"Quest {quest_id} {verb}."
         if interrupted:
             summary = f"Quest {quest_id} {verb} and the active runner was interrupted."
+        if stopped_bash_session_ids:
+            summary = f"{summary} Stopped {len(stopped_bash_session_ids)} bash_exec session(s)."
         cancelled_count = int(cancelled_pending.get("cancelled_count") or 0)
         if cancelled_count > 0:
             summary = f"{summary} Cancelled {cancelled_count} queued user message(s)."
@@ -356,11 +616,50 @@ class DaemonApp:
             "action": action,
             "interrupted": interrupted,
             "cancelled_pending_user_message_count": cancelled_count,
+            "stopped_bash_session_ids": stopped_bash_session_ids,
             "snapshot": snapshot,
             "message": summary,
             "event": event,
             "notice": notice,
         }
+
+    def _stop_active_bash_exec_sessions(
+        self,
+        quest_id: str,
+        *,
+        run_id: str | None,
+        reason: str,
+        user_id: str,
+    ) -> list[str]:
+        quest_root = self.quest_service._quest_root(quest_id)
+        try:
+            sessions = self.bash_exec_service.list_sessions(quest_root, limit=500)
+        except Exception:
+            return []
+
+        stopped: list[str] = []
+        for session in sessions:
+            bash_id = str(session.get("bash_id") or "").strip()
+            if not bash_id:
+                continue
+            kind = str(session.get("kind") or "exec").strip().lower()
+            status = str(session.get("status") or "").strip().lower()
+            if kind == "terminal" or status in {"completed", "failed", "terminated"}:
+                continue
+            session_run_id = str(session.get("agent_instance_id") or session.get("task_id") or "").strip()
+            if run_id and session_run_id and session_run_id != run_id:
+                continue
+            try:
+                self.bash_exec_service.request_stop(
+                    quest_root,
+                    bash_id,
+                    reason=reason,
+                    user_id=user_id,
+                )
+            except Exception:
+                continue
+            stopped.append(bash_id)
+        return stopped
 
     def resume_quest(self, quest_id: str, *, source: str = "local") -> dict:
         previous_snapshot = self.quest_service.snapshot(quest_id)
@@ -527,8 +826,8 @@ class DaemonApp:
                     en="DeepScientist has moved from running to paused.",
                 ),
                 self._polite_copy(
-                    zh="当前 Git 分支与 worktree 已保留，发送新消息或使用 /resume 即可继续。",
-                    en="The current Git branch and worktree were kept intact. Send a new message or use /resume to continue.",
+                    zh="当前 Git 分支与 worktree 已保留。如需继续，请直接在当前聊天或 connector 中发送任意新指令，或使用 /resume；系统会沿用当前 quest 上下文继续。",
+                    en="The current Git branch and worktree were kept intact. To continue, send any new instruction in this chat or connector, or use /resume; the quest will resume from the current context.",
                 ),
             ]
         else:
@@ -538,8 +837,8 @@ class DaemonApp:
                     en="DeepScientist has moved from running to stopped.",
                 ),
                 self._polite_copy(
-                    zh="当前 Git 分支与 worktree 已保留，发送新消息或使用 /resume 即可继续。",
-                    en="The current Git branch and worktree were kept intact. Send a new message or use /resume to continue.",
+                    zh="当前 Git 分支与 worktree 已保留。如需继续，请直接在当前聊天或 connector 中发送任意新指令，或使用 /resume；系统会沿用当前 quest 上下文继续。",
+                    en="The current Git branch and worktree were kept intact. To continue, send any new instruction in this chat or connector, or use /resume; the quest will resume from the current context.",
                 ),
             ]
         if interrupted:
@@ -592,20 +891,29 @@ class DaemonApp:
     def _run_quest_turn(self, quest_id: str) -> None:
         with self._turn_lock:
             state = dict(self._turn_state.get(quest_id) or {})
+        turn_reason = str(state.get("reason") or "user_message").strip() or "user_message"
         if state.get("stop_requested"):
             return
         snapshot = self.quest_service.snapshot(quest_id)
-        if str(snapshot.get("status") or snapshot.get("runtime_status") or "").strip() in {"stopped", "paused"} and not snapshot.get("active_run_id"):
+        runtime_status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip()
+        if runtime_status in {"stopped", "paused", "completed", "error"} and not snapshot.get("active_run_id"):
             return
         latest_user_message = self._latest_user_message(quest_id)
-        if latest_user_message is None:
+        if turn_reason != "auto_continue" and latest_user_message is None:
             return
 
         runner_name = self._runner_name_for(snapshot)
         runner_cfg = self.runners_config.get(runner_name, {})
-        skill_id = self._turn_skill_for(snapshot, latest_user_message)
+        skill_id = self._turn_skill_for(snapshot, latest_user_message, turn_reason=turn_reason)
         run_id = generate_id("run")
         model = str(runner_cfg.get("model", "gpt-5.4"))
+        run_message = ""
+        claimed_message_id: str | None = None
+        if turn_reason != "auto_continue":
+            run_message = str((latest_user_message or {}).get("content") or "").strip()
+            claimed_message_id = str((latest_user_message or {}).get("id") or "").strip() or None
+            if not run_message:
+                return
 
         if runner_cfg.get("enabled") is False:
             self._record_turn_error(
@@ -643,76 +951,302 @@ class DaemonApp:
             )
             return
 
-        request = RunRequest(
-            quest_id=quest_id,
-            quest_root=Path(snapshot["quest_root"]),
-            worktree_root=Path(str(snapshot["current_workspace_root"])) if snapshot.get("current_workspace_root") else None,
-            run_id=run_id,
-            skill_id=skill_id,
-            message=str(latest_user_message.get("content") or "").strip(),
-            model=model,
-            approval_policy=str(runner_cfg.get("approval_policy", "on-request")),
-            sandbox_mode=str(runner_cfg.get("sandbox_mode", "workspace-write")),
+        raw_reasoning_effort = runner_cfg.get("model_reasoning_effort") if isinstance(runner_cfg, dict) else None
+        reasoning_effort = (
+            str(raw_reasoning_effort).strip()
+            if raw_reasoning_effort is not None and str(raw_reasoning_effort).strip()
+            else ("xhigh" if raw_reasoning_effort is None else None)
         )
-
         with self._turn_lock:
             if bool((self._turn_state.get(quest_id) or {}).get("stop_requested")):
                 return
-        self.quest_service.claim_pending_user_message_for_turn(
-            quest_id,
-            message_id=str(latest_user_message.get("id") or "").strip() or None,
-            run_id=run_id,
-        )
-        self.quest_service.mark_turn_started(quest_id, run_id=run_id, status="running")
-        try:
-            result = runner.run(request)
-        except Exception as exc:  # pragma: no cover - exercised via integration behavior
+        if claimed_message_id:
+            self.quest_service.claim_pending_user_message_for_turn(
+                quest_id,
+                message_id=claimed_message_id,
+                run_id=run_id,
+            )
+        retry_policy = self._runner_retry_policy(runner_cfg if isinstance(runner_cfg, dict) else {})
+        max_attempts = int(retry_policy.get("max_attempts") or 1)
+        turn_id = generate_id("turn")
+        retry_context: dict[str, Any] | None = None
+        quest_root = Path(snapshot["quest_root"])
+        worktree_root = Path(str(snapshot["current_workspace_root"])) if snapshot.get("current_workspace_root") else None
+
+        for attempt_index in range(1, max_attempts + 1):
+            current_run_id = run_id if attempt_index == 1 else generate_id("run")
+            if attempt_index > 1:
+                self._append_retry_event(
+                    quest_id,
+                    event_type="runner.turn_retry_started",
+                    runner_name=runner_name,
+                    run_id=current_run_id,
+                    turn_id=turn_id,
+                    skill_id=skill_id,
+                    model=model,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                    summary=f"Retry attempt {attempt_index}/{max_attempts} started.",
+                    previous_run_id=str((retry_context or {}).get("previous_run_id") or "") or None,
+                )
+
+            request = RunRequest(
+                quest_id=quest_id,
+                quest_root=quest_root,
+                worktree_root=worktree_root,
+                run_id=current_run_id,
+                skill_id=skill_id,
+                message=run_message,
+                model=model,
+                approval_policy=str(runner_cfg.get("approval_policy", "on-request")),
+                sandbox_mode=str(runner_cfg.get("sandbox_mode", "workspace-write")),
+                turn_reason=turn_reason,
+                reasoning_effort=reasoning_effort,
+                turn_id=turn_id,
+                attempt_index=attempt_index,
+                max_attempts=max_attempts,
+                retry_context=retry_context,
+            )
+            self.quest_service.mark_turn_started(quest_id, run_id=current_run_id, status="running")
+            if attempt_index > 1:
+                self.quest_service.update_runtime_state(
+                    quest_root=quest_root,
+                    display_status="retrying",
+                    retry_state={
+                        "turn_id": turn_id,
+                        "attempt_index": attempt_index,
+                        "max_attempts": max_attempts,
+                        "last_run_id": str((retry_context or {}).get("previous_run_id") or "") or None,
+                        "last_error": str((retry_context or {}).get("failure_summary") or "") or None,
+                        "next_retry_at": None,
+                    },
+                )
+
+            try:
+                result = runner.run(request)
+            except Exception as exc:  # pragma: no cover - exercised via integration behavior
+                if self._turn_stop_requested(quest_id):
+                    return
+                failure_summary = f"Runner `{runner_name}` failed on attempt {attempt_index}/{max_attempts}: {exc}"
+                retry_context = self._build_retry_context(
+                    quest_id=quest_id,
+                    failed_run_id=current_run_id,
+                    turn_id=turn_id,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                    failure_kind="exception",
+                    failure_summary=failure_summary,
+                    previous_exit_code=None,
+                    previous_output_text="",
+                    stderr_text=str(exc),
+                )
+                if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
+                    delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
+                    next_retry_at = utc_now() if delay_seconds <= 0 else None
+                    self.quest_service.update_runtime_state(
+                        quest_root=quest_root,
+                        status="running",
+                        display_status="retrying",
+                        active_run_id=None,
+                        retry_state={
+                            "turn_id": turn_id,
+                            "attempt_index": attempt_index,
+                            "max_attempts": max_attempts,
+                            "last_run_id": current_run_id,
+                            "last_error": failure_summary,
+                            "next_retry_at": next_retry_at,
+                        },
+                    )
+                    self._append_retry_event(
+                        quest_id,
+                        event_type="runner.turn_retry_scheduled",
+                        runner_name=runner_name,
+                        run_id=current_run_id,
+                        turn_id=turn_id,
+                        skill_id=skill_id,
+                        model=model,
+                        attempt_index=attempt_index,
+                        max_attempts=max_attempts,
+                        summary=f"Attempt {attempt_index}/{max_attempts} failed. Retrying in {delay_seconds:.1f}s.",
+                        failure_summary=failure_summary,
+                        backoff_seconds=delay_seconds,
+                        next_attempt_index=attempt_index + 1,
+                    )
+                    if self._wait_for_retry_delay(quest_id, delay_seconds):
+                        continue
+                    self._append_retry_event(
+                        quest_id,
+                        event_type="runner.turn_retry_aborted",
+                        runner_name=runner_name,
+                        run_id=current_run_id,
+                        turn_id=turn_id,
+                        skill_id=skill_id,
+                        model=model,
+                        attempt_index=attempt_index,
+                        max_attempts=max_attempts,
+                        summary="Retry sequence aborted because the quest was stopped or paused.",
+                        failure_summary=failure_summary,
+                    )
+                    return
+                exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
+                self._append_retry_event(
+                    quest_id,
+                    event_type="runner.turn_retry_exhausted",
+                    runner_name=runner_name,
+                    run_id=current_run_id,
+                    turn_id=turn_id,
+                    skill_id=skill_id,
+                    model=model,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                    summary=exhausted_summary,
+                    failure_summary=failure_summary,
+                )
+                self._record_turn_error(
+                    quest_id=quest_id,
+                    runner_name=runner_name,
+                    run_id=current_run_id,
+                    skill_id=skill_id,
+                    model=model,
+                    summary=exhausted_summary,
+                    retry_state=None,
+                )
+                return
+
+            if self._turn_stop_requested(quest_id):
+                return
+
+            if result.ok:
+                self.quest_service.update_runtime_state(quest_root=quest_root, retry_state=None)
+                if result.output_text:
+                    self.quest_service.append_message(
+                        quest_id,
+                        role="assistant",
+                        content=result.output_text,
+                        source=runner_name,
+                        run_id=result.run_id,
+                        skill_id=skill_id,
+                    )
+                    self._relay_quest_message_to_bound_connectors(
+                        quest_id,
+                        message=result.output_text,
+                        kind="assistant",
+                        response_phase="final",
+                        importance="normal",
+                        attachments=[
+                            {
+                                "kind": "runner_result",
+                                "run_id": result.run_id,
+                                "skill_id": skill_id,
+                                "runner": runner_name,
+                                "model": result.model,
+                                "exit_code": result.exit_code,
+                                "history_root": str(result.history_root),
+                                "run_root": str(result.run_root),
+                            }
+                        ],
+                    )
+                self._normalize_status_after_turn(quest_id)
+                return
+
+            failure_summary = f"Runner `{runner_name}` exited with code {result.exit_code} on attempt {attempt_index}/{max_attempts}."
+            stderr_excerpt = self._trim_text(result.stderr_text, limit=240)
+            if stderr_excerpt:
+                failure_summary = f"{failure_summary} stderr: {stderr_excerpt}"
+            retry_context = self._build_retry_context(
+                quest_id=quest_id,
+                failed_run_id=result.run_id,
+                turn_id=turn_id,
+                attempt_index=attempt_index,
+                max_attempts=max_attempts,
+                failure_kind="exit_code",
+                failure_summary=failure_summary,
+                previous_exit_code=result.exit_code,
+                previous_output_text=result.output_text,
+                stderr_text=result.stderr_text,
+            )
+            if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
+                delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
+                self.quest_service.update_runtime_state(
+                    quest_root=quest_root,
+                    status="running",
+                    display_status="retrying",
+                    active_run_id=None,
+                    retry_state={
+                        "turn_id": turn_id,
+                        "attempt_index": attempt_index,
+                        "max_attempts": max_attempts,
+                        "last_run_id": result.run_id,
+                        "last_error": failure_summary,
+                        "next_retry_at": None,
+                    },
+                )
+                self._append_retry_event(
+                    quest_id,
+                    event_type="runner.turn_retry_scheduled",
+                    runner_name=runner_name,
+                    run_id=result.run_id,
+                    turn_id=turn_id,
+                    skill_id=skill_id,
+                    model=model,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                    summary=f"Attempt {attempt_index}/{max_attempts} failed. Retrying in {delay_seconds:.1f}s.",
+                    failure_summary=failure_summary,
+                    backoff_seconds=delay_seconds,
+                    next_attempt_index=attempt_index + 1,
+                )
+                if self._wait_for_retry_delay(quest_id, delay_seconds):
+                    continue
+                self._append_retry_event(
+                    quest_id,
+                    event_type="runner.turn_retry_aborted",
+                    runner_name=runner_name,
+                    run_id=result.run_id,
+                    turn_id=turn_id,
+                    skill_id=skill_id,
+                    model=model,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                    summary="Retry sequence aborted because the quest was stopped or paused.",
+                    failure_summary=failure_summary,
+                )
+                return
+
+            exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
+            self._append_retry_event(
+                quest_id,
+                event_type="runner.turn_retry_exhausted",
+                runner_name=runner_name,
+                run_id=result.run_id,
+                turn_id=turn_id,
+                skill_id=skill_id,
+                model=model,
+                attempt_index=attempt_index,
+                max_attempts=max_attempts,
+                summary=exhausted_summary,
+                failure_summary=failure_summary,
+            )
             self._record_turn_error(
                 quest_id=quest_id,
                 runner_name=runner_name,
-                run_id=run_id,
-                skill_id=skill_id,
-                model=model,
-                summary=f"Runner `{runner_name}` failed: {exc}",
-            )
-            return
-
-        if result.output_text:
-            self.quest_service.append_message(
-                quest_id,
-                role="assistant",
-                content=result.output_text,
-                source=runner_name,
                 run_id=result.run_id,
                 skill_id=skill_id,
+                model=model,
+                summary=exhausted_summary,
+                retry_state=None,
             )
-            self._relay_quest_message_to_bound_connectors(
-                quest_id,
-                message=result.output_text,
-                kind="assistant",
-                response_phase="final",
-                importance="normal",
-                attachments=[
-                    {
-                        "kind": "runner_result",
-                        "run_id": result.run_id,
-                        "skill_id": skill_id,
-                        "runner": runner_name,
-                        "model": result.model,
-                        "exit_code": result.exit_code,
-                        "history_root": str(result.history_root),
-                        "run_root": str(result.run_root),
-                    }
-                ],
-            )
-        self._normalize_status_after_turn(quest_id)
+            return
 
     def _runner_name_for(self, snapshot: dict) -> str:
         configured = self.config_manager.load_named("config")
         return str(snapshot.get("runner") or configured.get("default_runner", "codex")).strip().lower()
 
     @staticmethod
-    def _turn_skill_for(snapshot: dict, latest_user_message: dict) -> str:
+    def _turn_skill_for(snapshot: dict, latest_user_message: dict | None, *, turn_reason: str = "user_message") -> str:
+        if str(turn_reason or "").strip() == "auto_continue" or latest_user_message is None:
+            active_anchor = str(snapshot.get("active_anchor") or "").strip()
+            return active_anchor if active_anchor in STANDARD_SKILLS else "decision"
         reply_target = str(latest_user_message.get("reply_to_interaction_id") or "").strip()
         if reply_target:
             for item in (snapshot.get("active_interactions") or []):
@@ -755,6 +1289,234 @@ class DaemonApp:
             return None if Path(candidate).expanduser().exists() else f"Runner `{runner_name}` binary was not found at `{candidate}`."
         return None if which(candidate) else f"Runner `{runner_name}` binary `{candidate}` is not on PATH."
 
+    @staticmethod
+    def _trim_text(value: object, *, limit: int = 320) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False)
+            except TypeError:
+                text = str(value)
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    @staticmethod
+    def _coerce_positive_int(value: object, default: int) -> int:
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return default
+        return resolved if resolved > 0 else default
+
+    @staticmethod
+    def _coerce_nonnegative_float(value: object, default: float) -> float:
+        try:
+            resolved = float(value)
+        except (TypeError, ValueError):
+            return default
+        return resolved if resolved >= 0 else default
+
+    def _runner_retry_policy(self, runner_cfg: dict[str, Any]) -> dict[str, Any]:
+        enabled = bool(runner_cfg.get("retry_on_failure", True))
+        max_attempts = min(5, self._coerce_positive_int(runner_cfg.get("retry_max_attempts", 5), 5))
+        initial_backoff = self._coerce_nonnegative_float(runner_cfg.get("retry_initial_backoff_sec", 1.0), 1.0)
+        multiplier = max(1.0, self._coerce_nonnegative_float(runner_cfg.get("retry_backoff_multiplier", 2.0), 2.0))
+        max_backoff = max(initial_backoff, self._coerce_nonnegative_float(runner_cfg.get("retry_max_backoff_sec", 8.0), 8.0))
+        return {
+            "enabled": enabled,
+            "max_attempts": max_attempts,
+            "initial_backoff_sec": initial_backoff,
+            "backoff_multiplier": multiplier,
+            "max_backoff_sec": max_backoff,
+        }
+
+    def _turn_stop_requested(self, quest_id: str) -> bool:
+        with self._turn_lock:
+            state = dict(self._turn_state.get(quest_id) or {})
+        if state.get("stop_requested"):
+            return True
+        snapshot = self.quest_service.snapshot(quest_id)
+        return str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip() in {"paused", "stopped"}
+
+    def _retry_delay_seconds(self, retry_policy: dict[str, Any], *, attempt_index: int) -> float:
+        if attempt_index <= 1:
+            return 0.0
+        initial_backoff = float(retry_policy.get("initial_backoff_sec") or 0.0)
+        multiplier = float(retry_policy.get("backoff_multiplier") or 2.0)
+        max_backoff = float(retry_policy.get("max_backoff_sec") or initial_backoff or 0.0)
+        delay = initial_backoff * pow(multiplier, max(0, attempt_index - 2))
+        return max(0.0, min(delay, max_backoff))
+
+    def _wait_for_retry_delay(self, quest_id: str, delay_seconds: float) -> bool:
+        if delay_seconds <= 0:
+            return not self._turn_stop_requested(quest_id)
+        deadline = time.monotonic() + delay_seconds
+        while time.monotonic() < deadline:
+            if self._turn_stop_requested(quest_id):
+                return False
+            time.sleep(min(0.1, max(0.01, deadline - time.monotonic())))
+        return not self._turn_stop_requested(quest_id)
+
+    def _append_retry_event(
+        self,
+        quest_id: str,
+        *,
+        event_type: str,
+        runner_name: str,
+        run_id: str,
+        turn_id: str,
+        skill_id: str,
+        model: str,
+        attempt_index: int,
+        max_attempts: int,
+        summary: str,
+        failure_summary: str | None = None,
+        backoff_seconds: float | None = None,
+        next_attempt_index: int | None = None,
+        previous_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "event_id": generate_id("evt"),
+            "type": event_type,
+            "quest_id": quest_id,
+            "turn_id": turn_id,
+            "run_id": run_id,
+            "source": runner_name,
+            "skill_id": skill_id,
+            "model": model,
+            "attempt_index": attempt_index,
+            "max_attempts": max_attempts,
+            "summary": summary,
+            "created_at": utc_now(),
+        }
+        if failure_summary:
+            payload["failure_summary"] = failure_summary
+        if backoff_seconds is not None:
+            payload["backoff_seconds"] = backoff_seconds
+        if next_attempt_index is not None:
+            payload["next_attempt_index"] = next_attempt_index
+        if previous_run_id:
+            payload["previous_run_id"] = previous_run_id
+        append_jsonl(self.home / "quests" / quest_id / ".ds" / "events.jsonl", payload)
+        self.logger.log(
+            "warning" if "scheduled" in event_type or "exhausted" in event_type else "info",
+            event_type,
+            quest_id=quest_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            attempt_index=attempt_index,
+            max_attempts=max_attempts,
+            failure_summary=failure_summary,
+            backoff_seconds=backoff_seconds,
+            next_attempt_index=next_attempt_index,
+            previous_run_id=previous_run_id,
+        )
+        return payload
+
+    def _build_retry_context(
+        self,
+        *,
+        quest_id: str,
+        failed_run_id: str,
+        turn_id: str,
+        attempt_index: int,
+        max_attempts: int,
+        failure_kind: str,
+        failure_summary: str,
+        previous_exit_code: int | None,
+        previous_output_text: str,
+        stderr_text: str,
+    ) -> dict[str, Any]:
+        snapshot = self.quest_service.snapshot(quest_id)
+        quest_root = Path(snapshot["quest_root"])
+        workspace_root = Path(str(snapshot.get("current_workspace_root") or snapshot.get("quest_root") or quest_root))
+        quest_events = read_jsonl(quest_root / ".ds" / "events.jsonl")
+        run_events = [event for event in quest_events if str(event.get("run_id") or "").strip() == failed_run_id][-120:]
+
+        recent_messages: list[str] = []
+        tool_progress: list[dict[str, str]] = []
+        seen_messages: set[str] = set()
+        for event in run_events:
+            event_type = str(event.get("type") or "").strip()
+            if event_type in {"runner.delta", "runner.agent_message", "runner.reasoning"}:
+                text = self._trim_text(event.get("text"), limit=280)
+                if text and text not in seen_messages:
+                    recent_messages.append(text)
+                    seen_messages.add(text)
+                continue
+            if event_type not in {"runner.tool_call", "runner.tool_result"}:
+                continue
+            tool_progress.append(
+                {
+                    "tool_name": str(event.get("tool_name") or "tool").strip() or "tool",
+                    "status": str(event.get("status") or "").strip(),
+                    "args": self._trim_text(event.get("args"), limit=220),
+                    "output": self._trim_text(event.get("output"), limit=220),
+                }
+            )
+
+        git_status_lines: list[str] = []
+        try:
+            git_status = run_command(["git", "status", "--short"], cwd=workspace_root, check=False)
+            git_status_lines = [
+                line.strip()
+                for line in str(git_status.stdout or git_status.stderr or "").splitlines()
+                if line.strip()
+            ][:12]
+        except Exception:
+            git_status_lines = []
+
+        bash_sessions = self.bash_exec_service.list_sessions(quest_root, limit=3)
+        bash_session_summaries = [
+            {
+                "bash_id": str(item.get("bash_id") or item.get("id") or "").strip(),
+                "status": str(item.get("status") or "").strip(),
+                "command": self._trim_text(item.get("command"), limit=180),
+            }
+            for item in bash_sessions[:3]
+        ]
+
+        recent_artifacts: list[str] = []
+        for item in (snapshot.get("recent_artifacts") or [])[-3:]:
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload") or {}
+            label = (
+                str((payload or {}).get("artifact_id") or "").strip()
+                or Path(str(item.get("path") or "artifact")).stem
+            )
+            summary = self._trim_text(
+                (payload or {}).get("summary") or (payload or {}).get("reason") or (payload or {}).get("guidance"),
+                limit=220,
+            )
+            recent_artifacts.append(
+                " -> ".join(part for part in (str(item.get("kind") or "artifact").strip(), label, summary) if part)
+            )
+
+        return {
+            "turn_id": turn_id,
+            "attempt_index": attempt_index,
+            "max_attempts": max_attempts,
+            "previous_run_id": failed_run_id,
+            "previous_exit_code": previous_exit_code,
+            "failure_kind": failure_kind,
+            "failure_summary": failure_summary,
+            "previous_output_text": self._trim_text(previous_output_text, limit=1800),
+            "stderr_tail": self._trim_text(stderr_text, limit=1800),
+            "recent_messages": recent_messages[-6:],
+            "tool_progress": tool_progress[-8:],
+            "workspace_summary": {
+                "branch": str(snapshot.get("branch") or "").strip(),
+                "git_status": git_status_lines,
+                "bash_sessions": bash_session_summaries,
+            },
+            "recent_artifacts": [item for item in recent_artifacts if item],
+        }
+
     def _record_turn_error(
         self,
         *,
@@ -764,9 +1526,12 @@ class DaemonApp:
         skill_id: str,
         model: str,
         summary: str,
+        display_status: str = "error",
+        retry_state: dict[str, Any] | None = None,
     ) -> None:
+        quest_root = self.home / "quests" / quest_id
         append_jsonl(
-            self.home / "quests" / quest_id / ".ds" / "events.jsonl",
+            quest_root / ".ds" / "events.jsonl",
             {
                 "event_id": generate_id("evt"),
                 "type": "runner.turn_error",
@@ -778,6 +1543,13 @@ class DaemonApp:
                 "summary": summary,
                 "created_at": utc_now(),
             },
+        )
+        self.quest_service.update_runtime_state(
+            quest_root=quest_root,
+            status="active",
+            display_status=display_status,
+            active_run_id=None,
+            retry_state=retry_state,
         )
         self.logger.log(
             "error",
@@ -805,7 +1577,6 @@ class DaemonApp:
                 }
             ],
         )
-        self._normalize_status_after_turn(quest_id)
 
     def _normalize_status_after_turn(self, quest_id: str) -> None:
         with self._turn_lock:
@@ -816,16 +1587,20 @@ class DaemonApp:
         normalized_status = "active" if current_status == "running" else current_status
         snapshot = self.quest_service.mark_turn_finished(quest_id, status=normalized_status)
         status = str(snapshot.get("status") or "")
-        if status in {"stopped", "paused"}:
+        if status in {"stopped", "paused", "completed", "error"}:
             return
         if status == "waiting_for_user":
             if snapshot.get("waiting_interaction_id"):
                 return
             if int(snapshot.get("pending_user_message_count") or 0) > 0:
                 self.schedule_turn(quest_id, reason="queued_user_messages")
+            else:
+                self.schedule_turn(quest_id, reason="auto_continue")
             return
         if int(snapshot.get("pending_user_message_count") or 0) > 0:
             self.schedule_turn(quest_id, reason="queued_user_messages")
+            return
+        self.schedule_turn(quest_id, reason="auto_continue")
 
     def _relay_quest_message_to_bound_connectors(
         self,
@@ -882,6 +1657,8 @@ class DaemonApp:
                 interrupted_quests.append(quest_id)
         self._shutdown_requested.set()
         self._stop_background_connectors()
+        self._stop_terminal_attach_server()
+        self.bash_exec_service.shutdown()
         self.logger.log(
             "info",
             "daemon.shutdown_requested",
@@ -1010,12 +1787,23 @@ class DaemonApp:
             other_id = str(item.get("quest_id") or "").strip()
             if other_id and other_id != quest_id:
                 self.quest_service.unbind_source(other_id, normalized)
+                self.sessions.unbind(other_id, normalized)
 
-        removed = self._unbind_external_bindings(quest_id, preserve={normalized})
         channel.bind_conversation(normalized, quest_id)
         self.sessions.bind(quest_id, normalized)
-        self.quest_service.set_binding_sources(quest_id, ["local:default", normalized])
+        self.quest_service.bind_source(quest_id, "local:default")
+        self.quest_service.bind_source(quest_id, normalized)
+        removed = self._unbind_external_bindings(quest_id, preserve={normalized})
         snapshot = self.quest_service.snapshot(quest_id)
+        previous_quest_id = str(existing_bound or "").strip() or None
+        if previous_quest_id == quest_id:
+            previous_quest_id = None
+        if previous_quest_id is None:
+            for item in deduped_conflicts:
+                candidate = str(item.get("quest_id") or "").strip()
+                if candidate and candidate != quest_id:
+                    previous_quest_id = candidate
+                    break
         return {
             "ok": True,
             "quest_id": quest_id,
@@ -1023,6 +1811,7 @@ class DaemonApp:
             "snapshot": snapshot,
             "removed_conversations": removed,
             "conflicts_resolved": [item.get("quest_id") for item in deduped_conflicts if item.get("quest_id")],
+            "previous_quest_id": previous_quest_id,
         }
 
     def delete_quest(self, quest_id: str, *, source: str = "web") -> dict | tuple[int, dict]:
@@ -1198,13 +1987,20 @@ class DaemonApp:
                             ),
                         }
                     )
+                previous_quest_id = quest_id
+                goal_text = " ".join(args).strip()
                 created = self.create_quest(
-                    goal=" ".join(args).strip(),
+                    goal=goal_text,
                     source=f"{connector_name}:connector",
                     announce_connector_binding=True,
                     exclude_conversation_id=conversation_id,
                 )
                 self.update_quest_binding(created["quest_id"], conversation_id, force=True)
+                self.submit_user_message(
+                    created["quest_id"],
+                    text=goal_text,
+                    source=conversation_id,
+                )
                 return channel.send(
                     {
                         "conversation_id": conversation_id,
@@ -1212,9 +2008,11 @@ class DaemonApp:
                         "kind": "ack",
                         "message": self._with_qq_main_chat_notice(
                             message,
-                            self._polite_copy(
-                                zh=f"老师，已创建新的 quest `{created['quest_id']}`，当前 {connector_label} 会话已自动绑定到这个最新 quest。",
-                                en=f"Created a new quest `{created['quest_id']}`. This {connector_label} conversation is now bound to the latest quest.",
+                            self._quest_created_connector_message(
+                                connector_name,
+                                quest_id=created["quest_id"],
+                                goal=goal_text,
+                                previous_quest_id=previous_quest_id,
                             ),
                         ),
                     }
@@ -1333,6 +2131,54 @@ class DaemonApp:
                             en=f"Deleted quest `{target_quest}`.\n{follow_hint}",
                         ),
                     }
+                )
+
+            if quest_id is None and command_name and command_name not in {"help", "projects", "quests", "list", "new", "use", "delete"}:
+                auto_bound = self._maybe_auto_bind_connector_conversation(connector_name, conversation_id)
+                if auto_bound is not None:
+                    quest_id = str(auto_bound.get("quest_id") or "").strip() or None
+
+            if command_name in {"stop", "resume"}:
+                target_quest_id = quest_id
+                if args:
+                    target_quest_id = self._resolve_quest_reference(args[0])
+                if not self._quest_exists(target_quest_id):
+                    if args:
+                        requested = str(args[0] or "").strip() or "<quest_id>"
+                        available = ", ".join(item["quest_id"] for item in self.quest_service.list_quests()[:6]) or "none"
+                        return channel.send(
+                            {
+                                "conversation_id": conversation_id,
+                                "kind": "ack",
+                                "message": self._polite_copy(
+                                    zh=f"老师，目前没有找到 quest `{requested}`。可用 quest 包括：{available}。",
+                                    en=f"I could not find quest `{requested}`. Available quests: {available}.",
+                                ),
+                            }
+                        )
+                    return channel.send(
+                        {
+                            "conversation_id": conversation_id,
+                            "kind": "ack",
+                            "message": self._connector_home_help(connector_name, message=message),
+                        }
+                    )
+                target_quest_id = str(target_quest_id or "").strip()
+                bound_quest_id = str(channel.resolve_bound_quest(conversation_id) or "").strip() or None
+                self.sessions.bind(target_quest_id, conversation_id)
+                self.quest_service.bind_source(target_quest_id, conversation_id)
+                result = self.control_quest(
+                    target_quest_id,
+                    action=command_name,
+                    source=f"{connector_name}:connector",
+                )
+                return self._connector_control_reply(
+                    connector_name,
+                    conversation_id=conversation_id,
+                    quest_id=target_quest_id,
+                    action=command_name,
+                    result=result,
+                    deliver_directly=bound_quest_id != target_quest_id,
                 )
 
             if quest_id is None:
@@ -1516,6 +2362,11 @@ class DaemonApp:
                 )
 
         if quest_id is None:
+            auto_bound = self._maybe_auto_bind_connector_conversation(connector_name, conversation_id)
+            if auto_bound is not None:
+                quest_id = str(auto_bound.get("quest_id") or "").strip() or None
+
+        if quest_id is None:
             return channel.send(
                 {
                     "conversation_id": conversation_id,
@@ -1525,10 +2376,21 @@ class DaemonApp:
             )
 
         self.sessions.bind(quest_id, conversation_id)
+        materialized_attachments = self._materialize_connector_attachments(
+            quest_id=quest_id,
+            connector_name=connector_name,
+            conversation_id=conversation_id,
+            message_id=str(message.get("message_id") or "").strip() or None,
+            attachments=[dict(item) for item in (message.get("attachments") or []) if isinstance(item, dict)],
+        )
         self.submit_user_message(
             quest_id,
-            text=text,
+            text=self._connector_message_text_with_attachment_notice(
+                original_text=text,
+                attachments=materialized_attachments,
+            ),
             source=conversation_id,
+            attachments=materialized_attachments,
         )
         return channel.send(
             {
@@ -1545,6 +2407,171 @@ class DaemonApp:
             }
         )
 
+    def _connector_message_text_with_attachment_notice(
+        self,
+        *,
+        original_text: str,
+        attachments: list[dict[str, object]],
+    ) -> str:
+        base = str(original_text or "").strip()
+        if not attachments:
+            return base
+        lines: list[str] = []
+        if base:
+            lines.extend([base, ""])
+        lines.append(
+            self._polite_copy(
+                zh="系统提示：用户刚刚发送了附件。请优先阅读这些 quest 本地文件，再继续处理这条请求：",
+                en="System note: the user just sent attachments. Read these quest-local files first before continuing this request:",
+            )
+        )
+        for index, item in enumerate(attachments, start=1):
+            label = str(
+                item.get("name")
+                or item.get("quest_relative_path")
+                or item.get("path")
+                or item.get("url")
+                or f"attachment-{index}"
+            ).strip()
+            content_type = str(item.get("content_type") or "").strip()
+            location = str(item.get("path") or item.get("url") or "unavailable").strip()
+            error = str(item.get("download_error") or "").strip()
+            suffix = f" ({content_type})" if content_type else ""
+            if error:
+                lines.append(f"- {label}{suffix}: {location} | download_error={error}")
+            else:
+                lines.append(f"- {label}{suffix}: {location}")
+        return "\n".join(lines).strip()
+
+    def _materialize_connector_attachments(
+        self,
+        *,
+        quest_id: str,
+        connector_name: str,
+        conversation_id: str,
+        message_id: str | None,
+        attachments: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        if not attachments:
+            return []
+        quest_root = self.home / "quests" / quest_id
+        batch_slug = slugify(message_id or generate_id("userfile"), default=generate_id("userfile"))
+        batch_root = ensure_dir(quest_root / "userfiles" / connector_name / batch_slug)
+        materialized: list[dict[str, object]] = []
+        for index, raw_item in enumerate(attachments, start=1):
+            materialized.append(
+                self._materialize_single_connector_attachment(
+                    connector_name=connector_name,
+                    quest_root=quest_root,
+                    batch_root=batch_root,
+                    index=index,
+                    attachment=dict(raw_item),
+                )
+            )
+        write_json(
+            batch_root / "manifest.json",
+            {
+                "connector": connector_name,
+                "quest_id": quest_id,
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "materialized_at": utc_now(),
+                "attachments": materialized,
+            },
+        )
+        return materialized
+
+    def _materialize_single_connector_attachment(
+        self,
+        *,
+        connector_name: str,
+        quest_root: Path,
+        batch_root: Path,
+        index: int,
+        attachment: dict[str, object],
+    ) -> dict[str, object]:
+        resolved = dict(attachment)
+        name = str(resolved.get("name") or "").strip()
+        content_type = str(resolved.get("content_type") or "").strip()
+        url = str(resolved.get("url") or "").strip()
+        target_path = batch_root / self._connector_attachment_filename(index=index, name=name, content_type=content_type)
+        resolved["manifest_path"] = str(batch_root / "manifest.json")
+        resolved["batch_path"] = str(batch_root)
+        if not url:
+            resolved["materialized"] = False
+            resolved["download_error"] = "missing_download_url"
+            return resolved
+        try:
+            size_bytes = self._download_connector_attachment(
+                connector_name=connector_name,
+                url=url,
+                target_path=target_path,
+            )
+            resolved["path"] = str(target_path)
+            resolved["quest_relative_path"] = str(target_path.relative_to(quest_root))
+            resolved["size_bytes"] = int(size_bytes)
+            resolved["materialized"] = True
+            resolved["downloaded_at"] = utc_now()
+            return resolved
+        except Exception as exc:
+            if target_path.exists():
+                target_path.unlink(missing_ok=True)
+            resolved["materialized"] = False
+            resolved["download_error"] = str(exc)
+            return resolved
+
+    def _download_connector_attachment(
+        self,
+        *,
+        connector_name: str,
+        url: str,
+        target_path: Path,
+    ) -> int:
+        request = Request(url)
+        for key, value in self._connector_attachment_headers(connector_name).items():
+            request.add_header(key, value)
+        ensure_dir(target_path.parent)
+        total = 0
+        with urlopen(request, timeout=20) as response:  # noqa: S310
+            with target_path.open("wb") as handle:
+                while True:
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self._MAX_INBOUND_ATTACHMENT_BYTES:
+                        raise ValueError(
+                            f"attachment exceeds max inbound size limit ({self._MAX_INBOUND_ATTACHMENT_BYTES} bytes)"
+                        )
+                    handle.write(chunk)
+        return total
+
+    def _connector_attachment_headers(self, connector_name: str) -> dict[str, str]:
+        if str(connector_name or "").strip().lower() != "qq":
+            return {}
+        config = self.connectors_config.get("qq", {})
+        if not isinstance(config, dict):
+            return {}
+        app_id = str(config.get("app_id") or "").strip()
+        app_secret = QQConnectorBridge.read_secret(config, "app_secret", "app_secret_env")
+        if not app_id or not app_secret:
+            return {}
+        return {
+            "Authorization": f"QQBot {QQConnectorBridge._access_token(app_id, app_secret)}",
+        }
+
+    @staticmethod
+    def _connector_attachment_filename(*, index: int, name: str, content_type: str) -> str:
+        raw_name = str(name or "").strip()
+        suffix = Path(raw_name).suffix if raw_name else ""
+        if not suffix and content_type:
+            suffix = mimetypes.guess_extension(content_type, strict=False) or ""
+        if suffix and not suffix.startswith("."):
+            suffix = f".{suffix}"
+        stem_source = Path(raw_name).stem if raw_name else f"attachment-{index:03d}"
+        stem = slugify(stem_source, default=f"attachment-{index:03d}")
+        return f"{stem}{suffix or '.bin'}"
+
     def _qq_channel(self) -> QQRelayChannel:
         return self.channels["qq"]  # type: ignore[return-value]
 
@@ -1552,6 +2579,7 @@ class DaemonApp:
         self,
         quest_id: str,
         *,
+        goal: str,
         source: str,
         announce: bool,
         exclude_conversation_id: str | None = None,
@@ -1567,54 +2595,180 @@ class DaemonApp:
                 continue
             if not connector_config.get("auto_bind_dm_to_active_quest", False):
                 continue
-            conversation_id = self._latest_connector_conversation_id(connector_name)
-            if not conversation_id or conversation_id == exclude_conversation_id:
-                continue
-            candidates.append((connector_name, conversation_id))
+            for conversation_id in self._latest_connector_conversation_ids(connector_name):
+                if not conversation_id or conversation_id == exclude_conversation_id:
+                    continue
+                candidates.append((connector_name, conversation_id))
 
         if not candidates:
             return []
 
-        routing = self.connectors_config.get("_routing") if isinstance(self.connectors_config.get("_routing"), dict) else {}
-        preferred = str(routing.get("primary_connector") or "").strip().lower()
-        selected = None
-        if preferred:
-            selected = next((item for item in candidates if item[0].lower() == preferred), None)
-        if selected is None:
-            selected = candidates[0]
-
-        connector_name, conversation_id = selected
-        result = self.update_quest_binding(quest_id, conversation_id, force=True)
-        if isinstance(result, tuple):
-            return []
-        bound_conversation = str(result.get("conversation_id") or "").strip() or conversation_id
-        if announce:
-            channel = self._channel_with_bindings(connector_name)
-            channel.send(
-                {
-                    "conversation_id": bound_conversation,
-                    "quest_id": quest_id,
-                    "kind": "ack",
-                    "message": self._polite_copy(
-                        zh=f"老师，系统刚刚创建了新的 quest `{quest_id}`，当前 {self._connector_label(connector_name)} 会话已自动切换并绑定到这个最新 quest。",
-                        en=f"A new quest `{quest_id}` was created. This {self._connector_label(connector_name)} conversation has been automatically rebound to the latest quest.",
-                    ),
-                }
-            )
-        return [bound_conversation]
+        bound_conversations: list[str] = []
+        seen_identity_keys: set[str] = set()
+        for connector_name, conversation_id in candidates:
+            original_identity = conversation_identity_key(conversation_id)
+            if original_identity in seen_identity_keys:
+                continue
+            result = self.update_quest_binding(quest_id, conversation_id, force=True)
+            if isinstance(result, tuple):
+                continue
+            bound_conversation = str(result.get("conversation_id") or "").strip() or conversation_id
+            identity_key = conversation_identity_key(bound_conversation)
+            if identity_key in seen_identity_keys:
+                continue
+            seen_identity_keys.add(identity_key)
+            bound_conversations.append(bound_conversation)
+            if announce:
+                channel = self._channel_with_bindings(connector_name)
+                channel.send(
+                    {
+                        "conversation_id": bound_conversation,
+                        "quest_id": quest_id,
+                        "kind": "ack",
+                        "message": self._quest_created_connector_message(
+                            connector_name,
+                            quest_id=quest_id,
+                            goal=goal,
+                            previous_quest_id=str(result.get("previous_quest_id") or "").strip() or None,
+                        ),
+                    }
+                )
+        return bound_conversations
 
     def _latest_connector_conversation_id(self, connector_name: str) -> str:
+        candidates = self._latest_connector_conversation_ids(connector_name)
+        return candidates[0] if candidates else ""
+
+    def _latest_connector_conversation_ids(self, connector_name: str) -> list[str]:
+        conversation_ids: list[str] = []
         if connector_name == "qq":
             qq_config = self.connectors_config.get("qq", {})
             if isinstance(qq_config, dict):
                 main_chat_id = str(qq_config.get("main_chat_id") or "").strip()
                 if main_chat_id:
-                    return f"qq:direct:{main_chat_id}"
+                    conversation_ids.append(f"qq:direct:{main_chat_id}")
         state_path = self.home / "logs" / "connectors" / connector_name / "state.json"
         state = read_json(state_path, {})
-        if not isinstance(state, dict):
-            return ""
-        return str(state.get("last_conversation_id") or "").strip()
+        if isinstance(state, dict):
+            last_conversation_id = str(state.get("last_conversation_id") or "").strip()
+            if last_conversation_id:
+                conversation_ids.append(last_conversation_id)
+            for item in state.get("recent_conversations") or []:
+                if not isinstance(item, dict):
+                    continue
+                conversation_id = str(item.get("conversation_id") or "").strip()
+                if conversation_id:
+                    conversation_ids.append(conversation_id)
+        runtime_state = read_json(self.home / "logs" / "connectors" / connector_name / "runtime.json", {})
+        if isinstance(runtime_state, dict):
+            runtime_last_conversation_id = str(runtime_state.get("last_conversation_id") or "").strip()
+            if runtime_last_conversation_id:
+                conversation_ids.append(runtime_last_conversation_id)
+        try:
+            channel = self._channel_with_bindings(connector_name)
+            for item in channel.list_bindings():
+                conversation_id = str(item.get("conversation_id") or "").strip()
+                if conversation_id:
+                    conversation_ids.append(conversation_id)
+        except Exception:
+            pass
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for conversation_id in conversation_ids:
+            identity = conversation_identity_key(conversation_id)
+            if not conversation_id or identity in seen:
+                continue
+            seen.add(identity)
+            ordered.append(conversation_id)
+        return ordered
+
+    def _latest_quest_id(self) -> str | None:
+        quests = self.quest_service.list_quests()
+        if not quests:
+            return None
+        quest_id = str(quests[0].get("quest_id") or "").strip()
+        return quest_id or None
+
+    def _quest_exists(self, quest_id: str | None) -> bool:
+        normalized = str(quest_id or "").strip()
+        if not normalized:
+            return False
+        return (self.home / "quests" / normalized / "quest.yaml").exists()
+
+    def _resolve_quest_reference(self, value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        if normalized in {"latest", "newest"}:
+            return self._latest_quest_id()
+        return normalized
+
+    def _connector_control_reply(
+        self,
+        connector_name: str,
+        *,
+        conversation_id: str,
+        quest_id: str,
+        action: str,
+        result: dict[str, Any],
+        deliver_directly: bool,
+    ) -> dict:
+        channel = self._channel_with_bindings(connector_name)
+        snapshot = result.get("snapshot") or {}
+        event = result.get("event") or {}
+        payload = {
+            "conversation_id": conversation_id,
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": str((result.get("notice") or {}).get("message") or result.get("message") or "").strip(),
+            "response_phase": "control",
+            "importance": "warning" if action in {"pause", "stop"} else "info",
+            "attachments": [
+                {
+                    "kind": "quest_control",
+                    "action": action,
+                    "status": snapshot.get("status"),
+                    "source": event.get("source"),
+                    "branch": snapshot.get("branch"),
+                    "workspace_root": snapshot.get("current_workspace_root") or snapshot.get("quest_root"),
+                    "interrupted": bool(result.get("interrupted")),
+                    "cancelled_pending_user_message_count": int(
+                        result.get("cancelled_pending_user_message_count") or 0
+                    ),
+                    "stop_reason": snapshot.get("stop_reason"),
+                }
+            ],
+        }
+        if deliver_directly:
+            return channel.send(payload)
+        formatted = channel._format_outbound(payload) if hasattr(channel, "_format_outbound") else payload
+        return {
+            "ok": True,
+            "queued": False,
+            "channel": connector_name,
+            "payload": formatted,
+            "delivery": {
+                "ok": True,
+                "queued": False,
+                "transport": f"{connector_name}-control",
+            },
+        }
+
+    def _maybe_auto_bind_connector_conversation(self, connector_name: str, conversation_id: str) -> dict | None:
+        connector_config = self.connectors_config.get(connector_name, {})
+        if not isinstance(connector_config, dict):
+            return None
+        if not connector_config.get("enabled", False):
+            return None
+        if not connector_config.get("auto_bind_dm_to_active_quest", False):
+            return None
+        latest_quest_id = self._latest_quest_id()
+        if latest_quest_id is None:
+            return None
+        result = self.update_quest_binding(latest_quest_id, conversation_id, force=True)
+        if isinstance(result, tuple):
+            return None
+        return result
 
     def _connector_home_help(self, connector_name: str, *, message: dict) -> str:
         quests = self.quest_service.list_quests()
@@ -1628,8 +2782,10 @@ class DaemonApp:
                 "- `/use <quest_id>`：绑定指定 quest\n"
                 "- `/use latest`：直接绑定当前最新 quest\n"
                 "- `/new <goal>`：新建一个 quest 并自动绑定当前会话\n"
+                "- `/stop [quest_id|latest]`：停止当前或指定 quest\n"
+                "- `/resume [quest_id|latest]`：恢复当前或指定 quest\n"
                 "- `/delete <quest_id> --yes`：删除指定 quest（危险操作，需要确认）\n"
-                "如果直接输入普通文本，我会先返回这份帮助，而不会把文本投递给 agent。"
+                "如果当前已经存在最新 quest，除上述 home 命令外的普通文本或工作命令会自动绑定到最新 quest 并继续执行；如果当前还没有任何 quest，普通文本会先返回这份帮助。"
             ),
             en=(
                 "This connector conversation is not bound to any quest yet.\n"
@@ -1639,8 +2795,10 @@ class DaemonApp:
                 "- `/use <quest_id>`: bind a specific quest\n"
                 "- `/use latest`: bind the latest quest\n"
                 "- `/new <goal>`: create a new quest and bind this conversation\n"
+                "- `/stop [quest_id|latest]`: stop the current or selected quest\n"
+                "- `/resume [quest_id|latest]`: resume the current or selected quest\n"
                 "- `/delete <quest_id> --yes`: delete a quest (destructive; requires confirmation)\n"
-                "If you send plain text now, I will return this help message instead of forwarding the text to the agent."
+                "If a latest quest already exists, plain text or quest commands will auto-bind this conversation to it; if no quest exists yet, plain text will return this help instead of going to the agent."
             ),
         )
         return self._with_qq_main_chat_notice(message, body)
@@ -1665,6 +2823,7 @@ class DaemonApp:
                     continue
                 if channel.unbind_conversation(conversation_id, quest_id=quest_id):
                     removed.append(conversation_id)
+                    self.sessions.unbind(quest_id, conversation_id)
         for conversation_id in removed:
             self.quest_service.unbind_source(quest_id, conversation_id)
         return removed
@@ -1778,6 +2937,41 @@ class DaemonApp:
             en=f"I automatically detected and saved this QQ openid: `{chat_id}`. You can now see the binding in settings.",
         )
         return f"{notice}\n\n{base}"
+
+    def _quest_created_connector_message(
+        self,
+        connector_name: str,
+        *,
+        quest_id: str,
+        goal: str,
+        previous_quest_id: str | None = None,
+    ) -> str:
+        normalized_goal = str(goal or "").strip() or "（未提供具体任务）"
+        previous = str(previous_quest_id or "").strip()
+        restore_zh = (
+            f"\n如果需要恢复到原先绑定的 quest，请发送：`/use {previous}`。"
+            if previous and previous != quest_id
+            else ""
+        )
+        restore_en = (
+            f"\nIf you need to switch back to the previously bound quest, send: `/use {previous}`."
+            if previous and previous != quest_id
+            else ""
+        )
+        return self._polite_copy(
+            zh=(
+                f"老师，已顺利创建新的 quest `{quest_id}`。\n"
+                f"我即将为您完成以下任务：{normalized_goal}\n"
+                f"当前 {self._connector_label(connector_name)} 会话接下来会自动使用这个新 quest 保持连接。\n"
+            )
+            + restore_zh,
+            en=(
+                f"Created a new quest `{quest_id}` successfully.\n"
+                f"I am about to work on: {normalized_goal}\n"
+                f"This {self._connector_label(connector_name)} conversation will now stay attached to the new quest automatically.\n"
+            )
+            + restore_en,
+        )
 
     def _start_background_connectors(self) -> None:
         qq_config = self.connectors_config.get("qq", {})
@@ -1901,10 +3095,21 @@ class DaemonApp:
         return "\n".join(lines)
 
     def _format_summary(self, quest_id: str) -> str:
+        snapshot = self.quest_service.snapshot(quest_id)
+        title = str(snapshot.get("title") or "").strip()
+        status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip()
         summary = read_text(self.home / "quests" / quest_id / "SUMMARY.md").strip()
+        header_lines = [f"quest_id: {quest_id}"]
+        if title and title != quest_id:
+            header_lines.append(f"title: {title}")
+        if status:
+            header_lines.append(f"status: {status}")
         if not summary:
-            return f"No summary has been written yet for {quest_id}."
-        return summary[:1800]
+            header_lines.append("summary: No summary has been written yet.")
+            return "\n".join(header_lines)
+        header = "\n".join(header_lines)
+        remaining = max(0, 1800 - len(header) - 2)
+        return f"{header}\n\n{summary[:remaining]}"
 
     def _format_metrics(self, quest_id: str, *, run_id: str | None = None) -> str:
         quest_root = self.home / "quests" / quest_id
@@ -1966,6 +3171,62 @@ class DaemonApp:
         handler.wfile.write(b"\n")
         handler.wfile.flush()
 
+    @staticmethod
+    def _parse_bash_log_jsonl_line(raw_line: bytes) -> dict[str, Any] | None:
+        stripped = raw_line.strip()
+        if not stripped:
+            return None
+        try:
+            payload = json.loads(stripped.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    @classmethod
+    def _read_bash_log_delta(
+        cls,
+        log_path: Path,
+        *,
+        offset: int,
+        pending: bytes,
+        min_seq: int,
+    ) -> tuple[list[dict[str, Any]], int, bytes]:
+        if not log_path.exists():
+            return [], 0, pending
+
+        current_size = log_path.stat().st_size
+        safe_offset = max(0, min(offset, current_size))
+        with log_path.open("rb") as handle:
+            handle.seek(safe_offset)
+            chunk = handle.read()
+            next_offset = handle.tell()
+
+        if not chunk:
+            return [], next_offset, pending
+
+        payload = pending + chunk
+        lines = payload.split(b"\n")
+        remainder = b""
+        if payload and not payload.endswith(b"\n"):
+            remainder = lines.pop()
+
+        fresh_entries: list[dict[str, Any]] = []
+        for raw_line in lines:
+            entry = cls._parse_bash_log_jsonl_line(raw_line.rstrip(b"\r"))
+            if not entry:
+                continue
+            try:
+                seq = int(entry.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq <= min_seq:
+                continue
+            fresh_entries.append(entry)
+
+        return fresh_entries, next_offset, remainder
+
     def stream_quest_events(
         self,
         handler: BaseHTTPRequestHandler,
@@ -1982,6 +3243,7 @@ class DaemonApp:
         last_event_id = str((headers or {}).get("Last-Event-ID") or (headers or {}).get("last-event-id") or "").strip()
         current_cursor = max(after, int(last_event_id)) if last_event_id.isdigit() else after
         heartbeat_at = time.monotonic()
+        idle_sleep_seconds = 0.35
 
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -2013,13 +3275,15 @@ class DaemonApp:
                         data={"cursor": current_cursor, "quest_id": quest_id},
                     )
                     heartbeat_at = time.monotonic()
+                    idle_sleep_seconds = 0.2
                 else:
                     now = time.monotonic()
                     if now - heartbeat_at >= 10:
                         handler.wfile.write(b": keep-alive\n\n")
                         handler.wfile.flush()
                         heartbeat_at = now
-                time.sleep(0.35)
+                    idle_sleep_seconds = min(1.5, idle_sleep_seconds * 1.35)
+                time.sleep(idle_sleep_seconds)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
 
@@ -2142,75 +3406,36 @@ class DaemonApp:
         previous_status = None
         previous_exit_code = None
         cursor = last_event_id or 0
-        snapshot_sent = False
+        initialized = False
         heartbeat_at = time.monotonic()
+        log_path = self.bash_exec_service.log_path(quest_root, bash_id)
+        log_offset = 0
+        pending_bytes = b""
         try:
             while True:
                 session = self.bash_exec_service.get_session(quest_root, bash_id)
-                entries, meta = self.bash_exec_service.read_log_entries(
-                    quest_root,
-                    bash_id,
-                    limit=200,
-                    before_seq=None,
-                    order="asc",
-                )
-                latest_seq = int(meta.get("latest_seq") or 0)
-                if not snapshot_sent and last_event_id is None:
-                    self._write_sse_event(
-                        handler,
-                        event="snapshot",
-                        event_id=str(latest_seq) if latest_seq else None,
-                        data={
-                            "bash_id": bash_id,
-                            "tail_limit": meta.get("tail_limit"),
-                            "tail_start_seq": meta.get("tail_start_seq"),
-                            "latest_seq": meta.get("latest_seq"),
-                            "lines": [
-                                {
-                                    "seq": entry.get("seq"),
-                                    "stream": entry.get("stream"),
-                                    "line": entry.get("line"),
-                                    "timestamp": entry.get("timestamp"),
-                                }
-                                for entry in entries
-                            ],
-                            "progress": session.get("last_progress"),
-                        },
-                    )
-                    snapshot_sent = True
-                    cursor = latest_seq
-                    previous_progress = session.get("last_progress")
-                    previous_status = session.get("status")
-                    previous_exit_code = session.get("exit_code")
-                    heartbeat_at = time.monotonic()
-                    if str(session.get("status") or "") in {"completed", "failed", "terminated"}:
-                        self._write_sse_event(
-                            handler,
-                            event="done",
-                            data={
-                                "bash_id": bash_id,
-                                "status": session.get("status"),
-                                "exit_code": session.get("exit_code"),
-                                "finished_at": session.get("finished_at"),
-                            },
+                latest_status = str(session.get("status") or "")
+                latest_exit_code = session.get("exit_code")
+
+                if not initialized:
+                    if last_event_id is None:
+                        entries, meta = self.bash_exec_service.read_log_entries(
+                            quest_root,
+                            bash_id,
+                            limit=200,
+                            before_seq=None,
+                            order="asc",
                         )
-                        return
-                else:
-                    fresh_entries = [
-                        entry
-                        for entry in read_jsonl(self.bash_exec_service.log_path(quest_root, bash_id))
-                        if int(entry.get("seq") or 0) > cursor
-                    ]
-                    if fresh_entries:
-                        cursor = int(fresh_entries[-1].get("seq") or cursor)
+                        latest_seq = int(meta.get("latest_seq") or 0)
                         self._write_sse_event(
                             handler,
-                            event="log_batch",
-                            event_id=str(cursor),
+                            event="snapshot",
+                            event_id=str(latest_seq) if latest_seq else None,
                             data={
                                 "bash_id": bash_id,
-                                "from_seq": fresh_entries[0].get("seq"),
-                                "to_seq": fresh_entries[-1].get("seq"),
+                                "tail_limit": meta.get("tail_limit"),
+                                "tail_start_seq": meta.get("tail_start_seq"),
+                                "latest_seq": meta.get("latest_seq"),
                                 "lines": [
                                     {
                                         "seq": entry.get("seq"),
@@ -2218,11 +3443,91 @@ class DaemonApp:
                                         "line": entry.get("line"),
                                         "timestamp": entry.get("timestamp"),
                                     }
-                                    for entry in fresh_entries
+                                    for entry in entries
                                 ],
+                                "progress": session.get("last_progress"),
+                            },
+                        )
+                        cursor = latest_seq
+                        heartbeat_at = time.monotonic()
+
+                    fresh_entries, log_offset, pending_bytes = self._read_bash_log_delta(
+                        log_path,
+                        offset=0,
+                        pending=b"",
+                        min_seq=cursor,
+                    )
+                    for entry in fresh_entries:
+                        cursor = int(entry.get("seq") or cursor)
+                        self._write_sse_event(
+                            handler,
+                            event="log",
+                            event_id=str(cursor),
+                            data={
+                                "bash_id": bash_id,
+                                "seq": entry.get("seq"),
+                                "stream": entry.get("stream"),
+                                "line": entry.get("line"),
+                                "timestamp": entry.get("timestamp"),
                             },
                         )
                         heartbeat_at = time.monotonic()
+
+                    previous_progress = session.get("last_progress")
+                    previous_status = latest_status
+                    previous_exit_code = latest_exit_code
+                    initialized = True
+
+                    if latest_status in {"completed", "failed", "terminated"}:
+                        self._write_sse_event(
+                            handler,
+                            event="done",
+                            data={
+                                "bash_id": bash_id,
+                                "status": latest_status,
+                                "exit_code": latest_exit_code,
+                                "finished_at": session.get("finished_at"),
+                            },
+                        )
+                        return
+                else:
+                    if log_path.exists() and log_path.stat().st_size < log_offset:
+                        self._write_sse_event(
+                            handler,
+                            event="gap",
+                            data={
+                                "bash_id": bash_id,
+                                "from_seq": cursor or None,
+                                "to_seq": None,
+                                "tail_limit": 200,
+                            },
+                        )
+                        log_offset = 0
+                        pending_bytes = b""
+                        heartbeat_at = time.monotonic()
+
+                    fresh_entries, log_offset, pending_bytes = self._read_bash_log_delta(
+                        log_path,
+                        offset=log_offset,
+                        pending=pending_bytes,
+                        min_seq=cursor,
+                    )
+                    for entry in fresh_entries:
+                        cursor = int(entry.get("seq") or cursor)
+                        self._write_sse_event(
+                            handler,
+                            event="log",
+                            event_id=str(cursor),
+                            data={
+                                "bash_id": bash_id,
+                                "seq": entry.get("seq"),
+                                "stream": entry.get("stream"),
+                                "line": entry.get("line"),
+                                "timestamp": entry.get("timestamp"),
+                            },
+                        )
+                        heartbeat_at = time.monotonic()
+
                     if session.get("last_progress") != previous_progress and session.get("last_progress") is not None:
                         previous_progress = session.get("last_progress")
                         self._write_sse_event(
@@ -2234,29 +3539,33 @@ class DaemonApp:
                             },
                         )
                         heartbeat_at = time.monotonic()
-                    if (
-                        session.get("status") != previous_status
-                        or session.get("exit_code") != previous_exit_code
-                    ) and str(session.get("status") or "") in {"completed", "failed", "terminated"}:
-                        previous_status = session.get("status")
-                        previous_exit_code = session.get("exit_code")
+
+                    if latest_status in {"completed", "failed", "terminated"} and (
+                        latest_status != previous_status or latest_exit_code != previous_exit_code
+                    ):
+                        previous_status = latest_status
+                        previous_exit_code = latest_exit_code
                         self._write_sse_event(
                             handler,
                             event="done",
                             data={
                                 "bash_id": bash_id,
-                                "status": session.get("status"),
-                                "exit_code": session.get("exit_code"),
+                                "status": latest_status,
+                                "exit_code": latest_exit_code,
                                 "finished_at": session.get("finished_at"),
                             },
                         )
                         heartbeat_at = time.monotonic()
                         return
+
+                    previous_status = latest_status
+                    previous_exit_code = latest_exit_code
+
                     if time.monotonic() - heartbeat_at >= 10:
                         handler.wfile.write(b": keep-alive\n\n")
                         handler.wfile.flush()
                         heartbeat_at = time.monotonic()
-                time.sleep(0.35)
+                time.sleep(TERMINAL_STREAM_IDLE_SLEEP_SECONDS)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
 
@@ -2358,7 +3667,7 @@ class DaemonApp:
                             headers=dict(self.headers.items()),
                             body=body,
                         )
-                    elif route_name in {"document_open", "document_asset_upload", "chat", "command", "quest_control", "config_save", "quest_create", "quest_baseline_binding", "run_create", "qq_inbound", "connector_inbound", "docs_open", "admin_shutdown", "bash_stop", "quest_settings", "quest_bindings", "quest_delete", "terminal_session_ensure", "terminal_input"}:
+                    elif route_name in {"document_open", "document_asset_upload", "chat", "command", "quest_control", "config_save", "quest_create", "quest_baseline_binding", "run_create", "qq_inbound", "connector_inbound", "docs_open", "admin_shutdown", "bash_stop", "quest_settings", "quest_bindings", "quest_delete", "terminal_session_ensure", "terminal_attach", "terminal_input", "stage_view", "latex_init", "latex_compile"}:
                         payload = result(**params, body=body)
                     elif route_name == "config_validate":
                         payload = result(body)
@@ -2403,6 +3712,7 @@ class DaemonApp:
         server.daemon_threads = True
         self._server = server
         self._shutdown_requested.clear()
+        self._start_terminal_attach_server(host, port)
         self._start_background_connectors()
         print(f"DeepScientist daemon listening on http://{host}:{port}")
         try:
@@ -2411,5 +3721,7 @@ class DaemonApp:
             pass
         finally:
             self._stop_background_connectors()
+            self._stop_terminal_attach_server()
+            self.bash_exec_service.shutdown()
             self._server = None
             server.server_close()

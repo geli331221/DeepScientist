@@ -5,14 +5,7 @@ import { Noise } from '@/components/react-bits'
 import { WorkspaceLayout } from '@/components/workspace/WorkspaceLayout'
 import { Button } from '@/components/ui/button'
 import { getProject, type Project } from '@/lib/api/projects'
-import { useMaxEntitlement } from '@/lib/hooks/useMaxEntitlement'
 import { useI18n } from '@/lib/i18n/useI18n'
-import {
-  clearActiveShareProject,
-  getActiveShareProjectId,
-  getShareSessionMeta,
-  isShareViewForProject,
-} from '@/lib/share-session'
 
 function AtmosphereFrame({ children }: { children: ReactNode }) {
   return (
@@ -32,15 +25,12 @@ function AtmosphereFrame({ children }: { children: ReactNode }) {
 
 export function ProjectWorkspacePage() {
   const { projectId = '' } = useParams()
-  const maxEntitlement = useMaxEntitlement('projects.read')
   const { t } = useI18n('workspace')
   const { t: tCommon } = useI18n('common')
 
   const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [isSharedView, setIsSharedView] = useState(false)
-  const [sharedProjectName, setSharedProjectName] = useState<string | null>(null)
 
   useEffect(() => {
     document.body.classList.add('font-project')
@@ -53,24 +43,6 @@ export function ProjectWorkspacePage() {
       setLoading(false)
       return
     }
-
-    const active = getActiveShareProjectId()
-    if (active && active !== projectId) {
-      clearActiveShareProject()
-    }
-
-    const shareMeta = getShareSessionMeta()
-    const shared = isShareViewForProject(projectId)
-    if (shared) {
-      setIsSharedView(true)
-      setSharedProjectName(shareMeta?.projectName || t('page_shared_project'))
-      setProject(null)
-      setError(null)
-      setLoading(false)
-      return
-    }
-
-    setIsSharedView(false)
 
     let cancelled = false
 
@@ -114,28 +86,7 @@ export function ProjectWorkspacePage() {
     )
   }
 
-  const projectName = (isSharedView ? sharedProjectName : project?.name) || `Project ${projectId}`
-  const isLocalQuestProject =
-    !isSharedView && typeof project?.settings?.source === 'string' && project.settings.source === 'quest'
-
-  if (
-    !isSharedView &&
-    !isLocalQuestProject &&
-    !maxEntitlement.isEntitlementLoading &&
-    !maxEntitlement.isMaxEntitled
-  ) {
-    return (
-      <AtmosphereFrame>
-        <div className="flex h-screen items-center justify-center">
-          <div className="max-w-md space-y-4 p-8 text-center">
-            <div className="text-lg font-medium">{t('page_plan_access_required')}</div>
-            <p className="text-sm text-muted-foreground">{t('page_max_only_description')}</p>
-            <Button onClick={() => (window.location.href = '/projects')}>{t('page_back_to_projects')}</Button>
-          </div>
-        </div>
-      </AtmosphereFrame>
-    )
-  }
+  const projectName = project?.name || `Project ${projectId}`
 
   if (error) {
     return (
@@ -156,12 +107,10 @@ export function ProjectWorkspacePage() {
       projectId={projectId}
       projectName={projectName}
       projectSource={
-        !isSharedView && typeof project?.settings?.source === 'string'
+        typeof project?.settings?.source === 'string'
           ? project.settings.source
           : null
       }
-      readOnly={isSharedView}
-      isSharedView={isSharedView}
     />
   )
 }

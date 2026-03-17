@@ -3,12 +3,6 @@ import { getApiBaseUrl } from '@/lib/api/client'
 import { refreshAccessToken } from '@/lib/api/auth'
 import { listSessionSummaries, type SessionListItem } from '@/lib/api/sessions'
 import { redirectToLanding } from '@/lib/navigation'
-import {
-  clearShareSession,
-  getActiveShareProjectId,
-  getShareSessionMeta,
-  getShareSessionToken,
-} from '@/lib/share-session'
 
 export type SessionStreamStatus =
   | 'idle'
@@ -85,39 +79,15 @@ export function useSessionList(options: {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }
-    let authMode: 'share' | 'user' | 'none' = 'none'
+    let authMode: 'user' | 'none' = 'none'
 
     if (typeof window === 'undefined') return { headers, authMode }
 
     const userToken = window.localStorage.getItem('ds_access_token')
-    const shareToken = getShareSessionToken()
-    const shareMeta = getShareSessionMeta()
-    const activeShareProject = getActiveShareProjectId()
-    const preferShare = Boolean(
-      shareToken &&
-        shareMeta?.access === 'view' &&
-        shareMeta.projectId &&
-        activeShareProject &&
-        shareMeta.projectId === activeShareProject
-    )
-
-    if (preferShare && shareToken) {
-      headers.Authorization = `Bearer ${shareToken}`
-      headers['X-Share-Token'] = shareToken
-      authMode = 'share'
-      return { headers, authMode }
-    }
 
     if (userToken) {
       headers.Authorization = `Bearer ${userToken}`
       authMode = 'user'
-      return { headers, authMode }
-    }
-
-    if (shareToken) {
-      headers.Authorization = `Bearer ${shareToken}`
-      headers['X-Share-Token'] = shareToken
-      authMode = 'share'
     }
 
     return { headers, authMode }
@@ -126,21 +96,7 @@ export function useSessionList(options: {
   const handleUnauthorized = useCallback((headers: Record<string, string>) => {
     if (typeof window === 'undefined') return
     const userToken = window.localStorage.getItem('ds_access_token')
-    const shareToken = getShareSessionToken()
     const hasUserToken = Boolean(userToken)
-    const hasShareSession = Boolean(shareToken)
-    const authHeader = typeof headers.Authorization === 'string' ? headers.Authorization : null
-    const usedShareSession = Boolean(
-      authHeader && shareToken && authHeader === `Bearer ${shareToken}`
-    )
-
-    if (usedShareSession || (!hasUserToken && hasShareSession)) {
-      clearShareSession()
-      if (!window.location.pathname.startsWith('/share')) {
-        window.location.href = '/share-error?error=session_expired'
-      }
-      return
-    }
 
     if (hasUserToken) {
       window.localStorage.removeItem('ds_access_token')

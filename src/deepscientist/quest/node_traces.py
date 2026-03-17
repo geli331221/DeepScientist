@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..shared import ensure_dir, read_json, utc_now, write_json
+from ..shared import ensure_dir, read_json, sha256_text, utc_now, write_json
 
 
 def _format_state_label(value: str | None) -> str:
@@ -310,6 +310,24 @@ class QuestNodeTraceManager:
         workflow: dict[str, Any],
         snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        source_signature = sha256_text(
+            json.dumps(
+                {
+                    "entries": workflow.get("entries") or [],
+                    "branch": (snapshot or {}).get("branch"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        existing = read_json(self.materialized_path, {})
+        if (
+            isinstance(existing, dict)
+            and existing.get("quest_id") == quest_id
+            and existing.get("source_signature") == source_signature
+            and isinstance(existing.get("items"), list)
+        ):
+            return existing
         default_branch = str((snapshot or {}).get("branch") or "main").strip() or "main"
         run_contexts = _build_run_contexts(self.quest_root, default_branch=default_branch)
         entries = list(workflow.get("entries") or [])
@@ -401,6 +419,7 @@ class QuestNodeTraceManager:
         payload = {
             "quest_id": quest_id,
             "generated_at": utc_now(),
+            "source_signature": source_signature,
             "items": items,
         }
         write_json(self.materialized_path, payload)

@@ -18,7 +18,7 @@ export async function createNovelYjsProvider(options: NovelYjsProviderOptions): 
 }> {
   const { projectId, notebookId, readonly = false, onStatus, onReset } = options;
   const sync = new ProjectSyncClient(projectId, {
-    authMode: readonly ? "share" : "user",
+    authMode: "user",
     docKind: "notebook",
   });
 

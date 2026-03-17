@@ -36,11 +36,19 @@ function resolvePromptLabel(workdir?: string | null) {
   return normalized || '~'
 }
 
+function isActiveBashStatus(status?: string | null) {
+  const normalized = String(status || '')
+    .trim()
+    .toLowerCase()
+  return ['running', 'calling', 'pending', 'queued', 'starting', 'terminating'].includes(normalized)
+}
+
 export function BashToolView({
   toolContent,
   projectId,
   readOnly,
   panelMode,
+  chrome = 'default',
 }: ToolViewProps) {
   const { addToast } = useToast()
   const args = toolContent.args as Record<string, unknown>
@@ -81,6 +89,9 @@ export function BashToolView({
   const terminalReadyRef = useRef(false)
   const pendingOutputRef = useRef('')
   const isChatNearBottomRef = useRef(isChatNearBottom)
+  const hasSnapshotRef = useRef(false)
+  const initialLoadAttemptedRef = useRef(false)
+  const snapshotTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     lastSeqRef.current = lastSeq
@@ -157,6 +168,12 @@ export function BashToolView({
     setLastSeq(null)
     setLogMeta(null)
     setLogTruncated(false)
+    hasSnapshotRef.current = false
+    initialLoadAttemptedRef.current = false
+    if (snapshotTimerRef.current != null) {
+      window.clearTimeout(snapshotTimerRef.current)
+      snapshotTimerRef.current = null
+    }
   }, [appendToTerminal, command, resetTerminal, bashId, workdir])
 
   const handleLogLine = useCallback(
@@ -183,6 +200,7 @@ export function BashToolView({
 
   const loadInitialLogs = useCallback(async () => {
     if (!projectId || !bashId) return
+    initialLoadAttemptedRef.current = true
     setLoadingLogs(true)
     try {
       const { entries, meta } = await getBashLogs(projectId, bashId, { limit: 200, order: 'desc' })
@@ -245,17 +263,7 @@ export function BashToolView({
     workdir,
   ])
 
-  const streamEnabled = Boolean(
-    bashId &&
-      projectId &&
-      !loadingLogs &&
-      (sessionStatus === 'running' || toolContent.status === 'calling')
-  )
-  useEffect(() => {
-    if (!bashId || !projectId) return
-    if (streamEnabled) return
-    void loadInitialLogs()
-  }, [bashId, loadInitialLogs, projectId, streamEnabled])
+  const streamEnabled = Boolean(bashId && projectId)
 
   const handleSnapshot = useCallback(
     (event: {
@@ -265,6 +273,12 @@ export function BashToolView({
       lines: Array<{ seq: number; line: string }>
       progress?: BashProgress | null
     }) => {
+      hasSnapshotRef.current = true
+      if (snapshotTimerRef.current != null) {
+        window.clearTimeout(snapshotTimerRef.current)
+        snapshotTimerRef.current = null
+      }
+      setLoadingLogs(false)
       resetTerminal()
       const prompt = resolvePromptLabel(workdir)
       appendToTerminal(`${prompt}% ${command || 'bash_exec'}\n\n`)
@@ -298,6 +312,10 @@ export function BashToolView({
 
   const handleLogBatch = useCallback(
     (event: { lines: Array<{ seq: number; line: string }> }) => {
+      if (event.lines?.length) {
+        hasSnapshotRef.current = true
+        setLoadingLogs(false)
+      }
       let maxSeq: number | null = null
       event.lines?.forEach((line) => {
         if (typeof line.seq === 'number') {
@@ -316,7 +334,7 @@ export function BashToolView({
     [handleLogLine]
   )
 
-  useBashLogStream({
+  const streamConnection = useBashLogStream({
     projectId,
     bashId,
     enabled: streamEnabled,
@@ -327,6 +345,8 @@ export function BashToolView({
       setProgress(event)
     },
     onLog: (event) => {
+      hasSnapshotRef.current = true
+      setLoadingLogs(false)
       if (typeof event?.seq === 'number') {
         if (lastSeqRef.current != null && event.seq <= lastSeqRef.current) {
           return
@@ -346,6 +366,7 @@ export function BashToolView({
       setLogTruncated(true)
     },
     onDone: (event) => {
+      setLoadingLogs(false)
       if (event?.status) {
         setSessionStatus(event.status as BashSessionStatus)
       }
@@ -355,10 +376,35 @@ export function BashToolView({
     },
   })
 
-  const showStopButton = Boolean(!readOnly && bashId && sessionStatus === 'running')
+  useEffect(() => {
+    if (!streamEnabled || !bashId) return
+    if (hasSnapshotRef.current || initialLoadAttemptedRef.current) return
+    if (snapshotTimerRef.current != null) return
+    setLoadingLogs(true)
+    snapshotTimerRef.current = window.setTimeout(() => {
+      snapshotTimerRef.current = null
+      if (hasSnapshotRef.current || initialLoadAttemptedRef.current) return
+      void loadInitialLogs()
+    }, 700)
+    return () => {
+      if (snapshotTimerRef.current != null) {
+        window.clearTimeout(snapshotTimerRef.current)
+        snapshotTimerRef.current = null
+      }
+    }
+  }, [bashId, loadInitialLogs, streamEnabled])
+
+  useEffect(() => {
+    if (!streamEnabled || !bashId) return
+    if (hasSnapshotRef.current || initialLoadAttemptedRef.current) return
+    if (streamConnection.status !== 'error') return
+    void loadInitialLogs()
+  }, [bashId, loadInitialLogs, streamConnection.status, streamEnabled])
+
+  const showStopButton = Boolean(!readOnly && bashId && isActiveBashStatus(sessionStatus))
   const statusLabel = sessionStatus ?? (toolContent.status === 'calling' ? 'running' : 'completed')
   const exitCodeLabel = exitCode == null ? '' : ` | exit ${exitCode}`
-  const isRunning = statusLabel === 'running'
+  const isRunning = isActiveBashStatus(statusLabel)
   const statusReason =
     stopReason && stopReason !== 'none' ? stopReason.replace(/\n/g, ' ') : ''
   const truncatedLabel =
@@ -371,17 +417,11 @@ export function BashToolView({
   const inlineParts = [statusLabel, inlineExit, statusReason, workdir].filter(Boolean)
   const inlineMeta = inlineParts.join(' | ')
   const terminalBodyClass = isInline ? 'cli-inline-terminal-body' : 'flex-1 min-h-[220px]'
-  const truncatedClass = isInline
-    ? 'cli-inline-terminal-hint cli-inline-terminal-hint-warning'
-    : 'text-[11px] text-amber-600'
-  const loadingClass = isInline
-    ? 'cli-inline-terminal-hint'
-    : 'text-[11px] text-[var(--text-tertiary)]'
+  const showInlineHeader = isInline && chrome !== 'bare'
   const progressPercent = getProgressPercent(progress)
   const progressLabel = formatProgressLabel(progress)
   const progressMeta = formatProgressMeta(progress)
-  const showProgress =
-    progress != null && (progressLabel || progressMeta || progressPercent != null)
+  const showProgress = progress != null
   const progressPercentLabel =
     progressPercent != null ? `${progressPercent.toFixed(1)}%` : 'working'
 
@@ -412,11 +452,11 @@ export function BashToolView({
     <div
       className={
         isInline
-          ? `cli-root cli-inline-terminal flex min-h-0 flex-col gap-2${isRunning ? ' cli-inline-terminal-running' : ''}`
+          ? `cli-root cli-inline-terminal flex min-h-0 flex-col gap-2${isRunning ? ' cli-inline-terminal-running' : ''}${chrome === 'bare' ? ' cli-inline-terminal-bare' : ''}`
           : 'cli-root flex h-full min-h-0 flex-col gap-2'
       }
     >
-      {isInline ? (
+      {showInlineHeader ? (
         <div className="cli-inline-terminal-header">
           <div className="cli-inline-terminal-dots" aria-hidden="true">
             <span className="cli-inline-terminal-dot cli-inline-terminal-dot-red" />
@@ -436,7 +476,7 @@ export function BashToolView({
             </Button>
           ) : null}
         </div>
-      ) : (
+      ) : !isInline ? (
         <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-tertiary)]">
           <span className="break-words [overflow-wrap:anywhere]">
             Status: {statusLabel}
@@ -449,7 +489,19 @@ export function BashToolView({
             </Button>
           ) : null}
         </div>
-      )}
+      ) : null}
+      {isInline && chrome === 'bare' && showStopButton ? (
+        <div className="flex justify-end">
+          <Button
+            variant="destructive"
+            size="sm"
+            className="cli-inline-terminal-stop"
+            onClick={() => setStopDialogOpen(true)}
+          >
+            STOP
+          </Button>
+        </div>
+      ) : null}
       {showProgress ? (
         <div
           className={isInline ? 'cli-progress cli-progress-inline' : 'cli-progress cli-progress-panel'}
@@ -471,7 +523,7 @@ export function BashToolView({
           </div>
         </div>
       ) : null}
-      {truncatedLabel ? <div className={truncatedClass}>{truncatedLabel}</div> : null}
+      {!isInline && truncatedLabel ? <div className="text-[11px] text-amber-600">{truncatedLabel}</div> : null}
 
       <div className={terminalBodyClass}>
         <EnhancedTerminal
@@ -504,7 +556,7 @@ export function BashToolView({
         />
       </div>
 
-      {loadingLogs ? <div className={loadingClass}>Loading logs...</div> : null}
+      {!isInline && loadingLogs ? <div className="text-[11px] text-[var(--text-tertiary)]">Loading logs...</div> : null}
 
       <Dialog open={stopDialogOpen} onOpenChange={setStopDialogOpen}>
         <DialogContent className="sm:max-w-lg">

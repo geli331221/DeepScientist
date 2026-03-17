@@ -52,8 +52,8 @@ async function uuidV5(name: string, namespace = CLI_SESSION_NAMESPACE): Promise<
   return fallbackUuid(`${namespace}:${name}`)
 }
 
-export async function buildSharedSessionId(projectId: string, serverId: string): Promise<string> {
-  return uuidV5(`${projectId}:${serverId}:shared`)
+export async function buildDefaultSessionId(projectId: string, serverId: string): Promise<string> {
+  return uuidV5(`${projectId}:${serverId}:default`)
 }
 
 export async function buildConversationSessionId(

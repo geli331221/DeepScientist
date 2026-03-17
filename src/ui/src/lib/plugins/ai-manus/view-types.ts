@@ -65,6 +65,7 @@ export type AiManusChatMeta = {
   threadId: string | null
   historyOpen: boolean
   isResponding: boolean
+  toolCount?: number
   ready: boolean
   isRestoring?: boolean
   restoreAttempted?: boolean

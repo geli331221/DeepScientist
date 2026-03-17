@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react'
+import React, { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Box, Static, Text, useInput } from 'ink'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import {
@@ -36,9 +36,12 @@ type MainContentProps = {
   baseUrl: string
   connectionState: 'connecting' | 'connected' | 'error'
   availableHeight?: number
+  onQuestPanelMove?: (direction: 1 | -1) => void
+  onQuestPanelConfirm?: () => void
+  onQuestPanelCancel?: () => void
 }
 
-export const MainContent: React.FC<MainContentProps> = ({
+const MainContentComponent: React.FC<MainContentProps> = ({
   quests,
   browseQuestId,
   configMode,
@@ -56,6 +59,9 @@ export const MainContent: React.FC<MainContentProps> = ({
   baseUrl,
   connectionState,
   availableHeight,
+  onQuestPanelMove,
+  onQuestPanelConfirm,
+  onQuestPanelCancel,
 }) => {
   const { columns } = useTerminalSize()
   const scrollRef = useRef<ScrollableHandle>(null)
@@ -192,6 +198,9 @@ export const MainContent: React.FC<MainContentProps> = ({
           quests={questPanelQuests}
           selectedIndex={questPanelIndex}
           availableHeight={availableHeight}
+          onMove={onQuestPanelMove}
+          onConfirm={onQuestPanelConfirm}
+          onCancel={onQuestPanelCancel}
         />
       )
     }
@@ -226,6 +235,9 @@ export const MainContent: React.FC<MainContentProps> = ({
         quests={questPanelQuests}
         selectedIndex={questPanelIndex}
         availableHeight={availableHeight}
+        onMove={onQuestPanelMove}
+        onConfirm={onQuestPanelConfirm}
+        onCancel={onQuestPanelCancel}
       />
     )
   }
@@ -267,3 +279,5 @@ export const MainContent: React.FC<MainContentProps> = ({
     </Scrollable>
   )
 }
+
+export const MainContent = memo(MainContentComponent)

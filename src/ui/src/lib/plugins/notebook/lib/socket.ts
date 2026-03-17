@@ -9,7 +9,6 @@
 
 import { io, type Socket } from "socket.io-client";
 import { useAuthStore } from "@/lib/stores/auth";
-import { getShareSessionToken } from "@/lib/share-session";
 import { resolveApiBaseUrl } from "@/lib/api/client";
 import { supportsSocketIo } from "@/lib/runtime/quest-runtime";
 
@@ -123,8 +122,6 @@ type SocketEntry = {
 
 const SOCKET_CACHE = new Map<string, SocketEntry>();
 
-export type SocketAuthMode = "user" | "share";
-
 function createNoopNotebookSocket(): NotebookSocket {
   const socket = {
     connected: false,
@@ -139,7 +136,7 @@ function createNoopNotebookSocket(): NotebookSocket {
 }
 
 export function acquireSocket(options: {
-  authMode?: SocketAuthMode;
+  authMode?: "user";
 } = {}): { socket: NotebookSocket; release: () => void } {
   if (!supportsSocketIo()) {
     return {
@@ -148,10 +145,7 @@ export function acquireSocket(options: {
     };
   }
   const endpoint = resolveApiBaseUrl();
-  const authMode: SocketAuthMode = options.authMode ?? "user";
-  const shareToken = authMode === "share" ? getShareSessionToken() : null;
-  const cacheKey =
-    authMode === "share" ? `${endpoint}::share::${shareToken || ""}` : `${endpoint}::user`;
+  const cacheKey = `${endpoint}::user`;
 
   let entry = SOCKET_CACHE.get(cacheKey);
 
@@ -161,11 +155,6 @@ export function acquireSocket(options: {
       autoConnect: false,
       transports: ["websocket", "polling"],
       auth: (cb) => {
-        if (authMode === "share") {
-          cb({ token: getShareSessionToken() });
-          return;
-        }
-
         const token =
           useAuthStore.getState().accessToken ||
           (typeof window !== "undefined"

@@ -7,6 +7,73 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 
+def _compact_text(value: object, *, limit: int = 240) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _render_tool_event_text(event: dict[str, Any]) -> str:
+    tool_name = str(event.get("tool_name") or event.get("mcp_tool") or "tool").strip() or "tool"
+    status = str(event.get("status") or "").strip()
+    if str(event.get("type") or "") == "runner.tool_call":
+        args = _compact_text(event.get("args"), limit=160)
+        return " ".join(part for part in [f"[tool:start] {tool_name}", args] if part).strip()
+
+    output = _compact_text(event.get("output"), limit=160)
+    summary = " ".join(part for part in [status, output] if part).strip()
+    return " ".join(part for part in [f"[tool:done] {tool_name}", summary] if part).strip()
+
+
+def _render_artifact_event_text(event: dict[str, Any]) -> str:
+    kind = str(event.get("kind") or "artifact").strip() or "artifact"
+    summary = _compact_text(
+        event.get("summary") or event.get("reason") or event.get("guidance") or event.get("artifact_id"),
+        limit=180,
+    )
+    return " ".join(part for part in [f"[artifact:{kind}]", summary] if part).strip() or "[artifact]"
+
+
+def _render_status_event_text(event: dict[str, Any]) -> str:
+    event_type = str(event.get("type") or event.get("event_type") or "event")
+    if event_type == "runner.turn_start":
+        skill_id = str(event.get("skill_id") or "").strip()
+        model = str(event.get("model") or "").strip()
+        return " ".join(part for part in ["[run:start]", skill_id, model] if part).strip()
+    if event_type == "runner.turn_finish":
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in ["[run:finish]", summary] if part).strip() or "[run:finish]"
+    if event_type == "runner.turn_error":
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in ["[run:error]", summary] if part).strip() or "[run:error]"
+    if event_type == "runner.turn_retry_started":
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in ["[run:retry:start]", summary] if part).strip() or "[run:retry:start]"
+    if event_type == "runner.turn_retry_scheduled":
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in ["[run:retry:wait]", summary] if part).strip() or "[run:retry:wait]"
+    if event_type == "runner.turn_retry_aborted":
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in ["[run:retry:aborted]", summary] if part).strip() or "[run:retry:aborted]"
+    if event_type == "runner.turn_retry_exhausted":
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in ["[run:retry:exhausted]", summary] if part).strip() or "[run:retry:exhausted]"
+    if event_type == "quest.control":
+        action = str(event.get("action") or "control").strip()
+        summary = _compact_text(event.get("summary"), limit=180)
+        return " ".join(part for part in [f"[quest:{action}]", summary] if part).strip()
+    return _compact_text(event, limit=240)
+
+
 @dataclass(frozen=True)
 class ACPBridgeStatus:
     available: bool
@@ -78,15 +145,23 @@ class OptionalACPBridge:
         elif event_type == "runner.reasoning":
             update = acp.update_agent_thought_text(str(event.get("text") or ""))
         elif event_type == "artifact.recorded":
-            fragments = [
-                f"[artifact:{event.get('kind')}]",
-                str(event.get("summary") or "").strip(),
-                str(event.get("reason") or "").strip(),
-            ]
-            rendered = " ".join(item for item in fragments if item).strip() or "[artifact]"
-            update = acp.update_agent_message_text(rendered)
+            update = acp.update_agent_thought_text(_render_artifact_event_text(event))
+        elif event_type == "runner.tool_call" or event_type == "runner.tool_result":
+            update = acp.update_agent_thought_text(_render_tool_event_text(event))
+        elif event_type in {
+            "runner.turn_start",
+            "runner.turn_finish",
+            "runner.turn_error",
+            "runner.turn_retry_started",
+            "runner.turn_retry_scheduled",
+            "runner.turn_retry_aborted",
+            "runner.turn_retry_exhausted",
+        }:
+            update = acp.update_agent_thought_text(_render_status_event_text(event))
+        elif event_type == "quest.control":
+            update = acp.update_agent_thought_text(_render_status_event_text(event))
         else:
-            rendered = json.dumps(event, ensure_ascii=False)
+            rendered = _render_status_event_text(event)
             update = acp.update_agent_thought_text(rendered)
 
         notification = acp.session_notification(session_id, update)

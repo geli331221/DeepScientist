@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,39 @@ MEMORY_KINDS = ("papers", "ideas", "decisions", "episodes", "knowledge", "templa
 class MemoryService:
     def __init__(self, home: Path) -> None:
         self.home = home
+
+    @staticmethod
+    def _normalize_tags(tags: list[str] | str | None) -> list[str]:
+        if tags is None:
+            return []
+        raw_values: list[object]
+        if isinstance(tags, str):
+            stripped = tags.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    raw_values = list(parsed)
+                else:
+                    raw_values = [part.strip() for part in stripped.split(",")]
+            else:
+                raw_values = [part.strip() for part in stripped.split(",")]
+        else:
+            raw_values = list(tags)
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in raw_values:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
 
     def _root_for(self, scope: str, quest_root: Path | None = None) -> Path:
         if scope == "global":
@@ -50,7 +84,7 @@ class MemoryService:
         title: str,
         scope: str,
         quest_id: str | None,
-        tags: list[str] | None,
+        tags: list[str] | str | None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
@@ -60,7 +94,7 @@ class MemoryService:
         seed.setdefault("kind", kind[:-1] if kind.endswith("s") else kind)
         seed.setdefault("title", title)
         seed.setdefault("quest_id", quest_id)
-        seed.setdefault("tags", tags or [])
+        seed.setdefault("tags", self._normalize_tags(tags))
         seed.setdefault("created_at", now)
         seed["updated_at"] = now
         seed["scope"] = scope
@@ -76,7 +110,7 @@ class MemoryService:
         markdown: str | None = None,
         quest_root: Path | None = None,
         quest_id: str | None = None,
-        tags: list[str] | None = None,
+        tags: list[str] | str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
         if kind not in MEMORY_KINDS:

@@ -34,6 +34,10 @@ import type { TabContext, PluginComponentProps } from "@/lib/types/tab";
 import type { PluginContext } from "@/lib/types/plugin";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  getDynamicImportRecoveryMessage,
+  isDynamicImportRecoveryError,
+} from "@/lib/utils/dynamic-import-recovery";
 
 // ============================================================
 // Types
@@ -140,7 +144,11 @@ class PluginErrorBoundary extends Component<
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     // Log error to console in development
-    console.error("[PluginRenderer] Plugin error:", error, errorInfo);
+    if (isDynamicImportRecoveryError(error)) {
+      console.warn("[PluginRenderer] Recovering stale plugin bundle:", error);
+    } else {
+      console.error("[PluginRenderer] Plugin error:", error, errorInfo);
+    }
 
     // Notify parent component
     this.props.onError?.(error);
@@ -157,6 +165,21 @@ class PluginErrorBoundary extends Component<
 
   render() {
     if (this.state.hasError) {
+      if (this.state.error && isDynamicImportRecoveryError(this.state.error)) {
+        return (
+          <div
+            className={cn(
+              "flex h-full items-center justify-center px-6 text-center",
+              "bg-soft-bg-base text-soft-text-secondary"
+            )}
+          >
+            <div className="max-w-sm text-sm">
+              {getDynamicImportRecoveryMessage(this.state.error)}
+            </div>
+          </div>
+        );
+      }
+
       // Use custom error component if provided
       if (this.props.customErrorComponent) {
         return this.props.customErrorComponent;

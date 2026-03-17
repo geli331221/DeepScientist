@@ -85,6 +85,7 @@ const applyTerminalOptions = (terminal: Terminal, config: ITerminalOptions) => {
 
 export function useTerminal(options: {
   onInput?: (data: string) => void
+  onBinary?: (data: string) => void
   onReady?: (terminal: Terminal, fitAddon: FitAddon, searchAddon: SearchAddon) => void
   onProgress?: (state: IProgressState) => void
   enableAttach?: boolean
@@ -92,9 +93,11 @@ export function useTerminal(options: {
   autoFocus?: boolean
   appearance?: TerminalAppearance
   scrollback?: number
+  convertEol?: boolean
 }) {
   const {
     onInput,
+    onBinary,
     onReady,
     onProgress,
     enableAttach = false,
@@ -102,6 +105,7 @@ export function useTerminal(options: {
     autoFocus = true,
     appearance,
     scrollback,
+    convertEol,
   } = options
   const containerRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
@@ -117,6 +121,7 @@ export function useTerminal(options: {
     typeof scrollback === 'number' ? scrollback : null
   )
   const onInputRef = useRef(onInput)
+  const onBinaryRef = useRef(onBinary)
   const onReadyRef = useRef(onReady)
   const onProgressRef = useRef(onProgress)
 
@@ -125,6 +130,10 @@ export function useTerminal(options: {
   useEffect(() => {
     onInputRef.current = onInput
   }, [onInput])
+
+  useEffect(() => {
+    onBinaryRef.current = onBinary
+  }, [onBinary])
 
   useEffect(() => {
     onReadyRef.current = onReady
@@ -164,7 +173,9 @@ export function useTerminal(options: {
       const baseConfig = getTerminalConfig(appearanceRef.current)
       const config =
         scrollbackRef.current != null
-          ? { ...baseConfig, scrollback: scrollbackRef.current }
+          ? { ...baseConfig, scrollback: scrollbackRef.current, ...(typeof convertEol === 'boolean' ? { convertEol } : {}) }
+          : typeof convertEol === 'boolean'
+            ? { ...baseConfig, convertEol }
           : baseConfig
       terminal = new Terminal(config)
       fitAddon = new FitAddon()
@@ -255,6 +266,9 @@ export function useTerminal(options: {
         terminal.onData((data) => {
           onInputRef.current?.(data)
         })
+        terminal.onBinary((data) => {
+          onBinaryRef.current?.(data)
+        })
       }
 
       terminalRef.current = terminal
@@ -303,7 +317,7 @@ export function useTerminal(options: {
         // Ignore dispose errors triggered after unmount.
       }
     }
-  }, [enabled, allowAttach, autoFocus])
+  }, [enabled, allowAttach, autoFocus, convertEol])
 
   useEffect(() => {
     const nextAppearance = appearance ?? 'terminal'
@@ -312,7 +326,9 @@ export function useTerminal(options: {
     const baseConfig = getTerminalConfig(nextAppearance)
     const config =
       scrollbackRef.current != null
-        ? { ...baseConfig, scrollback: scrollbackRef.current }
+        ? { ...baseConfig, scrollback: scrollbackRef.current, ...(typeof convertEol === 'boolean' ? { convertEol } : {}) }
+        : typeof convertEol === 'boolean'
+          ? { ...baseConfig, convertEol }
         : baseConfig
     applyTerminalOptions(terminalRef.current, config)
     try {
@@ -321,7 +337,7 @@ export function useTerminal(options: {
     } catch {
       // Ignore refresh errors after unmount/dispose.
     }
-  }, [appearance])
+  }, [appearance, convertEol])
 
   const withTerminal = useCallback((action: (terminal: Terminal) => void) => {
     if (!isReadyRef.current) return

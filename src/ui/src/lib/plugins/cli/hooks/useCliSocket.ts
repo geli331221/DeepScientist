@@ -50,10 +50,9 @@ const normalizeGatewayError = (message: string) => {
 export function useCliSocket(options: {
   projectId?: string | null
   serverId?: string | null
-  authMode?: 'user' | 'share'
   handlers?: CliSocketHandlers
 }) {
-  const { projectId, serverId, authMode = 'user', handlers } = options
+  const { projectId, serverId, handlers } = options
   const clientIdRef = useRef<string>(getCliClientId())
   const reconnectRef = useRef(new ReconnectionManager())
   const reconnectingRef = useRef(false)
@@ -70,7 +69,7 @@ export function useCliSocket(options: {
     metrics: metricsRef.current.getMetrics(),
   }))
 
-  const { socket, release } = useMemo(() => acquireCliSocket({ authMode }), [authMode])
+  const { socket, release } = useMemo(() => acquireCliSocket(), [])
 
   const syncMetrics = useCallback(() => {
     setStatus((prev) => ({

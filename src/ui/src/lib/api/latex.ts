@@ -136,3 +136,14 @@ export async function getLatexBuildLogText(
   );
   return String(res.data ?? "");
 }
+
+export async function getLatexSourcesArchiveBlob(
+  projectId: string,
+  folderId: string
+): Promise<Blob> {
+  const res = await apiClient.get(
+    `/api/v1/projects/${projectId}/latex/${folderId}/archive`,
+    { responseType: "blob" }
+  );
+  return res.data as Blob;
+}

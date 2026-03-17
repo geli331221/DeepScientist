@@ -10,7 +10,7 @@
 // Basic Types
 // ============================================================
 
-export type ContentType = "paper" | "survey" | "blog" | "textbook" | "poster";
+export type ContentType = "paper" | "survey" | "textbook" | "poster";
 export type LLMProvider = "openrouter" | "gemini";
 export type EnhancementMode = "none" | "code2prompt";
 export type SessionStatus =

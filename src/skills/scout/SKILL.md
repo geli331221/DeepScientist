@@ -10,13 +10,16 @@ Use this skill when the quest does not yet have a stable research frame.
 ## Interaction discipline
 
 - Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the latest user instruction bundle before continuing scouting.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only at real checkpoints, and normally no more frequently than every 5 to 15 tool calls.
-- Each progress update must state completed scouting work, the durable output touched, and the immediate next framing step.
-- Message templates are references only. Adapt to the actual context and vary wording so updates feel respectful, human, and non-robotic.
+- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before continuing scouting.
+- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
+- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or an occasional keepalive during truly long work. Do not update by tool-call cadence.
+- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
+- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- Message templates are references only. Adapt to the actual context and vary wording so updates feel natural and non-robotic.
 - Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
 - For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, wait up to 1 day when feasible, then choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest scout progress update before assuming the task changed completely.
+- When scouting actually resolves the framing ambiguity, locks the evaluation contract, or makes the next anchor obvious, send one richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` update that says what is now clear, why it matters, and which stage should come next.
 
 ## Stage purpose
 
@@ -55,6 +58,8 @@ If one of these layers is still missing, say so explicitly.
 - Avoid repeating the same wide search from scratch.
   Reuse prior survey notes and search only for genuinely missing, newer, or unresolved references.
 - Do not write long paper summaries that do not change the next stage.
+- Search for disconfirming evidence, not only supportive evidence.
+- If the apparent gap is already closed by straightforward scaling, standard engineering, or a strong recent paper, say so directly instead of inflating novelty.
 
 ## Use when
 
@@ -235,6 +240,7 @@ Search buckets should include:
 - same task, same mechanism
 - same task, same failure mode
 - strongest recent competitors
+- papers or repos that may have already solved the claimed gap
 - official benchmark or evaluation documentation
 - official or de facto reference repos
 
@@ -274,6 +280,13 @@ For each retained reference, record:
   - evaluation contract
   - baseline choice
   - later ideation
+
+Also keep the retained set legible by classifying papers into:
+
+- closest competitors
+- adjacent inspirations
+- problem-defining anchors
+- maybe-already-solved references
 
 If you used external search, write a literature scouting report before ending the stage.
 Prefer the structure in `references/literature-scout-template.md`.
@@ -419,6 +432,8 @@ Useful tags include:
 - `type:metric-contract`
 - `type:baseline-shortlist`
 - `topic:<task-or-dataset>`
+
+When calling `memory.write(...)`, pass `tags` as an array like `["stage:scout", "type:related-work", "topic:<task-or-dataset>"]`, not as one comma-joined string.
 
 Recommended read timing:
 

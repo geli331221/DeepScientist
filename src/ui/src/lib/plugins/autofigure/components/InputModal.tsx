@@ -16,7 +16,6 @@ import {
     Check,
     FileText,
     BookOpen,
-    PenTool,
     GraduationCap,
     Image,
     Settings2,
@@ -44,7 +43,6 @@ type OutputType = "figure" | "poster"
 const figureContentTypes: { value: ContentType; label: string; icon: React.ReactNode }[] = [
     { value: "paper", label: "Paper", icon: <FileText className="w-4 h-4" /> },
     { value: "survey", label: "Survey", icon: <BookOpen className="w-4 h-4" /> },
-    { value: "blog", label: "Blog", icon: <PenTool className="w-4 h-4" /> },
     { value: "textbook", label: "Textbook", icon: <GraduationCap className="w-4 h-4" /> },
 ]
 

@@ -40,7 +40,6 @@ type OutputType = "figure" | "poster"
 const FIGURE_CONTENT_TYPES: Array<{ value: ContentType; label: string }> = [
   { value: "paper", label: "Paper" },
   { value: "survey", label: "Survey" },
-  { value: "blog", label: "Blog" },
   { value: "textbook", label: "Textbook" },
 ]
 
@@ -48,8 +47,7 @@ const DEFAULT_STYLE_PROMPTS: Record<string, string> = {
   // Academic types (Paper/Survey)
   paper: "professional and delicate academic journal style with cute characters",
   survey: "professional and delicate academic journal style with cute characters",
-  // Casual types (Blog/Textbook)
-  blog: "Delicate and cute cartoon comic style (using Morandi color palette)",
+  // Casual types (Textbook)
   textbook: "Delicate and cute cartoon comic style (using Morandi color palette)",
   // Poster type
   poster: "a visually engaging and interesting poster style with cute characters",

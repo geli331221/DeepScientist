@@ -1,9 +1,10 @@
 import React from 'react'
 import { Box, Text } from 'ink'
 import Gradient from 'ink-gradient'
+import stringWidth from 'string-width'
 import { Logo } from './Logo.js'
 import { theme } from '../semantic-colors.js'
-import { robotAsciiData } from './AsciiArt.js'
+import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import type { ConnectorSnapshot, QuestSummary } from '../types.js'
 
 // Colors matching AsciiArt
@@ -11,44 +12,23 @@ const COLORS = {
   blue: '#4796E4',
   red: '#F38BA8',
   gradient: ['#9B59B6', '#8E44AD', '#C471ED', '#F64F9C'],
+  gold: '#B69B4A',
 }
 
-interface SegmentedLineProps {
-  line: string
-  segments: { start: number; end: number; type: string }[]
-}
-
-const SegmentedLine: React.FC<SegmentedLineProps> = ({ line, segments }) => {
-  const parts: React.ReactNode[] = []
-  const sortedSegments = [...segments].sort((a, b) => a.start - b.start)
-  let lastEnd = 0
-
-  sortedSegments.forEach((segment, idx) => {
-    if (segment.start > lastEnd) {
-      parts.push(<Text key={`gap-${idx}`}>{line.slice(lastEnd, segment.start)}</Text>)
-    }
-    const text = line.slice(segment.start, segment.end)
-    if (segment.type === 'gradient') {
-      parts.push(
-        <Gradient key={`seg-${idx}`} colors={COLORS.gradient}>
-          <Text>{text}</Text>
-        </Gradient>
-      )
-    } else if (segment.type === 'blue') {
-      parts.push(<Text key={`seg-${idx}`} color={COLORS.blue}>{text}</Text>)
-    } else if (segment.type === 'red') {
-      parts.push(<Text key={`seg-${idx}`} color={COLORS.red}>{text}</Text>)
-    } else {
-      parts.push(<Text key={`seg-${idx}`}>{text}</Text>)
-    }
-    lastEnd = segment.end
-  })
-
-  if (lastEnd < line.length) {
-    parts.push(<Text key="tail">{line.slice(lastEnd)}</Text>)
+const clipText = (value: string, maxWidth: number) => {
+  const safeWidth = Math.max(4, maxWidth)
+  if (stringWidth(value) <= safeWidth) {
+    return value
   }
-
-  return <Text>{parts}</Text>
+  const glyphs = Array.from(value)
+  let clipped = ''
+  for (const glyph of glyphs) {
+    if (stringWidth(`${clipped}${glyph}…`) > safeWidth) {
+      break
+    }
+    clipped += glyph
+  }
+  return `${clipped}…`
 }
 
 type WelcomePanelProps = {
@@ -66,6 +46,7 @@ export const WelcomePanel: React.FC<WelcomePanelProps> = ({
   baseUrl,
   connectionState,
 }) => {
+  const { columns } = useTerminalSize()
   const connectionText = connectionState
   const activeCount = quests.filter((quest) =>
     ['running', 'waiting_for_user'].includes(String(quest.status || ''))
@@ -92,85 +73,131 @@ export const WelcomePanel: React.FC<WelcomePanelProps> = ({
           )
           .join(' · ')
       : 'No connectors configured'
-  const robotLines = robotAsciiData.lines
-  const robotSegments = robotAsciiData.segments
+  const compactConnectorSummary =
+    connectors.length > 0
+      ? `${connectors.length} connectors configured`
+      : 'No connectors configured'
+  const showApiLine = columns >= 120
+  const resolvedBaseUrl = (() => {
+    try {
+      return new URL(baseUrl)
+    } catch {
+      return null
+    }
+  })()
+  const frontendUrl = (() => {
+    if (resolvedBaseUrl) {
+      const target = new URL(resolvedBaseUrl.toString())
+      if (target.hostname === '0.0.0.0') {
+        target.hostname = '127.0.0.1'
+      }
+      target.pathname = '/projects'
+      target.search = ''
+      return target.toString()
+    }
+    return `${baseUrl.replace(/\/$/, '')}/projects`
+  })()
+  const apiUrl = resolvedBaseUrl?.toString() ?? baseUrl
 
   const infoLines = [
-    { label: '', value: 'DeepScientist CLI', style: 'title' },
-    { label: 'Home', value: 'request mode', style: 'normal' },
+    { label: '', value: 'Research operating system', style: 'title' },
+    { label: 'Mode', value: selectedQuest ? 'quest mode' : 'request mode', style: 'normal' },
     { label: 'Server', value: connectionText, style: 'connection' },
-    { label: 'Web', value: baseUrl, style: 'normal' },
-    { label: 'Quests', value: String(quests.length), style: 'normal' },
+    ...(showApiLine ? [{ label: 'API', value: apiUrl, style: 'normal' }] : []),
+    {
+      label: 'Quests',
+      value: `${quests.length} total · ${activeCount} active`,
+      style: 'normal',
+    },
   ]
+  const visibleConnectorSummary =
+    columns >= 112 || stringWidth(connectorSummary) <= Math.max(24, columns - 6)
+      ? connectorSummary
+      : compactConnectorSummary
+  const commandLine =
+    columns >= 92
+      ? 'Type /help for commands · /new <goal> to start · /resume to reopen a quest.'
+      : 'Commands: /help · /new <goal> · /resume'
+  const selectedQuestTitle = selectedQuest
+    ? clipText(`${selectedQuest.quest_id} · ${selectedQuest.title}`, columns - 2)
+    : null
+  const selectedQuestMeta = selectedQuest
+    ? clipText(
+        `${selectedQuest.status} · ${selectedQuest.active_anchor} · ${selectedQuest.branch || 'main'}`,
+        columns - 2
+      )
+    : null
+  const emptyQuestLine = clipText(
+    'No quest selected yet. Use /new <goal> to create one or /use <quest_id> to bind one.',
+    columns - 2
+  )
+  const urlBannerText = clipText(frontendUrl, Math.max(24, columns - 6))
+  const urlHint =
+    columns >= 108
+      ? 'Press Ctrl+O to open the web workspace if auto-open is unavailable.'
+      : 'Ctrl+O opens the web workspace.'
 
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Box flexDirection="row">
-        <Box flexDirection="column" marginRight={2}>
-          {robotLines.map((line, idx) => (
-            <SegmentedLine
-              key={`robot-${idx}`}
-              line={line}
-              segments={robotSegments[idx] || []}
-            />
-          ))}
-        </Box>
-
-        <Box flexDirection="column" justifyContent="center">
-          {infoLines.map((info, idx) => (
-            <Box key={idx}>
-              {info.style === 'title' ? (
-                <Gradient colors={COLORS.gradient}>
-                  <Text bold>{info.value}</Text>
-                </Gradient>
-              ) : (
-                <>
-                  {info.label && (
-                    <Text color={theme.text.secondary}>{info.label}: </Text>
-                  )}
-                  <Text
-                    color={
-                      info.style === 'connection' ? connectionColor : theme.text.primary
-                    }
-                  >
-                    {info.value}
-                  </Text>
-                </>
-              )}
-            </Box>
-          ))}
-        </Box>
+      <Box flexDirection="column">
+        {infoLines.map((info, idx) => (
+          <Box key={idx}>
+            {info.style === 'title' ? (
+              <Gradient colors={COLORS.gradient}>
+                <Text bold>{info.value}</Text>
+              </Gradient>
+            ) : (
+              <>
+                {info.label && (
+                  <Text color={theme.text.secondary}>{info.label}: </Text>
+                )}
+                <Text
+                  color={
+                    info.style === 'connection' ? connectionColor : theme.text.primary
+                  }
+                >
+                  {info.value}
+                </Text>
+              </>
+            )}
+          </Box>
+        ))}
       </Box>
 
       <Box marginTop={1}>
         <Logo />
       </Box>
 
+      <Box marginTop={1} width={columns} justifyContent="center">
+        <Text color={COLORS.gold}>Web Workspace</Text>
+      </Box>
+      <Box width={columns} justifyContent="center">
+        <Text bold color={COLORS.blue}>
+          {urlBannerText}
+        </Text>
+      </Box>
+      <Box width={columns} justifyContent="center">
+        <Text color={theme.text.secondary}>{clipText(urlHint, Math.max(20, columns - 4))}</Text>
+      </Box>
+
       <Box marginTop={1}>
-        <Text color={theme.text.secondary}>Type </Text>
-        <Text color={COLORS.blue}>/help</Text>
-        <Text color={theme.text.secondary}> for commands.</Text>
+        <Text color={theme.text.secondary}>{commandLine}</Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
         <Text color={theme.text.secondary}>
           {`Quests ${quests.length} · Active ${activeCount} · Pending decisions ${pendingDecisionCount}`}
         </Text>
-        <Text color={theme.text.secondary}>{connectorSummary}</Text>
+        <Text color={theme.text.secondary}>
+          {clipText(visibleConnectorSummary, columns - 2)}
+        </Text>
         {selectedQuest ? (
           <>
-            <Text color={theme.text.primary}>
-              {selectedQuest.quest_id} · {selectedQuest.title}
-            </Text>
-            <Text color={theme.text.secondary}>
-              {selectedQuest.status} · {selectedQuest.active_anchor} ·{' '}
-              {selectedQuest.branch || 'main'}
-            </Text>
+            <Text color={theme.text.primary}>{selectedQuestTitle}</Text>
+            <Text color={theme.text.secondary}>{selectedQuestMeta}</Text>
           </>
         ) : (
-          <Text color={theme.text.secondary}>
-            No quest selected yet. Enter a request to create one.
-          </Text>
+          <Text color={theme.text.secondary}>{emptyQuestLine}</Text>
         )}
       </Box>
     </Box>

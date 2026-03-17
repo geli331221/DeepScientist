@@ -33,17 +33,13 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronRight,
-  ExternalLink,
   FolderOpen,
   Github,
   LayoutTemplate,
-  Share2,
-  KeyRound,
   Braces,
   Terminal,
   X,
 } from 'lucide-react'
-import { useAuthStore } from '@/lib/stores/auth'
 import { useFileTreeStore } from '@/lib/stores/file-tree'
 import { useTabsStore, useActiveTab } from '@/lib/stores/tabs'
 import { useChatSessionStore } from '@/lib/stores/session'
@@ -51,11 +47,9 @@ import { useLabCopilotStore } from '@/lib/stores/lab-copilot'
 import { useLabGraphSelectionStore } from '@/lib/stores/lab-graph-selection'
 import { useOpenFile } from '@/hooks/useOpenFile'
 import { useProject, useUpdateProject } from '@/lib/hooks/useProjects'
+import { useQuestWorkspace } from '@/lib/acp'
 import { client as questClient } from '@/lib/api'
-import { createNotebook, getNotebook, listNotebooks } from '@/lib/api/notebooks'
-import { getMyToken, rotateMyToken } from '@/lib/api/auth'
-import { flattenQuestExplorerPayload, openQuestDocumentAsFileNode } from '@/lib/api/quest-files'
-import { checkProjectAccess } from '@/lib/api/projects'
+import { flattenQuestExplorerPayload } from '@/lib/api/quest-files'
 import { listLabAgents, listLabQuests, listLabTemplates } from '@/lib/api/lab'
 import { useCliStore } from '@/lib/plugins/cli/stores/cli-store'
 import { CreateFileDialog, CreateLatexProjectDialog, FileIcon, FileTree } from '@/components/file-tree'
@@ -65,8 +59,6 @@ import { Icon3D } from '@/components/ui/icon-3d'
 import { PngIcon } from '@/components/ui/png-icon'
 import { DotfilesToggleIcon } from '@/components/ui/dotfiles-toggle-icon'
 import { type AiManusChatActions, type CopilotPrefill } from '@/lib/plugins/ai-manus/view-types'
-import { TokenDialog } from '@/components/auth/TokenDialog'
-import { ProjectShareDialog } from '@/components/features/Share/ProjectShareDialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -90,20 +82,20 @@ import { searchFileNodes } from '@/lib/search/file-search'
 import { SearchIcon, SettingsIcon, SparklesIcon, LayoutIcon } from '@/components/ui/workspace-icons'
 import { CopilotDockOverlay } from '@/components/workspace/CopilotDockOverlay'
 import { COPILOT_DOCK_DEFAULTS, useCopilotDockState } from '@/hooks/useCopilotDockState'
-import { getSharedProjects } from '@/lib/shared-projects'
-import { isShareViewForProject } from '@/lib/share-session'
 import { useI18n } from '@/lib/i18n/useI18n'
 import { WorkspaceTooltipLayer } from '@/components/workspace/WorkspaceTooltipLayer'
 import { WelcomeStage } from '@/components/workspace/WelcomeStage'
 import { QuestCopilotDockPanel } from '@/components/workspace/QuestCopilotDockPanel'
 import { QuestWorkspaceSurface } from '@/components/workspace/QuestWorkspaceSurface'
 import { NotificationBell } from '@/components/ui/notification-bell'
+import { MobileQuestWorkspaceShell } from '@/components/workspace/MobileQuestWorkspaceShell'
 import {
   EXPLORER_REFRESH_EVENT,
   type ExplorerRefreshDetail,
 } from '@/lib/plugins/lab/lib/explorer-events'
 import {
   WORKSPACE_LEFT_VISIBILITY_EVENT,
+  type QuestStageSelection,
   type QuestWorkspaceView,
   type WorkspaceLeftVisibilityDetail,
 } from './workspace-events'
@@ -137,7 +129,6 @@ interface WorkspaceLayoutProps {
   projectName?: string
   projectSource?: string | null
   readOnly?: boolean
-  isSharedView?: boolean
 }
 
 type CommandGroup = 'Quick' | 'Files' | 'Create' | 'Navigate' | 'Panels' | 'Access' | 'Tools'
@@ -150,9 +141,21 @@ const HOME_SWITCH_MS = 500
 const TAB_SWITCH_MS = 500
 const COPILOT_SWITCH_MIN_SEC = 0.28
 const COPILOT_SWITCH_MAX_SEC = 0.82
+const NAVBAR_PROJECT_TITLE_MAX_CHARS = 30
 const MARKDOWN_EXTENSIONS = ['.md', '.markdown', '.mdx']
 const MARKDOWN_MIME_TYPES = new Set(['text/markdown', 'text/x-markdown'])
 const QUEST_WORKSPACE_PLUGIN_ID = '@ds/plugin-quest-workspace'
+
+function truncateNavbarProjectTitle(
+  value: string,
+  maxChars = NAVBAR_PROJECT_TITLE_MAX_CHARS
+) {
+  const glyphs = Array.from(String(value || '').trim())
+  if (glyphs.length <= maxChars) {
+    return value
+  }
+  return `${glyphs.slice(0, maxChars).join('')}...`
+}
 
 function scheduleIdle(work: () => void, timeoutMs = 1200) {
   if (typeof window === 'undefined') {
@@ -210,13 +213,22 @@ function tabIsForeignProject(
   return Boolean(tabProjectId && tabProjectId !== projectId)
 }
 
-function buildQuestWorkspaceTabContext(projectId: string, view: QuestWorkspaceView) {
+function buildQuestWorkspaceTabContext(
+  projectId: string,
+  view: QuestWorkspaceView,
+  stageSelection?: QuestStageSelection | null
+) {
   return {
     type: 'custom' as const,
     customData: {
       projectId,
       quest_workspace: true,
       quest_workspace_view: view,
+      ...(view === 'stage'
+        ? {
+            quest_stage_selection: stageSelection || null,
+          }
+        : {}),
     },
   }
 }
@@ -245,14 +257,70 @@ function getQuestWorkspaceTabView(
     'context' in (tabOrContext || {})
       ? tabOrContext?.context?.customData
       : tabOrContext?.customData
+  if (customData?.quest_workspace_view === 'stage') return 'stage'
   if (customData?.quest_workspace_view === 'details') return 'details'
+  if (customData?.quest_workspace_view === 'memory') return 'memory'
   if (customData?.quest_workspace_view === 'terminal') return 'terminal'
   if (customData?.quest_workspace_view === 'settings') return 'settings'
   return 'canvas'
 }
 
-function getQuestWorkspaceTitle(view: QuestWorkspaceView) {
+function getQuestWorkspaceStageSelection(
+  tabOrContext:
+    | { context?: { customData?: Record<string, unknown> } }
+    | { customData?: Record<string, unknown> }
+    | null
+    | undefined
+): QuestStageSelection | null {
+  const customData =
+    'context' in (tabOrContext || {})
+      ? tabOrContext?.context?.customData
+      : tabOrContext?.customData
+  const raw = customData?.quest_stage_selection
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const record = raw as Record<string, unknown>
+  return {
+    selection_ref:
+      typeof record.selection_ref === 'string' ? record.selection_ref : null,
+    selection_type:
+      typeof record.selection_type === 'string' ? record.selection_type : null,
+    branch_name: typeof record.branch_name === 'string' ? record.branch_name : null,
+    branch_no: typeof record.branch_no === 'string' ? record.branch_no : null,
+    parent_branch: typeof record.parent_branch === 'string' ? record.parent_branch : null,
+    foundation_ref:
+      record.foundation_ref && typeof record.foundation_ref === 'object' && !Array.isArray(record.foundation_ref)
+        ? (record.foundation_ref as Record<string, unknown>)
+        : null,
+    foundation_reason:
+      typeof record.foundation_reason === 'string' ? record.foundation_reason : null,
+    foundation_label:
+      typeof record.foundation_label === 'string' ? record.foundation_label : null,
+    idea_title: typeof record.idea_title === 'string' ? record.idea_title : null,
+    stage_key: typeof record.stage_key === 'string' ? record.stage_key : null,
+    worktree_rel_path:
+      typeof record.worktree_rel_path === 'string' ? record.worktree_rel_path : null,
+    scope_paths: Array.isArray(record.scope_paths)
+      ? record.scope_paths.map((item) => String(item))
+      : null,
+    compare_base:
+      typeof record.compare_base === 'string' ? record.compare_base : null,
+    compare_head:
+      typeof record.compare_head === 'string' ? record.compare_head : null,
+    label: typeof record.label === 'string' ? record.label : null,
+    summary: typeof record.summary === 'string' ? record.summary : null,
+    baseline_gate:
+      typeof record.baseline_gate === 'string' ? record.baseline_gate : null,
+  }
+}
+
+function getQuestWorkspaceTitle(view: QuestWorkspaceView, stageSelection?: QuestStageSelection | null) {
+  if (view === 'stage') {
+    const label =
+      String(stageSelection?.label || stageSelection?.stage_key || 'Stage').trim() || 'Stage'
+    return label
+  }
   if (view === 'details') return 'Details'
+  if (view === 'memory') return 'Memory'
   if (view === 'terminal') return 'Terminal'
   if (view === 'settings') return 'Settings'
   return 'Canvas'
@@ -265,9 +333,10 @@ function isQuestFriendlyTab(
   if (!tab) return false
   if (isQuestWorkspaceTab(tab, projectId)) return true
   return [
+    BUILTIN_PLUGINS.GIT_DIFF_VIEWER,
+    BUILTIN_PLUGINS.NOTEBOOK,
     BUILTIN_PLUGINS.PDF_VIEWER,
     BUILTIN_PLUGINS.PDF_MARKDOWN,
-    BUILTIN_PLUGINS.NOTEBOOK,
     BUILTIN_PLUGINS.LATEX,
     BUILTIN_PLUGINS.CODE_EDITOR,
     BUILTIN_PLUGINS.CODE_VIEWER,
@@ -301,8 +370,6 @@ function matchCommand(query: string, item: CommandItem): boolean {
   return tokens.every((t) => haystack.includes(t))
 }
 
-const TOKEN_PREFIXES = ['t', 'to', 'tok', 'toke', 'token']
-const SHARE_PREFIXES = ['s', 'sh', 'sha', 'share']
 const IMPORT_PREFIXES = ['i', 'im', 'imp', 'impo', 'impor', 'import']
 const NEW_PREFIXES = ['n', 'ne', 'new']
 const TEMPLATE_PREFIXES = ['te', 'tem', 'temp', 'templ', 'templa', 'templat', 'template']
@@ -316,14 +383,6 @@ const matchPrefix = (query: string, prefixes: string[]) =>
     query.startsWith(`${prefix}:`) ||
     query.startsWith(`${prefix}/`)
   )
-
-const extractShareToken = (value: string) => {
-  const match = value.match(/\/share\/([^/?#\s]+)/i)
-  if (match?.[1]) return match[1]
-  const inlineMatch = value.match(/^share[:\s/]+([^/?#\s]+)/i)
-  if (inlineMatch?.[1]) return inlineMatch[1]
-  return null
-}
 
 const extractGithubUrl = (value: string) => {
   const match = value.match(/(?:https?:\/\/|git@)?github\.com[^\s]+/i)
@@ -460,6 +519,11 @@ type ExplorerLocationState = {
   sourceMode: 'live' | 'snapshot'
   selectionLabel: string | null
   selectionType: string | null
+  branchName: string | null
+  branchNo: string | null
+  parentBranch: string | null
+  foundationLabel: string | null
+  ideaTitle: string | null
   revision: string | null
   compareBase: string | null
   compareHead: string | null
@@ -472,6 +536,11 @@ const DEFAULT_EXPLORER_LOCATION: ExplorerLocationState = {
   sourceMode: 'live',
   selectionLabel: null,
   selectionType: null,
+  branchName: null,
+  branchNo: null,
+  parentBranch: null,
+  foundationLabel: null,
+  ideaTitle: null,
   revision: null,
   compareBase: null,
   compareHead: null,
@@ -486,18 +555,14 @@ function WorkspaceCommandPalette({
   items,
   projectId,
   onExitHome,
-  tokenActions,
   onEnterLab,
-  onOpenShareDialog,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   items: CommandItem[]
   projectId: string
   onExitHome?: () => void
-  tokenActions?: { onGetToken: () => void; onRefreshToken: () => void; hasToken: boolean }
   onEnterLab?: () => void
-  onOpenShareDialog?: () => void
 }) {
   const { t } = useI18n('workspace')
   const router = useRouter()
@@ -550,20 +615,14 @@ function WorkspaceCommandPalette({
 
   const trimmedQuery = query.trim()
   const normalizedQuery = trimmedQuery.toLowerCase()
-  const showTokenActions =
-    normalizedQuery.startsWith('token') || TOKEN_PREFIXES.includes(normalizedQuery)
-  const shareToken = extractShareToken(trimmedQuery)
   const githubUrl = extractGithubUrl(trimmedQuery)
   const isUuid = UUID_REGEX.test(trimmedQuery)
-  const showShareActions = matchPrefix(normalizedQuery, SHARE_PREFIXES) || Boolean(shareToken)
   const showImportActions = matchPrefix(normalizedQuery, IMPORT_PREFIXES)
   const showNewActions = matchPrefix(normalizedQuery, NEW_PREFIXES)
   const showTemplateActions = matchPrefix(normalizedQuery, TEMPLATE_PREFIXES)
 
   const autocompleteKeyword = () => {
     const candidates: Array<{ prefixes: string[]; value: string }> = [
-      { prefixes: TOKEN_PREFIXES, value: 'token' },
-      { prefixes: SHARE_PREFIXES, value: 'share' },
       { prefixes: IMPORT_PREFIXES, value: 'import' },
       { prefixes: NEW_PREFIXES, value: 'new' },
       { prefixes: TEMPLATE_PREFIXES, value: 'template' },
@@ -574,48 +633,9 @@ function WorkspaceCommandPalette({
     return true
   }
 
-  const tokenItems = React.useMemo<CommandItem[]>(() => {
-    if (!showTokenActions || !tokenActions) return []
-    return [
-      {
-        id: 'token:get',
-        title: t('command_get_access_token_title'),
-        description: t('command_get_access_token_desc'),
-        group: 'Access',
-        keywords: ['token', 'access', 'api'],
-        icon: <KeyRound className="h-4 w-4 text-muted-foreground" />,
-        run: () => {
-          tokenActions.onGetToken()
-          onOpenChange(false)
-        },
-      },
-      {
-        id: 'token:refresh',
-        title: tokenActions.hasToken
-          ? t('command_refresh_access_token_title')
-          : t('command_refresh_access_token_requires_title'),
-        description: tokenActions.hasToken
-          ? t('command_refresh_access_token_desc')
-          : t('command_refresh_access_token_missing_desc'),
-        group: 'Access',
-        keywords: ['token', 'refresh', 'rotate'],
-        icon: <RefreshCw className="h-4 w-4 text-muted-foreground" />,
-        run: () => {
-          if (!tokenActions.hasToken) {
-            tokenActions.onGetToken()
-          } else {
-            tokenActions.onRefreshToken()
-          }
-          onOpenChange(false)
-        },
-      },
-    ]
-  }, [onOpenChange, showTokenActions, t, tokenActions])
-
   const itemMap = React.useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
 
   const smartItems = React.useMemo<CommandItem[]>(() => {
-    if (showTokenActions) return []
     const next: CommandItem[] = []
 
     const addQuick = (id: string) => {
@@ -629,11 +649,11 @@ function WorkspaceCommandPalette({
     }
 
     if (!normalizedQuery) {
-      addQuickSet(['new-notebook', 'new-file', 'upload-files', 'search', 'settings'])
+      addQuickSet(['new-file', 'upload-files', 'search', 'settings'])
     }
 
     if (showNewActions) {
-      addQuickSet(['new-notebook', 'new-file', 'new-folder', 'new-latex-project'])
+      addQuickSet(['new-file', 'new-folder', 'new-latex-project'])
     }
 
     if (showImportActions) {
@@ -652,35 +672,6 @@ function WorkspaceCommandPalette({
           onEnterLab()
         },
       })
-    }
-
-    if (showShareActions) {
-      if (onOpenShareDialog) {
-        next.push({
-          id: 'share:project',
-          title: t('command_share_project_title'),
-          description: t('command_share_project_desc'),
-          group: 'Quick',
-          keywords: ['share', 'link', 'copy'],
-          icon: <Share2 className="h-4 w-4 text-muted-foreground" />,
-          run: () => {
-            onOpenShareDialog()
-          },
-        })
-      }
-      if (shareToken) {
-        next.push({
-          id: 'share:open-link',
-          title: t('command_open_share_link_title'),
-          description: `share/${shareToken}`,
-          group: 'Quick',
-          keywords: ['share', 'open'],
-          icon: <ExternalLink className="h-4 w-4 text-muted-foreground" />,
-          run: () => {
-            router.push(`/share/${shareToken}`)
-          },
-        })
-      }
     }
 
     if (isUuid) {
@@ -718,28 +709,24 @@ function WorkspaceCommandPalette({
     itemMap,
     normalizedQuery,
     onEnterLab,
-    onOpenShareDialog,
     router,
-    shareToken,
     showImportActions,
     showNewActions,
-    showShareActions,
     showTemplateActions,
-    showTokenActions,
     t,
     trimmedQuery,
   ])
 
   const filtered = React.useMemo(() => {
     const base = items.filter((item) => matchCommand(query, item))
-    const combined = [...smartItems, ...tokenItems, ...base]
+    const combined = [...smartItems, ...base]
     const seen = new Set<string>()
     return combined.filter((item) => {
       if (seen.has(item.id)) return false
       seen.add(item.id)
       return true
     })
-  }, [items, query, smartItems, tokenItems])
+  }, [items, query, smartItems])
 
   const fileMatches = React.useMemo<CommandItem[]>(() => {
     const q = query.trim()
@@ -933,9 +920,6 @@ function Navbar({
   onOpenCommandPalette,
   onOpenSettings,
   onOpenProjectSettings,
-  onShare,
-  showShare,
-  onNewNotebook,
   onNewFile,
   onNewLatexProject,
   onNewFolder,
@@ -957,9 +941,6 @@ function Navbar({
   onOpenCommandPalette: () => void
   onOpenSettings: () => void
   onOpenProjectSettings: () => void
-  onShare?: () => void
-  showShare?: boolean
-  onNewNotebook: () => void
   onNewFile: () => void
   onNewLatexProject: () => void
   onNewFolder: () => void
@@ -984,6 +965,10 @@ function Navbar({
     enabled: !readOnlyMode && Boolean(projectId) && !projectName && !localQuestMode,
   })
   const projectDisplayName = project?.name ?? projectName ?? (projectId ? `Project ${projectId}` : 'Project')
+  const truncatedProjectDisplayName = React.useMemo(
+    () => truncateNavbarProjectTitle(projectDisplayName),
+    [projectDisplayName]
+  )
   const canRename = !readOnlyMode && Boolean(projectId)
   const [isRenaming, setIsRenaming] = React.useState(false)
   const [draftName, setDraftName] = React.useState(projectDisplayName)
@@ -1080,10 +1065,9 @@ function Navbar({
   }, [localQuestMode, onExitHome, openTab, projectId, readOnlyMode, t])
 
   const showCompactNavbar = collapsed
-  const shareLabel = readOnlyMode ? t('navbar_copy_share') : t('navbar_share')
   const handleGoProjects = React.useCallback(() => {
     onExitHome?.()
-    router.push('/projects')
+    router.push('/')
   }, [onExitHome, router])
 
   return (
@@ -1138,17 +1122,6 @@ function Navbar({
               </button>
             )}
             <div className="navbar-roll-actions">
-              {showShare && onShare && (
-                <button
-                  type="button"
-                  className="ghost-btn navbar-roll-btn"
-                  aria-label={shareLabel}
-                  data-tooltip={shareLabel}
-                  onClick={onShare}
-                >
-                  <Share2 className="h-4 w-4" />
-                </button>
-              )}
               <button
                 type="button"
                 className="navbar-roll-link bg-transparent border-0"
@@ -1229,14 +1202,14 @@ function Navbar({
                     <button
                       type="button"
                       className={cn(
-                        'project-name-field',
+                        'project-name-field max-w-[30ch]',
                         canRename ? 'is-button' : 'is-disabled'
                       )}
                       onClick={handleStartRename}
                       disabled={!canRename}
-                      title={canRename ? t('navbar_rename_project') : t('navbar_readonly_project')}
+                      title={projectDisplayName}
                     >
-                      <span className="truncate w-full">{projectDisplayName}</span>
+                      <span className="block w-full truncate">{truncatedProjectDisplayName}</span>
                     </button>
                   )}
                 </>
@@ -1297,18 +1270,6 @@ function Navbar({
               >
                 <SearchIcon />
               </button>
-              {showShare && onShare && (
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-8 px-3 rounded-full overflow-hidden ds-glare-sheen"
-                  title={shareLabel}
-                  onClick={onShare}
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  {t('navbar_share')}
-                </Button>
-              )}
               {!readOnlyMode && (
                 <>
                   <DropdownMenu>
@@ -1323,15 +1284,6 @@ function Navbar({
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-56">
-                      <DropdownMenuItem onClick={onNewNotebook}>
-                        <PngIcon
-                          name="BookOpen"
-                          size={16}
-                          className="mr-2 h-4 w-4"
-                          fallback={<BookOpen className="mr-2 h-4 w-4" />}
-                        />
-                        {t('navbar_new_notebook')}
-                      </DropdownMenuItem>
                       <DropdownMenuItem onClick={onNewFile}>
                         <FileText className="mr-2 h-4 w-4" />
                         {t('navbar_new_file')}
@@ -1668,7 +1620,7 @@ function LeftPanel({
   const { openFileInTab, downloadFile, openNotebook } = useOpenFile()
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const explorerBodyRef = React.useRef<HTMLDivElement | null>(null)
-  const [activeExplorer, setActiveExplorer] = React.useState<'files' | 'scope' | 'diff'>('files')
+  const [activeExplorer, setActiveExplorer] = React.useState<'files' | 'scope'>('files')
   const [hideDotfiles, setHideDotfiles] = React.useState(true)
   const [createFileOpen, setCreateFileOpen] = React.useState(false)
   const [isMenuOpen, setIsMenuOpen] = React.useState(true)
@@ -1677,14 +1629,17 @@ function LeftPanel({
   const [scopedExplorerLoading, setScopedExplorerLoading] = React.useState(false)
   const [explorerLocation, setExplorerLocation] =
     React.useState<ExplorerLocationState>(DEFAULT_EXPLORER_LOCATION)
-  const [diffFiles, setDiffFiles] = React.useState<Array<{ path: string; status: string | null }>>([])
+  const [diffFiles, setDiffFiles] = React.useState<
+    Array<{
+      path: string
+      status: string | null
+      oldPath?: string | null
+      added?: number | null
+      removed?: number | null
+    }>
+  >([])
   const [diffCompareBase, setDiffCompareBase] = React.useState<string | null>(null)
   const [diffCompareHead, setDiffCompareHead] = React.useState<string | null>(null)
-  const [selectedDiffPath, setSelectedDiffPath] = React.useState<string | null>(null)
-  const [selectedDiffStatus, setSelectedDiffStatus] = React.useState<string | null>(null)
-  const [selectedDiffLines, setSelectedDiffLines] = React.useState<string[]>([])
-  const [selectedDiffTruncated, setSelectedDiffTruncated] = React.useState(false)
-  const [selectedDiffLoading, setSelectedDiffLoading] = React.useState(false)
   const [scopedExplorerReloadKey, setScopedExplorerReloadKey] = React.useState(0)
   const menuSectionId = React.useId()
   const activeTab = useActiveTab()
@@ -1693,6 +1648,18 @@ function LeftPanel({
       return null
     }
     return getQuestWorkspaceTabView(activeTab)
+  }, [activeTab, projectId])
+  const activeQuestStageSelection = React.useMemo(() => {
+    if (!isQuestWorkspaceTab(activeTab, projectId)) {
+      return null
+    }
+    return getQuestWorkspaceStageSelection(activeTab)
+  }, [activeTab, projectId])
+  const activeDiffScopedSelection = React.useMemo(() => {
+    if (activeTab?.pluginId !== BUILTIN_PLUGINS.GIT_DIFF_VIEWER || !tabMatchesProject(activeTab, projectId)) {
+      return null
+    }
+    return getQuestWorkspaceStageSelection(activeTab)
   }, [activeTab, projectId])
 
   React.useEffect(() => {
@@ -1710,51 +1677,54 @@ function LeftPanel({
   }, [projectId])
 
   React.useEffect(() => {
-    if (!localQuestMode || !graphSelection) {
+    const effectiveSelection =
+      activeQuestWorkspaceView === 'stage' && activeQuestStageSelection
+        ? {
+            ...activeQuestStageSelection,
+            selection_type:
+              activeQuestStageSelection.selection_type || 'stage_node',
+            selection_ref:
+              activeQuestStageSelection.selection_ref ||
+              activeQuestStageSelection.stage_key ||
+              'stage',
+          }
+        : graphSelection || activeDiffScopedSelection
+
+    if (!localQuestMode || !effectiveSelection) {
       setScopedExplorerLabel(null)
       setScopedExplorerNodes([])
       setExplorerLocation(DEFAULT_EXPLORER_LOCATION)
       setDiffFiles([])
       setDiffCompareBase(null)
       setDiffCompareHead(null)
-      setSelectedDiffPath(null)
-      setSelectedDiffStatus(null)
-      setSelectedDiffLines([])
-      setSelectedDiffTruncated(false)
       setScopedExplorerLoading(false)
-      if (activeExplorer !== 'files') {
-        setActiveExplorer('files')
-      }
+      setActiveExplorer('files')
       return
     }
 
-    if (!['branch_node', 'stage_node', 'baseline_node'].includes(String(graphSelection.selection_type || ''))) {
+    if (!['branch_node', 'stage_node', 'baseline_node'].includes(String(effectiveSelection.selection_type || ''))) {
       setScopedExplorerLabel(null)
       setScopedExplorerNodes([])
       setExplorerLocation(DEFAULT_EXPLORER_LOCATION)
       setDiffFiles([])
       setDiffCompareBase(null)
       setDiffCompareHead(null)
-      setSelectedDiffPath(null)
-      setSelectedDiffStatus(null)
-      setSelectedDiffLines([])
-      setSelectedDiffTruncated(false)
-      if (activeExplorer !== 'files') {
-        setActiveExplorer('files')
-      }
+      setActiveExplorer('files')
       return
     }
 
+    const snapshotRevision = resolveExplorerSnapshotRevision(effectiveSelection)
     const scopePaths = [
-      ...(graphSelection.scope_paths || []),
-      graphSelection.worktree_rel_path || '',
+      ...(effectiveSelection.scope_paths || []),
+      ...(!snapshotRevision && effectiveSelection.worktree_rel_path
+        ? [effectiveSelection.worktree_rel_path]
+        : []),
     ]
       .filter((item) => isLikelyRelativeExplorerPath(item))
       .map((item) => normalizeExplorerScopePath(item))
       .filter(Boolean)
-    const compareBase = String(graphSelection.compare_base || '').trim() || null
-    const compareHead = String(graphSelection.compare_head || '').trim() || null
-    const snapshotRevision = resolveExplorerSnapshotRevision(graphSelection)
+    const compareBase = String(effectiveSelection.compare_base || '').trim() || null
+    const compareHead = String(effectiveSelection.compare_head || '').trim() || null
     let cancelled = false
 
     setScopedExplorerLoading(true)
@@ -1762,15 +1732,22 @@ function LeftPanel({
     void (async () => {
       try {
         const diffStatusByPath = new Map<string, string>()
-        let nextDiffFiles: Array<{ path: string; status: string | null }> = []
-        let firstDiffPath: string | null = null
+        const scopePathSet = new Set(scopePaths)
+        let nextDiffFiles: Array<{
+          path: string
+          status: string | null
+          oldPath?: string | null
+          added?: number | null
+          removed?: number | null
+        }> = []
 
-        if (compareBase && compareHead && graphSelection.selection_type !== 'baseline_node') {
+        if (compareBase && compareHead && effectiveSelection.selection_type !== 'baseline_node') {
           const compare = await questClient.gitCompare(projectId, compareBase, compareHead)
           if (cancelled) return
           const diffPaths = (compare.files || [])
             .map((item) => normalizeExplorerScopePath(item.path))
             .filter(Boolean)
+          diffPaths.forEach((item) => scopePathSet.add(item))
           ;(compare.files || []).forEach((item) => {
             const normalizedPath = normalizeExplorerScopePath(item.path)
             if (!normalizedPath) return
@@ -1779,10 +1756,10 @@ function LeftPanel({
           nextDiffFiles = (compare.files || []).map((item) => ({
             path: normalizeExplorerScopePath(item.path),
             status: item.status || null,
+            oldPath: item.old_path || null,
+            added: typeof item.added === 'number' ? item.added : null,
+            removed: typeof item.removed === 'number' ? item.removed : null,
           }))
-          if (diffPaths.length) {
-            firstDiffPath = diffPaths[0] || null
-          }
         }
 
         let explorerPayload
@@ -1805,16 +1782,22 @@ function LeftPanel({
           if (cancelled) return
         }
 
-        const scopeResult = buildScopedQuestTree(projectId, explorerPayload, scopePaths, diffStatusByPath)
+        const effectiveScopePaths = Array.from(scopePathSet)
+        const scopeResult = buildScopedQuestTree(projectId, explorerPayload, effectiveScopePaths, diffStatusByPath)
         const nextScopeNodes = scopeResult.nodes
 
-        setScopedExplorerLabel(graphSelection.label || graphSelection.stage_key || graphSelection.selection_ref || null)
+        setScopedExplorerLabel(effectiveSelection.label || effectiveSelection.stage_key || effectiveSelection.selection_ref || null)
         setScopedExplorerNodes(nextScopeNodes)
         setExplorerLocation({
           sourceMode,
           selectionLabel:
-            graphSelection.label || graphSelection.stage_key || graphSelection.selection_ref || null,
-          selectionType: graphSelection.selection_type || null,
+            effectiveSelection.label || effectiveSelection.stage_key || effectiveSelection.selection_ref || null,
+          selectionType: effectiveSelection.selection_type || null,
+          branchName: effectiveSelection.branch_name || null,
+          branchNo: effectiveSelection.branch_no || null,
+          parentBranch: effectiveSelection.parent_branch || null,
+          foundationLabel: effectiveSelection.foundation_label || null,
+          ideaTitle: effectiveSelection.idea_title || null,
           revision: sourceMode === 'snapshot' ? snapshotRevision : null,
           compareBase,
           compareHead,
@@ -1825,20 +1808,7 @@ function LeftPanel({
         setDiffFiles(nextDiffFiles)
         setDiffCompareBase(compareBase)
         setDiffCompareHead(compareHead)
-        setSelectedDiffPath((prev) => {
-          if (prev && diffStatusByPath.has(normalizeExplorerScopePath(prev))) {
-            return prev
-          }
-          return firstDiffPath
-        })
-        if (!nextDiffFiles.length) {
-          setSelectedDiffStatus(null)
-          setSelectedDiffLines([])
-          setSelectedDiffTruncated(false)
-        }
-        if (nextDiffFiles.length) {
-          setActiveExplorer('diff')
-        } else if (nextScopeNodes.length) {
+        if (nextScopeNodes.length || nextDiffFiles.length) {
           setActiveExplorer('scope')
         }
       } catch (error) {
@@ -1854,45 +1824,55 @@ function LeftPanel({
       cancelled = true
     }
   }, [
-    activeExplorer,
+    activeQuestStageSelection,
+    activeDiffScopedSelection,
+    activeQuestWorkspaceView,
     graphSelection,
     localQuestMode,
     projectId,
     scopedExplorerReloadKey,
   ])
 
-  React.useEffect(() => {
-    if (!localQuestMode || !selectedDiffPath || !diffCompareBase || !diffCompareHead) {
-      setSelectedDiffLoading(false)
-      return
-    }
-    let cancelled = false
-    setSelectedDiffLoading(true)
-    void questClient
-      .gitDiffFile(projectId, diffCompareBase, diffCompareHead, selectedDiffPath)
-      .then((payload) => {
-        if (cancelled) return
-        setSelectedDiffStatus(payload.status || null)
-        setSelectedDiffLines(payload.lines || [])
-        setSelectedDiffTruncated(Boolean(payload.truncated))
-      })
-      .catch((error) => {
-        if (cancelled) return
-        console.error('[WorkspaceLayout] Failed to load diff preview:', error)
-        setSelectedDiffStatus(null)
-        setSelectedDiffLines([])
-        setSelectedDiffTruncated(false)
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSelectedDiffLoading(false)
-        }
-      })
+  const diffFileByPath = React.useMemo(() => {
+    const mapping = new Map<string, (typeof diffFiles)[number]>()
+    diffFiles.forEach((item) => {
+      mapping.set(normalizeExplorerScopePath(item.path), item)
+    })
+    return mapping
+  }, [diffFiles])
 
-    return () => {
-      cancelled = true
-    }
-  }, [diffCompareBase, diffCompareHead, localQuestMode, projectId, selectedDiffPath])
+  const handleOpenDiffFile = React.useCallback(
+    async (item: {
+      path: string
+      status: string | null
+      oldPath?: string | null
+      added?: number | null
+      removed?: number | null
+    }) => {
+      if (!diffCompareBase || !diffCompareHead) return
+      onExitHome?.()
+      openTab({
+        pluginId: BUILTIN_PLUGINS.GIT_DIFF_VIEWER,
+        context: {
+          type: 'custom',
+          customData: {
+            projectId,
+            base: diffCompareBase,
+            head: diffCompareHead,
+            path: item.path,
+            status: item.status,
+            oldPath: item.oldPath || null,
+            added: item.added ?? null,
+            removed: item.removed ?? null,
+            quest_stage_selection: activeQuestStageSelection || graphSelection || null,
+            scoped_selection_source: 'diff-viewer',
+          },
+        },
+        title: item.path,
+      })
+    },
+    [activeQuestStageSelection, diffCompareBase, diffCompareHead, graphSelection, onExitHome, openTab, projectId]
+  )
 
   const openPluginTab = React.useCallback(
     (pluginId: string, title: string, customData?: Record<string, unknown>) => {
@@ -1908,12 +1888,12 @@ function LeftPanel({
   )
 
   const openQuestWorkspaceTab = React.useCallback(
-    (view: QuestWorkspaceView) => {
+    (view: QuestWorkspaceView, stageSelection?: QuestStageSelection | null) => {
       onExitHome?.()
       openTab({
         pluginId: QUEST_WORKSPACE_PLUGIN_ID,
-        context: buildQuestWorkspaceTabContext(projectId, view),
-        title: getQuestWorkspaceTitle(view),
+        context: buildQuestWorkspaceTabContext(projectId, view, stageSelection),
+        title: getQuestWorkspaceTitle(view, stageSelection),
       })
     },
     [onExitHome, openTab, projectId]
@@ -1922,6 +1902,12 @@ function LeftPanel({
   const handleFileOpen = React.useCallback(
     async (file: FileNode) => {
       onExitHome?.()
+      const normalizedPath = normalizeExplorerScopePath(file.path)
+      const diffEntry = normalizedPath ? diffFileByPath.get(normalizedPath) ?? null : null
+      if (file.type !== 'folder' && diffEntry && diffCompareBase && diffCompareHead) {
+        await handleOpenDiffFile(diffEntry)
+        return
+      }
       if (file.type === 'folder' && file.folderKind === 'latex') {
         openTab({
           pluginId: '@ds/plugin-latex',
@@ -1956,6 +1942,10 @@ function LeftPanel({
       })
     },
     [
+      diffCompareBase,
+      diffCompareHead,
+      diffFileByPath,
+      handleOpenDiffFile,
       onExitHome,
       openFileInTab,
       openNotebook,
@@ -2048,43 +2038,42 @@ function LeftPanel({
     }
   }, [addToast, refresh, t, tCommon])
 
-  const handleOpenDiffFile = React.useCallback(
-    async (path: string) => {
-      const preferredRevision = diffCompareHead || diffCompareBase
-      if (!preferredRevision) return
-      try {
-        const nextNode = await openQuestDocumentAsFileNode(projectId, `git::${preferredRevision}::${path}`)
-        await handleFileOpen(nextNode)
-      } catch (error) {
-        console.error('[WorkspaceLayout] Failed to open diff snapshot file:', error)
-        addToast({
-          type: 'error',
-          title: t('toast_download_failed'),
-          description: tCommon('generic_try_again', undefined, 'Please try again.'),
-        })
-      }
-    },
-    [addToast, diffCompareBase, diffCompareHead, handleFileOpen, projectId, t, tCommon]
-  )
-
   const isFilesView = activeExplorer === 'files'
   const isScopeView = activeExplorer === 'scope'
-  const isDiffView = activeExplorer === 'diff'
   const hasScopedExplorer = scopedExplorerNodes.length > 0
   const hasDiffExplorer = diffFiles.length > 0
   const disableExplorerActions = readOnlyMode
   const disableExplorerMutations = readOnlyMode || localQuestMode
-  const explorerModeLabel = isDiffView
-    ? t('explorer_diff')
-    : isScopeView
-      ? t('explorer_snapshot')
-      : t('explorer_files')
+  const hideDotfilesEffective = isScopeView ? true : hideDotfiles
+  const explorerModeLabel = isScopeView ? t('explorer_snapshot') : t('explorer_files')
   const explorerSelectionLabel =
     explorerLocation.selectionLabel || (isFilesView ? t('explorer_live_workspace') : null)
   const explorerScopeLabel =
     explorerLocation.appliedScopes.length > 0
       ? explorerLocation.appliedScopes.join(', ')
       : t('explorer_full_tree')
+  const explorerPrimaryLine = [
+    explorerLocation.branchNo ? `Branch #${explorerLocation.branchNo}` : null,
+    explorerLocation.branchName || null,
+    explorerLocation.ideaTitle || null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const explorerSecondaryLine = [
+    explorerLocation.foundationLabel ? `Foundation ${explorerLocation.foundationLabel}` : null,
+    explorerLocation.sourceMode === 'snapshot'
+      ? t('explorer_branch_snapshot')
+      : t('explorer_live_workspace'),
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const hasExplorerSecondaryMeta = Boolean(
+    explorerLocation.parentBranch ||
+      explorerLocation.revision ||
+      (explorerLocation.compareBase && explorerLocation.compareHead) ||
+      explorerLocation.appliedScopes.length > 0 ||
+      explorerLocation.fallbackToFullTree
+  )
 
   const handleExplorerNewFile = React.useCallback(() => {
     if (disableExplorerMutations) return
@@ -2110,6 +2099,16 @@ function LeftPanel({
     setScopedExplorerReloadKey((value) => value + 1)
   }, [disableExplorerActions, handleRefresh, isFilesView])
 
+  React.useEffect(() => {
+    const root = explorerBodyRef.current
+    if (!root) return
+    root.scrollTop = 0
+    const tree = root.querySelector<HTMLElement>('.file-tree-scroll')
+    if (tree) {
+      tree.scrollTop = 0
+    }
+  }, [activeExplorer, explorerScopeLabel, explorerSelectionLabel, scopedExplorerLabel])
+
   return (
     <div className="panel left-panel" style={{ width, minWidth: width }}>
       {/* Header */}
@@ -2131,8 +2130,7 @@ function LeftPanel({
         <div className="ml-auto flex items-center">
           <div
             className={cn(
-              'flex items-center gap-0.5 whitespace-nowrap rounded-full border p-0.5 shadow-sm',
-              'border-white/[0.16] bg-[var(--bg-panel-left)]'
+              'flex items-center gap-1 whitespace-nowrap border-b border-[var(--border-dark)]'
             )}
             role="tablist"
             aria-label={t('explorer_views')}
@@ -2140,11 +2138,11 @@ function LeftPanel({
             <button
               type="button"
               className={cn(
-                'inline-flex h-7 items-center justify-center rounded-full px-3 text-[10px] font-semibold tracking-[0.12em] transition-colors',
+                'inline-flex h-8 items-center justify-center border-b-2 border-transparent px-2.5 text-[11px] font-semibold tracking-[0.08em] transition-colors',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9b8352]/40',
                 isFilesView
-                  ? 'bg-[#9b8352] text-white shadow-sm'
-                  : 'text-[var(--text-muted-on-dark)] hover:bg-[#9b8352]/[0.18] hover:text-[var(--text-on-dark)]'
+                  ? 'border-[#d0b08a] text-[var(--text-on-dark)]'
+                  : 'text-[var(--text-muted-on-dark)] hover:text-[var(--text-on-dark)]'
               )}
               onClick={() => setActiveExplorer('files')}
               role="tab"
@@ -2158,11 +2156,11 @@ function LeftPanel({
               <button
                 type="button"
                 className={cn(
-                  'inline-flex h-7 items-center justify-center rounded-full px-3 text-[10px] font-semibold tracking-[0.12em] transition-colors',
+                  'inline-flex h-8 items-center justify-center border-b-2 border-transparent px-2.5 text-[11px] font-semibold tracking-[0.08em] transition-colors',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9b8352]/40',
                   isScopeView
-                    ? 'bg-[#9b8352] text-white shadow-sm'
-                    : 'text-[var(--text-muted-on-dark)] hover:bg-[#9b8352]/[0.18] hover:text-[var(--text-on-dark)]'
+                    ? 'border-[#d0b08a] text-[var(--text-on-dark)]'
+                    : 'text-[var(--text-muted-on-dark)] hover:text-[var(--text-on-dark)]'
                 )}
                 onClick={() => setActiveExplorer('scope')}
                 role="tab"
@@ -2171,25 +2169,6 @@ function LeftPanel({
                 title={scopedExplorerLabel || t('explorer_snapshot')}
               >
                 {t('explorer_snapshot').toUpperCase()}
-              </button>
-            ) : null}
-            {hasDiffExplorer ? (
-              <button
-                type="button"
-                className={cn(
-                  'inline-flex h-7 items-center justify-center rounded-full px-3 text-[10px] font-semibold tracking-[0.12em] transition-colors',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9b8352]/40',
-                  isDiffView
-                    ? 'bg-[#9b8352] text-white shadow-sm'
-                    : 'text-[var(--text-muted-on-dark)] hover:bg-[#9b8352]/[0.18] hover:text-[var(--text-on-dark)]'
-                )}
-                onClick={() => setActiveExplorer('diff')}
-                role="tab"
-                aria-selected={isDiffView}
-                aria-label={t('explorer_diff')}
-                title={t('explorer_diff')}
-              >
-                {t('explorer_diff').toUpperCase()}
               </button>
             ) : null}
           </div>
@@ -2206,7 +2185,7 @@ function LeftPanel({
               size="icon"
               onClick={handleExplorerNewFile}
               disabled={disableExplorerMutations}
-              className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
+              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
               title={
                 disableExplorerMutations
                   ? readOnlyMode
@@ -2226,7 +2205,7 @@ function LeftPanel({
               size="icon"
               onClick={handleExplorerNewFolder}
               disabled={disableExplorerMutations}
-              className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
+              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
               title={
                 disableExplorerMutations
                   ? readOnlyMode
@@ -2246,7 +2225,7 @@ function LeftPanel({
               size="icon"
               onClick={handleExplorerUpload}
               disabled={disableExplorerMutations}
-              className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
+              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
               title={
                 disableExplorerMutations
                   ? readOnlyMode
@@ -2264,12 +2243,28 @@ function LeftPanel({
               type="button"
               variant="ghost"
               size="icon"
-              onClick={() => setHideDotfiles((prev) => !prev)}
-              className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)]"
-              title={hideDotfiles ? t('explorer_show_dotfiles') : t('explorer_hide_dotfiles')}
-              aria-label={hideDotfiles ? t('explorer_show_dotfiles') : t('explorer_hide_dotfiles')}
+              onClick={() => {
+                if (isScopeView) return
+                setHideDotfiles((prev) => !prev)
+              }}
+              disabled={isScopeView}
+              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)] disabled:cursor-not-allowed disabled:opacity-40"
+              title={
+                isScopeView
+                  ? 'Snapshot explorer always hides dotfiles.'
+                  : hideDotfiles
+                    ? t('explorer_show_dotfiles')
+                    : t('explorer_hide_dotfiles')
+              }
+              aria-label={
+                isScopeView
+                  ? 'Snapshot explorer always hides dotfiles.'
+                  : hideDotfiles
+                    ? t('explorer_show_dotfiles')
+                    : t('explorer_hide_dotfiles')
+              }
             >
-              <DotfilesToggleIcon hidden={hideDotfiles} className="h-3.5 w-3.5" />
+              <DotfilesToggleIcon hidden={hideDotfilesEffective} className="h-3.5 w-3.5" />
             </Button>
             <Button
               type="button"
@@ -2281,7 +2276,7 @@ function LeftPanel({
                 (isFilesView ? isLoading : false) ||
                 (!isFilesView && scopedExplorerLoading)
               }
-              className="h-7 w-7 rounded-lg p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.08] hover:text-[var(--text-on-dark)] disabled:opacity-50"
+              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)] disabled:opacity-50"
               title={
                 disableExplorerActions
                   ? readOnlyMode
@@ -2307,46 +2302,58 @@ function LeftPanel({
         </div>
 
         <div className="border-b border-[var(--border-dark)] px-4 py-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-white/[0.08] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--text-on-dark)]">
-              {explorerModeLabel}
-            </span>
-            {explorerSelectionLabel ? (
-              <span className="rounded-full border border-white/[0.1] px-2.5 py-1 text-[10px] font-medium text-[var(--text-on-dark)]">
-                {explorerSelectionLabel}
-              </span>
-            ) : null}
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-muted-on-dark)]">
+            <span>{explorerModeLabel}</span>
+            {explorerSelectionLabel ? <span className="text-[var(--text-on-dark)]">{explorerSelectionLabel}</span> : null}
           </div>
-          <div className="mt-2 space-y-1 text-[11px] leading-5 text-[var(--text-muted-on-dark)]">
-            <div className="flex flex-wrap gap-x-4 gap-y-1">
-              <span>
-                <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_location')}</span>
-                {explorerLocation.sourceMode === 'snapshot'
-                  ? t('explorer_branch_snapshot')
-                  : t('explorer_live_workspace')}
-              </span>
-              {explorerLocation.revision ? (
-                <span>
-                  <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_revision')}</span>
-                  {explorerLocation.revision}
-                </span>
-              ) : null}
+          <div className="mt-2 space-y-2 text-[11px] leading-5 text-[var(--text-muted-on-dark)]">
+            <div className="truncate text-[13px] font-semibold text-[var(--text-on-dark)]">
+              {explorerPrimaryLine || explorerSelectionLabel || t('explorer_live_workspace')}
             </div>
-            {explorerLocation.compareBase && explorerLocation.compareHead ? (
-              <div className="break-words">
-                <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_compare')}</span>
-                {explorerLocation.compareBase} {'->'} {explorerLocation.compareHead}
+            <div className="truncate">
+              {explorerSecondaryLine}
+            </div>
+            {hasDiffExplorer ? (
+              <div className="break-words text-[#d39b61]">
+                Diff-highlighted files open full patches in the center tab.
               </div>
             ) : null}
-            <div className="break-words">
-              <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_scope')}</span>
-              {explorerScopeLabel}
-              {explorerLocation.fallbackToFullTree ? (
-                <span className="ml-2 text-[10px] uppercase tracking-[0.12em] text-[#d39b61]">
-                  {t('explorer_scope_fallback')}
-                </span>
-              ) : null}
-            </div>
+            {hasExplorerSecondaryMeta ? (
+              <details className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <summary className="cursor-pointer list-none text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--text-muted-on-dark)] [&::-webkit-details-marker]:hidden">
+                  More details
+                </summary>
+                <div className="mt-2 space-y-1 break-words text-[11px] leading-5 text-[var(--text-muted-on-dark)]">
+                  {explorerLocation.parentBranch ? (
+                    <div>
+                      <span className="mr-1 text-[var(--text-on-dark)]">Parent</span>
+                      {explorerLocation.parentBranch}
+                    </div>
+                  ) : null}
+                  {explorerLocation.revision ? (
+                    <div>
+                      <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_revision')}</span>
+                      {explorerLocation.revision}
+                    </div>
+                  ) : null}
+                  {explorerLocation.compareBase && explorerLocation.compareHead ? (
+                    <div>
+                      <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_compare')}</span>
+                      {explorerLocation.compareBase} {'->'} {explorerLocation.compareHead}
+                    </div>
+                  ) : null}
+                  <div>
+                    <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_scope')}</span>
+                    {explorerScopeLabel}
+                    {explorerLocation.fallbackToFullTree ? (
+                      <span className="ml-2 text-[10px] uppercase tracking-[0.12em] text-[#d39b61]">
+                        {t('explorer_scope_fallback')}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              </details>
+            ) : null}
           </div>
         </div>
 
@@ -2366,7 +2373,7 @@ function LeftPanel({
                 onFileDownload={handleFileDownload}
                 className="flex-1 min-h-0"
                 readOnly={readOnlyMode}
-                hideDotfiles={hideDotfiles}
+                hideDotfiles={hideDotfilesEffective}
               />
             </div>
           </div>
@@ -2386,99 +2393,11 @@ function LeftPanel({
                 onFileDownload={handleFileDownload}
                 className="flex-1 min-h-0"
                 readOnly
-                hideDotfiles={hideDotfiles}
+                hideDotfiles
                 nodesOverride={scopedExplorerNodes}
                 loadingOverride={scopedExplorerLoading}
                 emptyLabel={scopedExplorerLabel ? `No files in ${scopedExplorerLabel}.` : 'No scoped files.'}
               />
-            </div>
-          </div>
-
-          <div
-            className={cn(
-              'flex-1 min-h-0 overflow-hidden',
-              isDiffView ? 'flex flex-col' : 'hidden'
-            )}
-            role="tabpanel"
-            aria-hidden={!isDiffView}
-          >
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b border-[var(--border-dark)] px-4 py-2 text-[11px] text-[var(--text-muted-on-dark)]">
-                {diffCompareBase && diffCompareHead
-                  ? `${diffCompareBase} -> ${diffCompareHead}`
-                  : 'Diff preview'}
-              </div>
-              <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-                <div className="min-h-0 overflow-y-auto px-2 py-2 file-tree-scroll">
-                  <div className="space-y-1">
-                    {diffFiles.map((item) => (
-                      <button
-                        key={item.path}
-                        type="button"
-                        className={cn(
-                          'flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-colors',
-                          selectedDiffPath === item.path
-                            ? 'bg-[rgba(205,152,96,0.18)] text-[var(--text-on-dark)]'
-                            : 'text-[var(--text-muted-on-dark)] hover:bg-white/[0.06] hover:text-[var(--text-on-dark)]'
-                        )}
-                        onClick={() => setSelectedDiffPath(item.path)}
-                        onDoubleClick={() => void handleOpenDiffFile(item.path)}
-                      >
-                        <span className="min-w-0 truncate">{item.path}</span>
-                        <span className="ml-3 shrink-0 rounded-full bg-[rgba(205,152,96,0.16)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#d39b61]">
-                          {String(item.status || 'modified').slice(0, 1).toUpperCase()}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="min-h-0 border-t border-[var(--border-dark)] bg-black/[0.08]">
-                  <div className="flex items-center justify-between border-b border-[var(--border-dark)] px-4 py-2 text-[11px] text-[var(--text-muted-on-dark)]">
-                    {selectedDiffPath ? (
-                      <button
-                        type="button"
-                        className="inline-flex min-w-0 items-center gap-1 truncate text-left text-[var(--text-on-dark)] transition hover:text-[#f2d8bf]"
-                        onClick={() => void handleOpenDiffFile(selectedDiffPath)}
-                        title={t('explorer_open_snapshot_file')}
-                      >
-                        <span className="truncate">{selectedDiffPath}</span>
-                        <ExternalLink className="h-3 w-3 shrink-0" />
-                      </button>
-                    ) : (
-                      <span className="truncate">Select a file to inspect diff.</span>
-                    )}
-                    <span>{selectedDiffStatus || 'patch'}</span>
-                  </div>
-                  <div className="file-tree-scroll h-full overflow-y-auto px-0 py-0 font-mono text-[11px] leading-5 text-[var(--text-on-dark)]">
-                    {selectedDiffLoading ? (
-                      <div className="px-4 py-4 text-[var(--text-muted-on-dark)]">Loading diff…</div>
-                    ) : selectedDiffLines.length ? (
-                      selectedDiffLines.map((line, index) => (
-                        <div
-                          key={`${selectedDiffPath || 'diff'}:${index}`}
-                          className={cn(
-                            'whitespace-pre-wrap break-words px-4 py-0.5',
-                            line.startsWith('+') && 'bg-[rgba(110,138,118,0.18)] text-[#d9f0dc]',
-                            line.startsWith('-') && 'bg-[rgba(156,92,92,0.16)] text-[#ffd6d6]',
-                            line.startsWith('@@') && 'bg-white/[0.06] text-[#e8dccd]'
-                          )}
-                        >
-                          {line || ' '}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="px-4 py-4 text-[var(--text-muted-on-dark)]">
-                        Select a changed file to inspect its patch.
-                      </div>
-                    )}
-                    {selectedDiffTruncated ? (
-                      <div className="border-t border-[var(--border-dark)] px-4 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted-on-dark)]">
-                        Diff truncated
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
 
@@ -2518,6 +2437,14 @@ function LeftPanel({
                 active={activeQuestWorkspaceView === 'details'}
                 onClick={() => {
                   openQuestWorkspaceTab('details')
+                }}
+              />
+              <SidebarButton
+                icon={<BookOpen className="h-4 w-4" />}
+                label={t('quest_workspace_memory')}
+                active={activeQuestWorkspaceView === 'memory'}
+                onClick={() => {
+                  openQuestWorkspaceTab('memory')
                 }}
               />
               <SidebarButton
@@ -2671,17 +2598,17 @@ function CenterPanel({
   readOnly,
   safePaddingLeft,
   safePaddingRight,
-  overlay,
   onExitHome,
   localQuestMode = false,
+  workspace,
 }: {
   projectId: string
   readOnly?: boolean
   safePaddingLeft: number
   safePaddingRight: number
-  overlay?: React.ReactNode
   onExitHome?: () => void
   localQuestMode?: boolean
+  workspace?: ReturnType<typeof useQuestWorkspace>
 }) {
   const { t } = useI18n('workspace')
   const tabs = useTabsStore((s) => s.tabs)
@@ -2704,12 +2631,12 @@ function CenterPanel({
       ? activeTab
       : null
   const openQuestWorkspaceTab = React.useCallback(
-    (view: QuestWorkspaceView) => {
+    (view: QuestWorkspaceView, stageSelection?: QuestStageSelection | null) => {
       onExitHome?.()
       openTab({
         pluginId: QUEST_WORKSPACE_PLUGIN_ID,
-        context: buildQuestWorkspaceTabContext(projectId, view),
-        title: getQuestWorkspaceTitle(view),
+        context: buildQuestWorkspaceTabContext(projectId, view, stageSelection),
+        title: getQuestWorkspaceTitle(view, stageSelection),
       })
     },
     [onExitHome, openTab, projectId]
@@ -2828,7 +2755,6 @@ function CenterPanel({
           >
             {t('layout_loading')}
           </div>
-          {overlay}
         </div>
       )
     }
@@ -2838,7 +2764,6 @@ function CenterPanel({
         readOnly={readOnly}
         safePaddingLeft={safePaddingLeft}
         safePaddingRight={safePaddingRight}
-        overlay={overlay}
         onExitHome={onExitHome}
       />
     )
@@ -2850,9 +2775,10 @@ function CenterPanel({
         questId={projectId}
         safePaddingLeft={safePaddingLeft}
         safePaddingRight={safePaddingRight}
-        overlay={overlay}
         view={resolvedQuestWorkspaceView}
+        stageSelection={getQuestWorkspaceStageSelection(resolvedTab)}
         onViewChange={openQuestWorkspaceTab}
+        workspace={workspace}
       />
     )
   }
@@ -2903,7 +2829,6 @@ function CenterPanel({
           )}
         </div>
       </div>
-      {overlay}
     </div>
   )
 }
@@ -2951,14 +2876,12 @@ function EmptyWorkspace({
   readOnly,
   safePaddingLeft,
   safePaddingRight,
-  overlay,
   onExitHome,
 }: {
   projectId: string
   readOnly?: boolean
   safePaddingLeft: number
   safePaddingRight: number
-  overlay?: React.ReactNode
   onExitHome?: () => void
 }) {
   const { t } = useI18n('workspace')
@@ -2974,28 +2897,6 @@ function EmptyWorkspace({
   const handleUploadClick = React.useCallback(() => {
     fileInputRef.current?.click()
   }, [])
-
-  const handleNewNotebook = React.useCallback(() => {
-    onExitHome?.()
-    ;(async () => {
-      const notebook = await createNotebook(projectId, {
-        title: t('command_new_notebook_title'),
-        collaborationEnabled: true,
-      })
-      openTab({
-        pluginId: BUILTIN_PLUGINS.NOTEBOOK,
-        context: {
-          type: 'notebook',
-          resourceId: notebook.id,
-          resourceName: notebook.title,
-          customData: { projectId },
-        },
-        title: notebook.title,
-      })
-    })().catch((e) => {
-      console.error('[WorkspaceLayout] Failed to create notebook:', e)
-    })
-  }, [onExitHome, openTab, projectId])
 
   const handleOpenAnalysis = React.useCallback(() => {
     onExitHome?.()
@@ -3046,7 +2947,6 @@ function EmptyWorkspace({
             </FadeContent>
           </div>
         </div>
-        {overlay}
       </div>
     )
   }
@@ -3073,7 +2973,7 @@ function EmptyWorkspace({
 
             {/* Action Cards */}
             <FadeContent delay={0.08} duration={0.5} y={16}>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <ActionCard
                   title={t('workspace_card_new_file_title')}
                   description={t('workspace_card_new_file_desc')}
@@ -3081,23 +2981,6 @@ function EmptyWorkspace({
                   spotlightColor="rgba(143, 163, 184, 0.2)"
                   icon={
                     <FilePlus className="h-4 w-4 text-[var(--text-muted)] group-hover:text-[var(--text-main)] transition-colors" />
-                  }
-                />
-
-                <ActionCard
-                  title={t('workspace_card_new_notebook_title')}
-                  description={t('workspace_card_new_notebook_desc')}
-                  onClick={handleNewNotebook}
-                  spotlightColor="rgba(126, 154, 191, 0.2)"
-                  icon={
-                    <PngIcon
-                      name="BookOpen"
-                      size={16}
-                      className="h-4 w-4"
-                      fallback={
-                        <BookOpen className="h-4 w-4 text-[var(--text-muted)] group-hover:text-[var(--text-main)] transition-colors" />
-                      }
-                    />
                   }
                 />
 
@@ -3178,7 +3061,6 @@ function EmptyWorkspace({
           </div>
         </div>
       </div>
-      {overlay}
     </div>
   )
 }
@@ -3192,25 +3074,18 @@ export function WorkspaceLayout({
   projectName,
   projectSource = null,
   readOnly = false,
-  isSharedView = false,
 }: WorkspaceLayoutProps) {
   const { t } = useI18n('workspace')
   const { t: tCommon } = useI18n('common')
   const router = useRouter()
   const readOnlyMode = Boolean(readOnly)
   const isLocalQuestProject = projectSource === 'quest'
+  const questWorkspace = useQuestWorkspace(isLocalQuestProject ? projectId : null)
+  const [isMobileQuestShell, setIsMobileQuestShell] = React.useState(false)
   const workspaceProjectTitle = projectName ?? (projectId ? `Project ${projectId}` : 'Project')
-  const { user } = useAuthStore()
   const { addToast } = useToast()
-  const [tokenDialogOpen, setTokenDialogOpen] = React.useState(false)
-  const [tokenLoading, setTokenLoading] = React.useState(false)
-  const [tokenError, setTokenError] = React.useState('')
-  const [myToken, setMyToken] = React.useState('')
-  const [tokenRefreshLoading, setTokenRefreshLoading] = React.useState(false)
-  const [tokenRefreshError, setTokenRefreshError] = React.useState('')
   const tabsHydrated = useTabsStore((state) => state.hasHydrated)
   const activeTab = useActiveTab()
-  const shareReadOnly = isSharedView || isShareViewForProject(projectId)
   const activeLabContextSessionId = React.useMemo(
     () => getLabContextSessionId(activeTab, projectId),
     [activeTab, projectId]
@@ -3264,22 +3139,37 @@ export function WorkspaceLayout({
     window.localStorage.setItem(copilotSurfaceStorageKey, copilotSurface)
   }, [copilotSurface, copilotSurfaceStorageKey, isLocalQuestProject])
 
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const media = window.matchMedia('(max-width: 1023px)')
+    const update = () => {
+      setIsMobileQuestShell(Boolean(isLocalQuestProject && media.matches))
+    }
+    update()
+    media.addEventListener('change', update)
+    window.addEventListener('resize', update)
+    return () => {
+      media.removeEventListener('change', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [isLocalQuestProject])
+
   const templatesQuery = useQuery({
     queryKey: ['lab-templates', projectId],
     queryFn: () => listLabTemplates(projectId),
-    enabled: labDataEnabled && !shareReadOnly && !isLocalQuestProject,
+    enabled: labDataEnabled && !isLocalQuestProject,
     staleTime: labStaleTime,
   })
   const agentsQuery = useQuery({
     queryKey: ['lab-agents', projectId],
     queryFn: () => listLabAgents(projectId, { silent: true }),
-    enabled: labDataEnabled && !shareReadOnly && !isLocalQuestProject,
+    enabled: labDataEnabled && !isLocalQuestProject,
     staleTime: labStaleTime,
   })
   const questsQuery = useQuery({
     queryKey: ['lab-quests', projectId],
     queryFn: () => listLabQuests(projectId, { silent: true }),
-    enabled: labDataEnabled && !shareReadOnly && !isLocalQuestProject,
+    enabled: labDataEnabled && !isLocalQuestProject,
     staleTime: labStaleTime,
   })
 
@@ -3301,7 +3191,7 @@ export function WorkspaceLayout({
   )
   const effectiveCliStatus: 'online' | 'offline' | 'unbound' =
     cliStatus === 'online' && !boundCliServerOnline ? 'unbound' : cliStatus
-  const labCopilotReadOnly = readOnlyMode || shareReadOnly || effectiveCliStatus !== 'online'
+  const labCopilotReadOnly = readOnlyMode || effectiveCliStatus !== 'online'
   const leftStorageKey = `ds:project:${projectId}:left-panel`
   const navbarStorageKey = `ds:project:${projectId}:navbar-collapsed`
   const homeStorageKey = `ds:project:${projectId}:home-mode`
@@ -3346,11 +3236,6 @@ export function WorkspaceLayout({
   const [commandOpen, setCommandOpen] = React.useState(false)
   const [createFileOpen, setCreateFileOpen] = React.useState(false)
   const [createLatexOpen, setCreateLatexOpen] = React.useState(false)
-  const [shareDialogOpen, setShareDialogOpen] = React.useState(false)
-  const [canShare, setCanShare] = React.useState(false)
-  const [canCopy, setCanCopy] = React.useState(false)
-  const [shareCopyAllowed, setShareCopyAllowed] = React.useState(false)
-  const [sharePermissionReady, setSharePermissionReady] = React.useState(false)
   const copilotDock = useCopilotDockState(projectId, { defaultOpen: !readOnlyMode })
   const [scrollbarSide, setScrollbarSide] = React.useState<ScrollbarSide>(() => {
     if (readOnlyMode || !copilotDock.state.open) return 'right'
@@ -3379,12 +3264,6 @@ export function WorkspaceLayout({
       setCopilotSurface('agent')
     }
   }, [copilotSurface, homeMode])
-
-  React.useEffect(() => {
-    setSharePermissionReady(false)
-    if (!projectId || isSharedView) return
-    return scheduleIdle(() => setSharePermissionReady(true), 1400)
-  }, [isSharedView, projectId])
 
   const clearHomeEnteringTimer = React.useCallback(() => {
     if (homeEnteringTimerRef.current === null) return
@@ -3530,40 +3409,6 @@ export function WorkspaceLayout({
     return () => window.clearTimeout(t)
   }, [navbarMotion])
 
-  React.useEffect(() => {
-    let cancelled = false
-    if (!sharePermissionReady || isSharedView || !projectId || !user?.id) {
-      setCanShare(false)
-      setCanCopy(false)
-      return
-    }
-    ;(async () => {
-      try {
-        const access = await checkProjectAccess(projectId)
-        if (cancelled) return
-        const hasAccess = Boolean(access?.has_access)
-        setCanCopy(hasAccess)
-        setCanShare(Boolean(hasAccess && (access.role === 'owner' || access.role === 'admin')))
-      } catch {
-        if (cancelled) return
-        setCanShare(false)
-        setCanCopy(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [isSharedView, projectId, sharePermissionReady, user?.id])
-
-  React.useEffect(() => {
-    try {
-      const entry = getSharedProjects().find((p) => p.projectId === projectId)
-      setShareCopyAllowed(Boolean(entry?.permission === 'view' && entry.allowCopy))
-    } catch {
-      setShareCopyAllowed(false)
-    }
-  }, [projectId])
-
   const isHomeSurface = homeMode
   const shouldShowCopilot =
     !readOnlyMode && copilotDock.state.open && (!isHomeSurface || homeEntering)
@@ -3665,70 +3510,6 @@ export function WorkspaceLayout({
     setCommandOpen(true)
   }, [])
 
-  const handleGetToken = React.useCallback(async () => {
-    setTokenDialogOpen(true)
-    setTokenError('')
-    setTokenRefreshError('')
-    setTokenLoading(true)
-    try {
-      const data = await getMyToken()
-      setMyToken(data.api_token)
-    } catch (err: unknown) {
-      const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        (err instanceof Error ? err.message : tCommon('token_load_failed'))
-      setTokenError(message)
-      setMyToken('')
-    } finally {
-      setTokenLoading(false)
-    }
-  }, [tCommon])
-
-  const handleRefreshToken = React.useCallback(async () => {
-    if (!myToken) return
-    setTokenRefreshError('')
-    setTokenRefreshLoading(true)
-    try {
-      const data = await rotateMyToken(myToken)
-      setMyToken(data.api_token)
-    } catch (err: unknown) {
-      const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        (err instanceof Error ? err.message : tCommon('token_refresh_failed'))
-      setTokenRefreshError(message)
-    } finally {
-      setTokenRefreshLoading(false)
-    }
-  }, [myToken, tCommon])
-
-
-  const handleNewNotebook = React.useCallback(() => {
-    exitHome()
-    ;(async () => {
-      const notebook = await createNotebook(projectId, {
-        title: t('command_new_notebook_title'),
-        collaborationEnabled: true,
-      })
-      openTab({
-        pluginId: BUILTIN_PLUGINS.NOTEBOOK,
-        context: {
-          type: 'notebook',
-          resourceId: notebook.id,
-          resourceName: notebook.title,
-          customData: { projectId },
-        },
-        title: notebook.title,
-      })
-    })().catch((e) => {
-      console.error('[WorkspaceLayout] Failed to create notebook:', e)
-      addToast({
-        type: 'error',
-        title: t('toast_create_notebook_failed'),
-        description: tCommon('generic_try_again', undefined, 'Please try again.'),
-      })
-    })
-  }, [addToast, exitHome, openTab, projectId, t, tCommon])
-
   const handleNewFile = React.useCallback(() => {
     setCreateFileOpen(true)
   }, [])
@@ -3757,23 +3538,6 @@ export function WorkspaceLayout({
 
   const commandItems = React.useMemo<CommandItem[]>(() => {
     return [
-      {
-        id: 'new-notebook',
-        title: t('command_new_notebook_title'),
-        description: t('command_new_notebook_desc'),
-        group: 'Create',
-        keywords: ['create', 'notebook', 'document'],
-        icon: (
-          <PngIcon
-            name="BookOpen"
-            size={16}
-            className="h-4 w-4"
-            fallback={<BookOpen className="h-4 w-4 text-muted-foreground" />}
-          />
-        ),
-        shortcut: 'N',
-        run: handleNewNotebook,
-      },
       {
         id: 'new-file',
         title: t('command_new_file_title'),
@@ -3877,7 +3641,7 @@ export function WorkspaceLayout({
           />
         ),
         run: () => {
-          window.location.href = '/projects'
+          window.location.href = '/'
         },
       },
     ]
@@ -3886,7 +3650,6 @@ export function WorkspaceLayout({
     handleNewFile,
     handleNewFolder,
     handleNewLatexProject,
-    handleNewNotebook,
     handleUploadFiles,
     openSearch,
     openSettings,
@@ -4054,9 +3817,7 @@ export function WorkspaceLayout({
     if (didBootstrapRef.current === projectId) return
     didBootstrapRef.current = projectId
 
-    let canceled = false
-
-    const ensureDefaultNotebook = async () => {
+    const ensureDefaultWorkspace = () => {
       // 1) If persisted tabs belong to a different project (or have no projectId),
       //    reset tabs to prevent cross-project leakage.
       const state = useTabsStore.getState()
@@ -4149,81 +3910,20 @@ export function WorkspaceLayout({
         stateAfterReset.setActiveTab(existingLabTab.id)
         return
       }
-
-      // 2) If a notebook tab for this project already exists, activate it.
-      const existingNotebookTab = stateAfterReset.tabs.find((t) => {
-        return (
-          t.pluginId === BUILTIN_PLUGINS.NOTEBOOK &&
-          tabMatchesProject(t, projectId) &&
-          t.context?.type === 'notebook' &&
-          typeof t.context?.resourceId === 'string'
-        )
-      })
-      if (existingNotebookTab) {
-        stateAfterReset.setActiveTab(existingNotebookTab.id)
-        return
-      }
-
-      // 3) Resolve/create a default notebook, then open it.
-      const storageKey = `ds:project:${projectId}:homeNotebookId`
-      const preferredId =
-        typeof window !== 'undefined' ? window.localStorage.getItem(storageKey) : null
-
-      if (preferredId) {
-        try {
-          const notebook = await getNotebook(preferredId)
-          openTab({
-            pluginId: BUILTIN_PLUGINS.NOTEBOOK,
-            context: {
-              type: 'notebook',
-              resourceId: notebook.id,
-              resourceName: notebook.title,
-              customData: { projectId },
-            },
-            title: notebook.title,
-          })
-          return
-        } catch (e) {
-          // Stale id (deleted/moved/no permission) -> clear and fallback.
-          if (typeof window !== 'undefined') {
-            window.localStorage.removeItem(storageKey)
-          }
-        }
-      }
-
-      const list = await listNotebooks(projectId, { skip: 0, limit: 1 })
-      const notebook =
-        list.items[0] ??
-        (await createNotebook(projectId, {
-          title: 'Agent',
-          collaborationEnabled: true,
-        }))
-
-      if (canceled) return
-
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem(storageKey, notebook.id)
-      }
-
       openTab({
-        pluginId: BUILTIN_PLUGINS.NOTEBOOK,
+        pluginId: BUILTIN_PLUGINS.LAB,
         context: {
-          type: 'notebook',
-          resourceId: notebook.id,
-          resourceName: notebook.title,
-          customData: { projectId },
+          type: 'custom',
+          customData: {
+            projectId,
+            readOnly: readOnlyMode,
+          },
         },
-        title: notebook.title,
+        title: t('plugin_lab_home_title'),
       })
     }
 
-    ensureDefaultNotebook().catch((e) => {
-      console.error('[WorkspaceLayout] Failed to bootstrap default notebook:', e)
-    })
-
-    return () => {
-      canceled = true
-    }
+    ensureDefaultWorkspace()
   }, [isLocalQuestProject, openTab, projectId, readOnlyMode, resetTabs, t, tabsHydrated])
 
   const startResize = (direction: 'left') => (e: React.MouseEvent) => {
@@ -4348,6 +4048,17 @@ export function WorkspaceLayout({
     stageWidth,
   ])
 
+  if (isMobileQuestShell) {
+    return (
+      <MobileQuestWorkspaceShell
+        projectId={projectId}
+        projectName={workspaceProjectTitle}
+        readOnly={readOnlyMode}
+        workspace={questWorkspace}
+      />
+    )
+  }
+
   return (
     <div
       id="workspace-root"
@@ -4374,7 +4085,7 @@ export function WorkspaceLayout({
         '--ws-scrollbar-fade-ms': `${scrollbarFadeMs}ms`,
       } as React.CSSProperties}
     >
-      {/* Atmosphere background (shared with /projects) */}
+      {/* Atmosphere background shared with the landing page */}
       <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
         <div
           className={cn(
@@ -4405,9 +4116,6 @@ export function WorkspaceLayout({
           onOpenCommandPalette={openCommandPalette}
           onOpenSettings={openSettings}
           onOpenProjectSettings={openProjectSettings}
-          onShare={() => setShareDialogOpen(true)}
-          showShare={canShare || canCopy || shareCopyAllowed}
-          onNewNotebook={handleNewNotebook}
           onNewFile={handleNewFile}
           onNewLatexProject={handleNewLatexProject}
           onNewFolder={handleNewFolder}
@@ -4423,16 +4131,6 @@ export function WorkspaceLayout({
           localQuestMode={isLocalQuestProject}
         />
       </div>
-
-      {(canShare || canCopy || shareCopyAllowed) && (
-        <ProjectShareDialog
-          projectId={projectId}
-          open={shareDialogOpen}
-          onOpenChange={setShareDialogOpen}
-          canManageShare={canShare && !readOnlyMode}
-          defaultTab={canShare && !readOnlyMode ? 'share' : 'copy'}
-        />
-      )}
 
       {!readOnlyMode && (
         <>
@@ -4561,6 +4259,7 @@ export function WorkspaceLayout({
               projectId={projectId}
               readOnly={readOnlyMode}
               localQuestMode={isLocalQuestProject}
+              workspace={questWorkspace}
               safePaddingLeft={
                 applyCopilotPadding && copilotDock.state.side === 'left'
                   ? copilotDock.state.width + COPILOT_DOCK_DEFAULTS.gap + COPILOT_DOCK_DEFAULTS.edgeInset
@@ -4570,69 +4269,6 @@ export function WorkspaceLayout({
                 applyCopilotPadding && copilotDock.state.side === 'right'
                   ? copilotDock.state.width + COPILOT_DOCK_DEFAULTS.gap + COPILOT_DOCK_DEFAULTS.edgeInset
                   : 0
-              }
-              overlay={
-                !readOnlyMode && (!homeMode || homeEntering) ? (
-                  <CopilotDockOverlay
-                    projectId={projectId}
-                    stageWidth={stageWidth}
-                    state={copilotDock.state}
-                    surfaceMode="copilot"
-                    prefill={copilotPrefill}
-                    visible={showCopilotPanel}
-                    headerContent={
-                      isLabTab && !isLocalQuestProject ? (
-                        <LabCopilotHeader
-                          disabled={shareReadOnly}
-                          agents={agents}
-                          templates={templates}
-                          quests={quests}
-                          onClearChat={handleLabClearChat}
-                          clearChatDisabled={labCopilotReadOnly}
-                        />
-                      ) : undefined
-                    }
-                    bodyContent={
-                      isLocalQuestProject ? (
-                        <QuestCopilotDockPanel
-                          questId={projectId}
-                          title={workspaceProjectTitle}
-                          readOnly={readOnlyMode}
-                          prefill={copilotPrefill}
-                        />
-                      ) : isLabTab ? (
-                          <LabCopilotPanel
-                            projectId={projectId}
-                            readOnly={readOnlyMode}
-                            shareReadOnly={shareReadOnly}
-                            cliStatus={effectiveCliStatus}
-                            templates={templates}
-                            agents={agents}
-                            quests={quests}
-                            prefill={copilotPrefill}
-                            onActionsChange={(actions) => {
-                              copilotActionsRef.current = actions
-                            }}
-                          />
-                        
-                      ) : undefined
-                    }
-                    hideNewChat={isLabTab || isLocalQuestProject}
-                    hideHistory={isLabTab || isLocalQuestProject}
-                    hideFixWithAi={isLocalQuestProject}
-                    onActionsChange={(actions) => {
-                      copilotActionsRef.current = actions
-                    }}
-                    onClose={() => {
-                      copilotDock.setOpen(false)
-                    }}
-                    setSide={copilotDock.setSide}
-                    toggleSide={copilotDock.toggleSide}
-                    setWidth={copilotDock.setWidth}
-                    setMaxRatio={copilotDock.setMaxRatio}
-                    readOnly={readOnlyMode}
-                  />
-                ) : null
               }
               onExitHome={exitHome}
             />
@@ -4656,6 +4292,66 @@ export function WorkspaceLayout({
               />
             ) : null}
           </div>
+          {!readOnlyMode && (!homeMode || homeEntering) ? (
+            <CopilotDockOverlay
+              projectId={projectId}
+              stageWidth={stageWidth}
+              state={copilotDock.state}
+              surfaceMode="copilot"
+              prefill={copilotPrefill}
+              visible={showCopilotPanel}
+              headerContent={
+                isLabTab && !isLocalQuestProject ? (
+                  <LabCopilotHeader
+                    disabled={readOnlyMode}
+                    agents={agents}
+                    templates={templates}
+                    quests={quests}
+                    onClearChat={handleLabClearChat}
+                    clearChatDisabled={labCopilotReadOnly}
+                  />
+                ) : undefined
+              }
+              bodyContent={
+                isLocalQuestProject ? (
+                  <QuestCopilotDockPanel
+                    questId={projectId}
+                    title={workspaceProjectTitle}
+                    readOnly={readOnlyMode}
+                    prefill={copilotPrefill}
+                    workspace={questWorkspace}
+                  />
+                ) : isLabTab ? (
+                  <LabCopilotPanel
+                    projectId={projectId}
+                    readOnly={readOnlyMode}
+                    cliStatus={effectiveCliStatus}
+                    templates={templates}
+                    agents={agents}
+                    quests={quests}
+                    prefill={copilotPrefill}
+                    onActionsChange={(actions) => {
+                      copilotActionsRef.current = actions
+                    }}
+                  />
+                ) : undefined
+              }
+              hideNewChat={isLabTab || isLocalQuestProject}
+              hideHistory={isLabTab || isLocalQuestProject}
+              hideFixWithAi={isLocalQuestProject}
+              onActionsChange={(actions) => {
+                copilotActionsRef.current = actions
+              }}
+              onClose={() => {
+                copilotDock.setOpen(false)
+              }}
+              setSide={copilotDock.setSide}
+              toggleSide={copilotDock.toggleSide}
+              setWidth={copilotDock.setWidth}
+              setMaxRatio={copilotDock.setMaxRatio}
+              readOnly={readOnlyMode}
+            />
+          ) : null}
         </div>
 
         {/* Floating Recovery Toggles */}
@@ -4686,25 +4382,6 @@ export function WorkspaceLayout({
         projectId={projectId}
         onExitHome={exitHome}
         onEnterLab={enterLab}
-        onOpenShareDialog={() => setShareDialogOpen(true)}
-        tokenActions={{
-          onGetToken: handleGetToken,
-          onRefreshToken: handleRefreshToken,
-          hasToken: Boolean(myToken),
-        }}
-      />
-      <TokenDialog
-        open={tokenDialogOpen}
-        onOpenChange={setTokenDialogOpen}
-        title={tCommon('token_dialog_title')}
-        description={tCommon('token_dialog_description')}
-        token={myToken}
-        loading={tokenLoading}
-        error={tokenError}
-        onRefresh={handleRefreshToken}
-        refreshLoading={tokenRefreshLoading}
-        refreshDisabled={!myToken || tokenLoading}
-        refreshError={tokenRefreshError}
       />
       <WorkspaceTooltipLayer rootId="workspace-root" />
     </div>

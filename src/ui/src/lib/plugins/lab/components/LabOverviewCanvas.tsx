@@ -60,7 +60,6 @@ type LabOverviewCanvasProps = {
   hasPiAgent?: boolean
   piAgent?: { name: string; logo?: string | null; frameColor?: string | null } | null
   readOnly: boolean
-  shareReadOnly?: boolean
   canvasLevel?: 'map' | 'ops'
   actionPanel: React.ReactNode
   overviewPanel: React.ReactNode
@@ -794,7 +793,7 @@ function LabOverviewCanvasInner({
   activeQuestId,
   hasPiAgent,
   piAgent,
-  shareReadOnly,
+  readOnly,
   canvasLevel = 'map',
   actionPanel,
   overviewPanel,
@@ -1009,8 +1008,8 @@ function LabOverviewCanvasInner({
       id: 'overview:pending',
       type: 'overviewPending',
       position,
-      draggable: !shareReadOnly,
-      selectable: !shareReadOnly,
+      draggable: !readOnly,
+      selectable: !readOnly,
       data: {
         kind: 'pending',
         count: resolvedPendingCount,
@@ -1021,7 +1020,7 @@ function LabOverviewCanvasInner({
         zIndex: 2,
       },
     } satisfies Node<OverviewPendingNodeData>
-  }, [guideGroupRect, hasPendingNode, resolvedPendingCount, shareReadOnly, storedLayout?.nodes])
+  }, [guideGroupRect, hasPendingNode, readOnly, resolvedPendingCount, storedLayout?.nodes])
 
   const questNodes = React.useMemo(() => {
     const storedNodes = storedLayout?.nodes ?? {}
@@ -1040,7 +1039,7 @@ function LabOverviewCanvasInner({
         id,
         type: 'overviewQuest',
         position,
-        draggable: !shareReadOnly,
+        draggable: !readOnly,
         data: {
           questId: quest.quest_id,
           title: quest.title || 'Quest',
@@ -1084,7 +1083,7 @@ function LabOverviewCanvasInner({
     piAgent,
     t,
     quests,
-    shareReadOnly,
+    readOnly,
     storedLayout?.nodes,
     questOrigin,
   ])
@@ -1138,7 +1137,7 @@ function LabOverviewCanvasInner({
       id: nodeId,
       type: 'overviewPi',
       position,
-      draggable: !shareReadOnly,
+      draggable: !readOnly,
       data: {
         kind: 'pi',
         agentId: piAgentInstance.instance_id,
@@ -1154,7 +1153,7 @@ function LabOverviewCanvasInner({
     agents,
     guideGroupRect,
     hasPiAgent,
-    shareReadOnly,
+    readOnly,
     storedLayout?.nodes,
     templates,
     templatesById,
@@ -1214,7 +1213,7 @@ function LabOverviewCanvasInner({
           id: nodeId,
           type: 'overviewAgent',
           position,
-          draggable: !shareReadOnly,
+          draggable: !readOnly,
           data: {
             kind: 'agent',
             questId,
@@ -1234,7 +1233,7 @@ function LabOverviewCanvasInner({
     agents,
     questNodes,
     quests,
-    shareReadOnly,
+    readOnly,
     storedLayout?.nodes,
     templatesById,
     waitingAnswerByAgentId,
@@ -1445,7 +1444,7 @@ function LabOverviewCanvasInner({
             edges={edges}
             nodeTypes={OVERVIEW_NODE_TYPES}
             onNodesChange={onNodesChange}
-            nodesDraggable={!shareReadOnly}
+            nodesDraggable={!readOnly}
             panOnDrag
             zoomOnScroll
             zoomOnPinch

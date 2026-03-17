@@ -51,8 +51,6 @@ import type {
   AdminUsageDailyResponse,
   AdminLogSourcesResponse,
   AdminLogTailResponse,
-  AdminCliServer,
-  AdminCliServerListResponse,
   AdminLabOverview,
   AdminLabAgentSummary,
   AdminLabAgentListResponse,
@@ -123,7 +121,6 @@ import type {
   PaginatedResponse,
   PaginationParams,
 } from '../types/admin';
-import type { BlogDetail, BlogListResponse, BlogSummary, BlogAssetResponse } from '../types/blog';
 import type {
   LabQuestGraphResponse,
   LabQuestEventListResponse,
@@ -676,40 +673,6 @@ export async function getLogSources(): Promise<AdminLogSourcesResponse> {
   return response.data;
 }
 
-// CLI Admin
-export async function getAdminCliServers(params?: {
-  status?: string;
-  project_id?: string;
-  q?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<AdminCliServerListResponse> {
-  const response = await apiClient.get<AdminCliServerListResponse>(`${API_PREFIX}/admin/cli/servers`, {
-    params,
-  });
-  return response.data;
-}
-
-export async function getAdminCliServer(serverId: string): Promise<AdminCliServer> {
-  const response = await apiClient.get<AdminCliServer>(`${API_PREFIX}/admin/cli/servers/${serverId}`);
-  return response.data;
-}
-
-export async function updateAdminCliServer(serverId: string, payload: { name?: string }): Promise<AdminCliServer> {
-  const response = await apiClient.patch<AdminCliServer>(`${API_PREFIX}/admin/cli/servers/${serverId}`, payload);
-  return response.data;
-}
-
-export async function refreshAdminCliServer(serverId: string): Promise<{ success: boolean }> {
-  const response = await apiClient.post<{ success: boolean }>(`${API_PREFIX}/admin/cli/servers/${serverId}/refresh`);
-  return response.data;
-}
-
-export async function unbindAdminCliServer(serverId: string): Promise<{ success: boolean }> {
-  const response = await apiClient.post<{ success: boolean }>(`${API_PREFIX}/admin/cli/servers/${serverId}/unbind`);
-  return response.data;
-}
-
 // Lab admin
 export async function getAdminLabOverview(): Promise<AdminLabOverview> {
   const response = await apiClient.get<AdminLabOverview>(`${API_PREFIX}/admin/labs/overview`);
@@ -924,64 +887,6 @@ export async function updateAdminAgentTemplate(
     input
   );
   return response.data;
-}
-
-// Blog admin
-export async function getAdminBlogs(params?: { skip?: number; limit?: number }): Promise<BlogListResponse> {
-  const response = await apiClient.get<BlogListResponse>(`${API_PREFIX}/admin/blogs`, { params });
-  return response.data;
-}
-
-export async function getAdminBlog(blogId: string): Promise<BlogDetail> {
-  const response = await apiClient.get<BlogDetail>(`${API_PREFIX}/admin/blogs/${blogId}`);
-  return response.data;
-}
-
-export async function createAdminBlog(formData: FormData): Promise<BlogDetail> {
-  const response = await apiClient.post<BlogDetail>(`${API_PREFIX}/admin/blogs`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  });
-  return response.data;
-}
-
-export async function updateAdminBlog(
-  blogId: string,
-  input: {
-    title?: string
-    cite_url?: string | null
-    excerpt?: string | null
-    is_published?: boolean
-  }
-): Promise<BlogSummary> {
-  const response = await apiClient.patch<BlogSummary>(`${API_PREFIX}/admin/blogs/${blogId}`, input);
-  return response.data;
-}
-
-export async function updateAdminBlogContent(blogId: string, input: { content: string; excerpt?: string | null }): Promise<BlogDetail> {
-  const response = await apiClient.put<BlogDetail>(`${API_PREFIX}/admin/blogs/${blogId}/content`, input);
-  return response.data;
-}
-
-export async function uploadAdminBlogTitleFigure(blogId: string, file: File): Promise<BlogSummary> {
-  const formData = new FormData();
-  formData.append('title_figure', file);
-  const response = await apiClient.post<BlogSummary>(`${API_PREFIX}/admin/blogs/${blogId}/title-figure`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  });
-  return response.data;
-}
-
-export async function uploadAdminBlogAsset(blogId: string, file: File): Promise<BlogAssetResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
-  const response = await apiClient.post<BlogAssetResponse>(`${API_PREFIX}/admin/blogs/${blogId}/assets`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  });
-  return response.data;
-}
-
-export async function deleteAdminBlog(blogId: string): Promise<void> {
-  await apiClient.delete(`${API_PREFIX}/admin/blogs/${blogId}`);
 }
 
 export async function getLogTail(source: string, lines: number = 200): Promise<AdminLogTailResponse> {

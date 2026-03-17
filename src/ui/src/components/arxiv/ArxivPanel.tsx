@@ -2,8 +2,7 @@
 
 import * as React from "react";
 import { BookOpen, ChevronDown, Loader2, Search } from "lucide-react";
-import { acquireSocket, type SocketAuthMode } from "@/lib/plugins/notebook/lib/socket";
-import { getShareSessionToken } from "@/lib/share-session";
+import { acquireSocket } from "@/lib/plugins/notebook/lib/socket";
 import { useArxivStore } from "@/lib/stores/arxiv-store";
 import { ArxivImportBar } from "./ArxivImportBar";
 import { ArxivList, type ArxivSortKey } from "./ArxivList";
@@ -69,9 +68,7 @@ function useArxivSocket(projectId: string, readOnly: boolean) {
 
   React.useEffect(() => {
     if (!projectId) return;
-    const shareToken = getShareSessionToken();
-    const authMode: SocketAuthMode = readOnly && shareToken ? "share" : "user";
-    const { socket, release } = acquireSocket({ authMode });
+    const { socket, release } = acquireSocket();
 
     const handleImported = (payload: any) => {
       if (!payload || payload.project_id !== projectId) return;

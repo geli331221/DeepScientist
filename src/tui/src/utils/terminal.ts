@@ -13,7 +13,7 @@ export const isAlternateBufferEnabled = (): boolean => {
   const raw = readFlag('DEEPSCIENTIST_ALT_BUFFER', 'RESEAR_ALT_BUFFER')
   if (raw === '1' || raw === 'true' || raw === 'yes') return true
   if (raw === '0' || raw === 'false' || raw === 'no') return false
-  return false
+  return true
 }
 
 export const isIncrementalRenderingEnabled = (): boolean => {

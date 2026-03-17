@@ -1,7 +1,5 @@
 'use client'
 
-import { useMemo } from 'react'
-import { usePointsSummary } from '@/lib/hooks/usePoints'
 import { isQuestRuntimeSurface } from '@/lib/runtime/quest-runtime'
 import { useAuthStore } from '@/lib/stores/auth'
 
@@ -51,15 +49,14 @@ function resolveFeatureEntitlement(args: {
 
 export function useFeatureEntitlement(feature: string) {
   const { user } = useAuthStore()
-  const summaryQuery = usePointsSummary()
   const isLocalRuntime = isQuestRuntimeSurface()
 
   const isAdmin = user?.role === 'admin' || isLocalRuntime
-  const planTier = summaryQuery.data?.plan_tier
-  const planStatus = summaryQuery.data?.plan_status
-  const featureEntitlements = summaryQuery.data?.feature_entitlements
+  const planTier = isLocalRuntime ? 'local' : null
+  const planStatus = isLocalRuntime ? 'active' : null
+  const featureEntitlements = undefined
 
-  const isMaxActive = isLocalRuntime || (planTier === 'max' && planStatus === 'active')
+  const isMaxActive = true
   const isEntitled = resolveFeatureEntitlement({
     feature,
     featureEntitlements,
@@ -67,19 +64,17 @@ export function useFeatureEntitlement(feature: string) {
     isAdmin,
   })
 
-  const isEntitlementLoading = useMemo(() => {
-    if (isLocalRuntime) return false
-    if (isAdmin) return false
-    return summaryQuery.isLoading
-  }, [isAdmin, isLocalRuntime, summaryQuery.isLoading])
-
   return {
-    ...summaryQuery,
+    data: null,
+    error: null,
+    isLoading: false,
+    isFetching: false,
+    isSuccess: true,
     isAdmin,
     planTier,
     planStatus,
     isMaxActive,
-    isEntitlementLoading,
+    isEntitlementLoading: false,
     isEntitled,
     feature,
   }

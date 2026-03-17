@@ -12,14 +12,12 @@ const copy = {
     home: 'Home',
     docs: 'Docs',
     settings: 'Settings',
-    projects: 'Experiments',
     language: '中文 / EN',
   },
   zh: {
     home: '首页',
     docs: '文档',
     settings: '设置',
-    projects: '实验',
     language: '中文 / EN',
   },
 } as const
@@ -65,9 +63,6 @@ export function SiteHeader({
           <nav className="hidden items-center gap-1 md:flex">
             <NavLink to="/" end className={linkClass}>
               {t.home}
-            </NavLink>
-            <NavLink to="/projects" className={linkClass}>
-              {t.projects}
             </NavLink>
             <NavLink to="/docs" className={linkClass}>
               {t.docs}

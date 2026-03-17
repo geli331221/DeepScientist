@@ -1,13 +1,12 @@
 import { io, type Socket } from 'socket.io-client'
 import { useAuthStore } from '@/lib/stores/auth'
-import { getShareSessionToken } from '@/lib/share-session'
 import { resolveApiBaseUrl } from '@/lib/api/client'
 import { supportsSocketIo } from '@/lib/runtime/quest-runtime'
 import type { CliEnvelope } from './protocol'
 
 export type CliSocket = Socket<any, any>
 
-export type SocketAuthMode = 'user' | 'share'
+export type SocketAuthMode = 'user'
 
 type SocketEntry = {
   socket: CliSocket
@@ -68,9 +67,7 @@ export function acquireCliSocket(options: { authMode?: SocketAuthMode } = {}) {
     }
   }
   const endpoint = resolveApiBaseUrl()
-  const authMode: SocketAuthMode = options.authMode ?? 'user'
-  const shareToken = authMode === 'share' ? getShareSessionToken() : null
-  const cacheKey = authMode === 'share' ? `${endpoint}::share::${shareToken || ''}` : `${endpoint}::user`
+  const cacheKey = `${endpoint}::user`
 
   let entry = SOCKET_CACHE.get(cacheKey)
   if (!entry) {
@@ -81,10 +78,6 @@ export function acquireCliSocket(options: { authMode?: SocketAuthMode } = {}) {
       auth: (cb) => {
         const client_id = getCliClientId()
         const protocol_version = 'cli.v1'
-        if (authMode === 'share') {
-          cb({ token: getShareSessionToken(), client_id, protocol_version })
-          return
-        }
         const token =
           useAuthStore.getState().accessToken ||
           (typeof window !== 'undefined' ? window.localStorage.getItem('ds_access_token') : null)

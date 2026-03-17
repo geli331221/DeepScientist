@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,12 @@ class RunRequest:
     model: str
     approval_policy: str
     sandbox_mode: str
+    turn_reason: str = "user_message"
+    reasoning_effort: str | None = None
+    turn_id: str | None = None
+    attempt_index: int = 1
+    max_attempts: int = 1
+    retry_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

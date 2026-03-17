@@ -10,13 +10,18 @@ Use this skill whenever continuation is non-trivial.
 ## Interaction discipline
 
 - Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the latest user instruction bundle before making the next decision.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` when the decision analysis spans multiple concrete steps.
-- Message templates are references only. Adapt to context and vary wording so updates feel respectful, human, and non-robotic.
-- Each progress update must state completed reasoning or evidence gathering, the durable output touched, and the immediate next step.
-- Use `reply_mode='blocking'` for the actual decision request when the user must choose before safe continuation.
+- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before making the next decision.
+- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
+- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only when there is real user-visible progress: a meaningful checkpoint, a route-shaping update, or an occasional keepalive during truly long decision analysis. Do not update by tool-call cadence.
+- Message templates are references only. Adapt to context and vary wording so updates feel natural and non-robotic.
+- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
+- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- If the runtime starts an auto-continue turn with no new user message, continue from the active requirements and durable quest state instead of replaying the previous user turn.
+- If `startup_contract.decision_policy = autonomous`, do not emit ordinary `artifact.interact(kind='decision_request', ...)` calls; decide the route yourself, record the reason, and continue.
+- Use `reply_mode='blocking'` for the actual decision request only when the user must choose before safe continuation and the quest contract still allows a user-gated decision.
 - For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, wait up to 1 day when feasible, then choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest decision or progress interaction before assuming the task changed completely.
+- Quest completion is a special terminal decision: first ask for explicit completion approval with `artifact.interact(kind='decision_request', reply_mode='blocking', reply_schema={'decision_type': 'quest_completion_approval'}, ...)`, and only after an explicit approval reply should you call `artifact.complete_quest(...)`.
 
 ## Stage purpose
 
@@ -74,6 +79,7 @@ Use the following canonical actions:
 - `publish_baseline`
 - `write`
 - `finalize`
+- `iterate`
 - `reset`
 - `stop`
 - `request_user_decision`
@@ -82,10 +88,15 @@ Choose the smallest action that genuinely resolves the current state.
 
 In the current runtime, prefer these concrete flow actions:
 
-- accepted idea -> `artifact.submit_idea(mode='create', ...)`
-- revise active idea -> `artifact.submit_idea(mode='revise', ...)`
+- accepted idea -> `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)`
+- maintenance-only in-place cleanup of the same branch -> `artifact.submit_idea(mode='revise', ...)`
+- compare branch foundations before a new round -> `artifact.list_research_branches(...)`
+- start the next optimization round from a measured result -> `artifact.record(kind='decision', action='iterate', ...)`
 - launch analysis campaign -> `artifact.create_analysis_campaign(...)`
 - finish one analysis slice -> `artifact.record_analysis_slice(...)`
+- select a paper outline -> `artifact.submit_paper_outline(mode='select', ...)`
+- revise the selected paper outline -> `artifact.submit_paper_outline(mode='revise', ...)`
+- close writing into a durable bundle -> `artifact.submit_paper_bundle(...)`
 
 If the chosen action is baseline reuse, the decision is not complete until one of these is durably true:
 
@@ -93,6 +104,8 @@ If the chosen action is baseline reuse, the decision is not complete until one o
 - or the quest recorded an explicit blocker or waiver explaining why reuse could not be completed safely
 
 Treat `prepare_branch` as a compatibility or recovery action, not the normal path.
+Treat each accepted branch as one durable research round.
+If a branch already has a durable main-experiment result, a genuinely new optimization round should normally create a child branch from a chosen foundation rather than keep revising that old branch in place.
 
 ## Truth sources
 
@@ -166,6 +179,17 @@ When the choice is about an experiment package or analysis package, also record:
 - implementation priority order
 - what you expect to learn from the chosen package
 
+When the choice is about paper outline candidates, also record:
+
+- which outline best matches the actual evidence inventory
+- which `research_questions` and `experimental_designs` become the active contract after selection
+- whether more analysis is still required before drafting
+- whether the winning outline preserves strong:
+  - method fidelity
+  - evidence support
+  - story coherence
+  - experiment ordering
+
 Typical criteria include:
 
 - evidence quality
@@ -174,6 +198,14 @@ Typical criteria include:
 - expected information gain
 - narrative coherence
 - downstream usefulness
+
+For paper outline candidates specifically, prefer a paperagent-like rubric:
+
+- story quality around `motivation -> challenge -> resolution -> validation -> impact`
+- faithful method description rather than idealized storytelling
+- real experiment coverage rather than speculative placeholders
+- comparable baseline usage only where setups truly match
+- main-comparison-first ordering when the evidence supports it
 
 If evaluator scores exist, use them.
 Do not blindly follow a score if the underlying evidence is weak; explain the override when needed.
@@ -186,6 +218,34 @@ When the decision is about choosing a research direction, experiment route, or b
 - prefer routes that address that insufficiency elegantly rather than only spending more compute, more stages, or more complexity
 - prefer routes that respect the current codebase architecture unless there is strong evidence that a deeper break is justified
 - balance breakthrough potential against implementation risk and verification cost
+
+Use a light incumbent/frontier discipline for non-trivial route decisions:
+
+- identify the current `incumbent`:
+  - the best-supported active line from existing results, prior decisions, and literature
+- identify a small `frontier`:
+  - usually 2 to 3 serious alternatives worth comparing against the incumbent
+- choose the action that best follows from existing evidence:
+  - continue the incumbent
+  - branch to a frontier alternative
+  - stop or downgrade the line
+  - move to writing if the core claim is already sufficiently supported
+
+For these decisions, do not default to launching a small exploratory run just to break ties.
+Prefer careful judgment from durable evidence already on hand, especially:
+
+- observed result trends
+- failure modes and confounders
+- baseline-relative position
+- related-work saturation or overlap
+- implementation surface and verification burden
+
+When recording the decision, make explicit:
+
+- why the incumbent still wins, or why it should be replaced
+- which alternatives were serious enough to compare
+- which existing evidence was decisive
+- what residual risk remains after the choice
 
 Good route-selection criteria often include:
 
@@ -230,6 +290,12 @@ Useful optional fields include:
   - `confidence`
   - qualitative improvement estimate with justification
 
+When a decision materially changes the route, follow it with the appropriate user-visible `artifact.interact(...)` update:
+
+- use threaded `artifact.interact(kind='milestone', reply_mode='threaded', ...)` when the decision is already durably resolved and the quest can continue automatically
+- use `reply_mode='blocking'` only when the user must choose before safe continuation and `startup_contract.decision_policy` is not `autonomous`
+- the user-facing update should name the chosen action, the decisive evidence, the rejected alternative, and the next checkpoint
+
 This is especially useful for:
 
 - idea branch selection
@@ -261,6 +327,9 @@ Use `artifact.record(kind='decision', ...)` for the final decision.
 
 If user input is needed, also use `artifact.interact(kind='decision_request', ...)`.
 If the timeout expires without a user reply, choose the best option yourself, record why, and notify the user of the chosen option before moving on.
+
+If `startup_contract.decision_policy = autonomous`, ordinary route ambiguity is not by itself grounds to request user input.
+In that mode, only explicit approval-style exceptions such as quest completion should normally become blocking user decisions.
 
 ## Decision-quality rules
 

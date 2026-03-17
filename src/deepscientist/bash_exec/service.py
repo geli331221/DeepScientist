@@ -3,16 +3,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from ..mcp.context import McpContext
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, utc_now
+from .runtime import TerminalRuntimeManager
 
 BASH_STATUS_MARKER_PREFIX = "__DS_BASH_STATUS__"
 BASH_CARRIAGE_RETURN_PREFIX = "__DS_BASH_CR__"
@@ -27,11 +31,16 @@ INPUT_ESCAPE_SEQUENCE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
     ensure_dir(path.parent)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
+    with tempfile.NamedTemporaryFile(
+        "w",
         encoding="utf-8",
-    )
+        dir=path.parent,
+        prefix=f"{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=False) + "\n")
+        temp_path = Path(handle.name)
     temp_path.replace(path)
 
 
@@ -83,6 +92,9 @@ def _parse_progress_marker(line: str) -> dict[str, Any] | None:
 class BashExecService:
     def __init__(self, home: Path) -> None:
         self.home = home
+        self._summary_cache_lock = threading.Lock()
+        self._summary_cache: dict[str, dict[str, Any]] = {}
+        self._terminal_runtime_manager = TerminalRuntimeManager(home)
 
     def _quest_root(self, quest_id: str) -> Path:
         return self.home / "quests" / quest_id
@@ -92,6 +104,9 @@ class BashExecService:
 
     def index_path(self, quest_root: Path) -> Path:
         return self.sessions_root(quest_root) / "index.jsonl"
+
+    def summary_path(self, quest_root: Path) -> Path:
+        return self.sessions_root(quest_root) / "summary.json"
 
     def session_dir(self, quest_root: Path, bash_id: str) -> Path:
         return self.sessions_root(quest_root) / bash_id
@@ -119,6 +134,12 @@ class BashExecService:
 
     def line_buffer_path(self, quest_root: Path, bash_id: str) -> Path:
         return self.session_dir(quest_root, bash_id) / "line_buffer.json"
+
+    def terminal_rc_path(self, quest_root: Path, bash_id: str) -> Path:
+        return self.session_dir(quest_root, bash_id) / "terminal.rc"
+
+    def prompt_events_path(self, quest_root: Path, bash_id: str) -> Path:
+        return self.session_dir(quest_root, bash_id) / "prompt-events.log"
 
     def monitor_log_path(self, quest_root: Path, bash_id: str) -> Path:
         return self.session_dir(quest_root, bash_id) / "monitor.log"
@@ -205,6 +226,141 @@ class BashExecService:
         payload["kind"] = str(payload.get("kind") or "exec")
         return payload
 
+    @staticmethod
+    def _summary_session_payload(meta: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "bash_id": meta.get("bash_id") or meta.get("id"),
+            "command": meta.get("command"),
+            "kind": meta.get("kind") or "exec",
+            "label": meta.get("label"),
+            "workdir": meta.get("workdir"),
+            "status": _coerce_session_status(meta.get("status")),
+            "exit_code": meta.get("exit_code"),
+            "stop_reason": meta.get("stop_reason"),
+            "started_at": meta.get("started_at"),
+            "finished_at": meta.get("finished_at"),
+            "updated_at": meta.get("updated_at"),
+            "last_progress": meta.get("last_progress"),
+        }
+
+    @staticmethod
+    def _summary_sort_key(session: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(session.get("updated_at") or ""),
+            str(session.get("started_at") or ""),
+            str(session.get("bash_id") or ""),
+        )
+
+    @staticmethod
+    def _is_active_status(value: object) -> bool:
+        return _coerce_session_status(value) in {"running", "terminating"}
+
+    def _default_summary(self) -> dict[str, Any]:
+        return {
+            "session_count": 0,
+            "running_count": 0,
+            "latest_session": None,
+            "updated_at": utc_now(),
+        }
+
+    def _refresh_summary_cache(self, quest_root: Path, summary: dict[str, Any]) -> dict[str, Any]:
+        path = self.summary_path(quest_root)
+        cache_key = str(path.resolve())
+        if path.exists():
+            stat = path.stat()
+            state = (
+                stat.st_ino,
+                getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+                stat.st_size,
+            )
+        else:
+            state = None
+        payload = dict(summary)
+        with self._summary_cache_lock:
+            self._summary_cache[cache_key] = {
+                "state": state,
+                "summary": payload,
+            }
+        return payload
+
+    def _load_summary_from_disk(self, quest_root: Path) -> dict[str, Any] | None:
+        path = self.summary_path(quest_root)
+        if not path.exists():
+            return None
+        cache_key = str(path.resolve())
+        stat = path.stat()
+        state = (
+            stat.st_ino,
+            getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+            stat.st_size,
+        )
+        with self._summary_cache_lock:
+            cached = self._summary_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return dict(cached.get("summary") or self._default_summary())
+        summary = read_json(path, None)
+        if not isinstance(summary, dict):
+            return None
+        merged = {**self._default_summary(), **summary}
+        return self._refresh_summary_cache(quest_root, merged)
+
+    def _write_summary(self, quest_root: Path, summary: dict[str, Any]) -> dict[str, Any]:
+        normalized = {**self._default_summary(), **summary, "updated_at": utc_now()}
+        _atomic_write_json(self.summary_path(quest_root), normalized)
+        return self._refresh_summary_cache(quest_root, normalized)
+
+    def _rebuild_summary(self, quest_root: Path) -> dict[str, Any]:
+        summary = self._default_summary()
+        latest_session: dict[str, Any] | None = None
+        session_count = 0
+        running_count = 0
+        for meta_path in self.sessions_root(quest_root).glob("*/meta.json"):
+            meta = read_json(meta_path, {})
+            if not isinstance(meta, dict) or not meta:
+                continue
+            session_count += 1
+            if self._is_active_status(meta.get("status")):
+                running_count += 1
+            compact = self._summary_session_payload(meta)
+            if latest_session is None or self._summary_sort_key(compact) >= self._summary_sort_key(latest_session):
+                latest_session = compact
+        summary["session_count"] = session_count
+        summary["running_count"] = running_count
+        summary["latest_session"] = latest_session
+        return self._write_summary(quest_root, summary)
+
+    def summary(self, quest_root: Path) -> dict[str, Any]:
+        loaded = self._load_summary_from_disk(quest_root)
+        if loaded is not None:
+            return loaded
+        return self._rebuild_summary(quest_root)
+
+    def _write_meta(self, quest_root: Path, bash_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        path = self.meta_path(quest_root, bash_id)
+        previous = read_json(path, {}) if path.exists() else {}
+        _atomic_write_json(path, meta)
+
+        summary = self.summary(quest_root)
+        old_exists = isinstance(previous, dict) and bool(previous)
+        old_running = self._is_active_status(previous.get("status")) if old_exists else False
+        new_running = self._is_active_status(meta.get("status"))
+        if not old_exists:
+            summary["session_count"] = int(summary.get("session_count") or 0) + 1
+        if old_running != new_running:
+            running_count = int(summary.get("running_count") or 0)
+            running_count += 1 if new_running else -1
+            summary["running_count"] = max(0, running_count)
+
+        latest_session = summary.get("latest_session")
+        compact = self._summary_session_payload(meta)
+        if (
+            not isinstance(latest_session, dict)
+            or str(latest_session.get("bash_id") or "") == str(compact.get("bash_id") or "")
+            or self._summary_sort_key(compact) >= self._summary_sort_key(latest_session)
+        ):
+            summary["latest_session"] = compact
+        return self._write_summary(quest_root, summary)
+
     def reconcile_session(self, quest_root: Path, bash_id: str) -> dict[str, Any]:
         meta_path = self.meta_path(quest_root, bash_id)
         meta = read_json(meta_path, {})
@@ -213,15 +369,33 @@ class BashExecService:
         status = _coerce_session_status(meta.get("status"))
         if status in TERMINAL_STATUSES:
             return self._session_payload(quest_root, meta)
+        kind = _normalize_string(meta.get("kind")).lower()
+        if kind == "terminal":
+            runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
+            if runtime is not None:
+                return self._session_payload(quest_root, read_json(meta_path, meta) or meta)
         monitor_pid = meta.get("monitor_pid")
         process_pid = meta.get("process_pid")
-        if _is_process_alive(process_pid) or _is_process_alive(monitor_pid):
+        if kind == "terminal" and _is_process_alive(process_pid):
+            process_group_id = meta.get("process_group_id")
+            if isinstance(process_group_id, int) and process_group_id > 0:
+                try:
+                    os.killpg(process_group_id, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            elif isinstance(process_pid, int) and process_pid > 0:
+                try:
+                    os.kill(process_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            time.sleep(0.05)
+        if kind != "terminal" and (_is_process_alive(process_pid) or _is_process_alive(monitor_pid)):
             return self._session_payload(quest_root, meta)
         stop_reason = _normalize_string(meta.get("stop_reason"))
         meta["status"] = "terminated" if stop_reason else "failed"
         meta.setdefault("finished_at", utc_now())
         meta["updated_at"] = utc_now()
-        _atomic_write_json(meta_path, meta)
+        self._write_meta(quest_root, bash_id, meta)
         return self._session_payload(quest_root, meta)
 
     def get_session(self, quest_root: Path, bash_id: str) -> dict[str, Any]:
@@ -363,13 +537,17 @@ class BashExecService:
         meta["stop_reason"] = request_payload["reason"]
         meta["stopped_by_user_id"] = request_payload["user_id"]
         meta["updated_at"] = utc_now()
-        _atomic_write_json(self.meta_path(quest_root, bash_id), meta)
-        process_group_id = meta.get("process_group_id")
-        if isinstance(process_group_id, int) and process_group_id > 0:
-            try:
-                os.killpg(process_group_id, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        self._write_meta(quest_root, bash_id, meta)
+        runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
+        if runtime is not None:
+            runtime.stop(reason=request_payload["reason"], force=False)
+        else:
+            process_group_id = meta.get("process_group_id")
+            if isinstance(process_group_id, int) and process_group_id > 0:
+                try:
+                    os.killpg(process_group_id, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
         return self._session_payload(quest_root, meta)
 
     def _build_initial_meta(
@@ -482,7 +660,7 @@ class BashExecService:
         )
         self.terminal_log_path(quest_root, bash_id).touch()
         self.log_path(quest_root, bash_id).touch()
-        _atomic_write_json(self.meta_path(quest_root, bash_id), meta)
+        self._write_meta(quest_root, bash_id, meta)
         append_jsonl(
             self.index_path(quest_root),
             {
@@ -579,7 +757,12 @@ class BashExecService:
         resolved_quest_id = _normalize_string(quest_id) or resolved_quest_root.name
         try:
             session = self.reconcile_session(resolved_quest_root, bash_id)
-            if _normalize_string(session.get("kind")).lower() == "terminal" and _normalize_string(session.get("status")).lower() not in TERMINAL_STATUSES:
+            runtime = self._terminal_runtime_manager.get_runtime(resolved_quest_root, bash_id)
+            if (
+                _normalize_string(session.get("kind")).lower() == "terminal"
+                and _normalize_string(session.get("status")).lower() not in TERMINAL_STATUSES
+                and runtime is not None
+            ):
                 return session
         except FileNotFoundError:
             session = None
@@ -602,6 +785,7 @@ class BashExecService:
         self.log_path(resolved_quest_root, bash_id).touch()
         self.input_path(resolved_quest_root, bash_id).touch()
         self.history_path(resolved_quest_root, bash_id).touch()
+        self.prompt_events_path(resolved_quest_root, bash_id).touch()
         _atomic_write_json(
             self.input_cursor_path(resolved_quest_root, bash_id),
             {"offset": len(read_jsonl(self.input_path(resolved_quest_root, bash_id))), "updated_at": utc_now()},
@@ -610,6 +794,19 @@ class BashExecService:
             self.line_buffer_path(resolved_quest_root, bash_id),
             {"buffer": "", "updated_at": utc_now()},
         )
+        terminal_rc_path = self.terminal_rc_path(resolved_quest_root, bash_id)
+        terminal_rc_path.write_text(
+            "\n".join(
+                [
+                    "PS1='\\w$ '",
+                    "PS2='> '",
+                    'PROMPT_COMMAND=\'printf "__DS_TERMINAL_PROMPT__ cwd=%q ts=%s\\n" "$PWD" "$(date -u +%FT%TZ)" >> "${DS_TERMINAL_PROMPT_PATH}"\'',
+                    "bind 'set enable-bracketed-paste off' >/dev/null 2>&1 || true",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         stop_request = self.stop_request_path(resolved_quest_root, bash_id)
         if stop_request.exists():
             stop_request.unlink()
@@ -617,14 +814,9 @@ class BashExecService:
         env_payload = {
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
-            # Keep prompt effectively blank but non-empty so bash does not fall back to `bash-x.y$`.
-            "PS1": " ",
-            "PS2": " ",
-            "PROMPT_COMMAND": (
-                'printf "__DS_TERMINAL_PROMPT__ cwd=%q ts=%s\\n" "$PWD" "$(date -u +%FT%TZ)"'
-            ),
+            "DS_TERMINAL_PROMPT_PATH": str(self.prompt_events_path(resolved_quest_root, bash_id)),
         }
-        command = "exec bash --noprofile --norc -i"
+        command = f"exec bash --noprofile --rcfile {shlex.quote(str(terminal_rc_path))} -i"
         resolved_label = _normalize_string(label) or previous_label
         meta = self._build_terminal_meta(
             quest_root=resolved_quest_root,
@@ -639,7 +831,7 @@ class BashExecService:
             user_id=user_id,
             env_keys=sorted(env_payload),
         )
-        _atomic_write_json(self.meta_path(resolved_quest_root, bash_id), meta)
+        self._write_meta(resolved_quest_root, bash_id, meta)
         append_jsonl(
             self.index_path(resolved_quest_root),
             {
@@ -651,13 +843,19 @@ class BashExecService:
                 "started_at": meta["started_at"],
             },
         )
-        meta["monitor_pid"] = self._start_monitor_process(
+        meta = self._terminal_runtime_manager.ensure_runtime(
             quest_root=resolved_quest_root,
             bash_id=bash_id,
+            meta_path=self.meta_path(resolved_quest_root, bash_id),
+            log_path=self.log_path(resolved_quest_root, bash_id),
+            terminal_log_path=self.terminal_log_path(resolved_quest_root, bash_id),
+            prompt_events_path=self.prompt_events_path(resolved_quest_root, bash_id),
             env_payload=env_payload,
+            command=command,
+            cwd=target_cwd,
         )
         meta["updated_at"] = utc_now()
-        _atomic_write_json(self.meta_path(resolved_quest_root, bash_id), meta)
+        self._write_meta(resolved_quest_root, bash_id, meta)
         return self._session_payload(resolved_quest_root, meta)
 
     def _update_terminal_line_buffer(
@@ -718,6 +916,10 @@ class BashExecService:
         status = _normalize_string(session.get("status")).lower()
         if status in TERMINAL_STATUSES:
             raise ValueError("terminal_session_inactive")
+        runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
+        if runtime is None:
+            raise ValueError("terminal_runtime_inactive")
+        runtime.write_input(normalized_data)
 
         entry = {
             "input_id": generate_id("tin"),
@@ -744,18 +946,51 @@ class BashExecService:
             meta["history_count"] = len(read_jsonl(self.history_path(quest_root, bash_id)))
             meta["updated_at"] = utc_now()
             meta["last_input_at"] = utc_now()
-            _atomic_write_json(self.meta_path(quest_root, bash_id), meta)
+            self._write_meta(quest_root, bash_id, meta)
         else:
             meta = read_json(self.meta_path(quest_root, bash_id), {})
             meta["updated_at"] = utc_now()
             meta["last_input_at"] = utc_now()
-            _atomic_write_json(self.meta_path(quest_root, bash_id), meta)
+            self._write_meta(quest_root, bash_id, meta)
         return {
             "ok": True,
             "session": self._session_payload(quest_root, read_json(self.meta_path(quest_root, bash_id), {})),
             "accepted_input": entry,
             "completed_commands": completed,
         }
+
+    def resize_terminal_session(self, quest_root: Path, bash_id: str, *, cols: int, rows: int) -> bool:
+        runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
+        if runtime is None:
+            return False
+        runtime.resize(cols, rows)
+        return True
+
+    def issue_terminal_attach_token(self, quest_root: Path, bash_id: str, *, ttl_seconds: int = 60) -> dict[str, Any]:
+        runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
+        if runtime is None:
+            raise ValueError("terminal_runtime_inactive")
+        token = self._terminal_runtime_manager.issue_attach_token(
+            quest_root,
+            bash_id,
+            ttl_seconds=ttl_seconds,
+        )
+        return {
+            "token": token.token,
+            "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(token.expires_at)),
+        }
+
+    def get_terminal_runtime(self, quest_root: Path, bash_id: str):
+        return self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
+
+    def consume_terminal_attach_token(self, token: str):
+        return self._terminal_runtime_manager.consume_attach_token(token)
+
+    def resolve_terminal_attach_token(self, token: str):
+        return self._terminal_runtime_manager.resolve_attach_token(token)
+
+    def shutdown(self) -> None:
+        self._terminal_runtime_manager.shutdown()
 
     def terminal_restore_payload(
         self,

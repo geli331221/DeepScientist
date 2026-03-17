@@ -10,9 +10,37 @@ Use this skill for the main evidence-producing runs of the quest.
 ## Interaction discipline
 
 - Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the latest user instruction bundle before continuing the run plan.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only at real checkpoints, and normally no more frequently than every 5 to 15 tool calls.
-- Each progress update must state completed work, the durable output touched, and the immediate next run step.
+- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before continuing the run plan.
+- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
+- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` only when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or an occasional keepalive during truly long work. Do not update by tool-call cadence.
+- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
+- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- Keep ordinary subtask completions concise. When a main experiment actually finishes or reaches a stage-significant checkpoint, upgrade to a richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` report rather than another short progress line.
+- That richer experiment-stage milestone report should normally cover: what run finished, the headline result versus baseline or expectation, the main caveat, and the exact recommended next action.
+- That richer milestone report is still normally non-blocking. If the next route is already justified locally, continue automatically after reporting rather than idling for acknowledgment.
+- If the active communication surface is QQ and QQ milestone media is enabled in config, a completed main experiment may attach one summary PNG to that richer milestone update.
+- That PNG should be a connector-facing report chart, not a raw debug plot and not a draft paper figure.
+- Do not auto-send every training curve, per-step plot, or intermediate slice image.
+- Preferred connector-chart palettes are Morandi-like and restrained:
+  - `sage-clay`: `#E7E1D6`, `#B7A99A`, `#7F8F84` for the default QQ summary look
+  - `mist-stone`: `#F3EEE8`, `#D8D1C7`, `#8A9199` for conservative summaries
+  - `dust-rose`: `#F2E9E6`, `#D8C3BC`, `#B88C8C` for secondary comparisons only
+- Connector-facing chart requirements:
+  - white or near-white background
+  - low saturation, no neon colors
+  - one primary accent plus one neutral comparison color whenever possible
+  - simple legend, light grid, readable labels, and no dashboard clutter
+  - summarize only the evidence needed for the milestone
+- Default chart choice:
+  - line chart for training / budget / step trends
+  - bar chart for a small number of categorical end-point comparisons
+  - point-range chart when uncertainty or seed spread matters
+- If the figure encodes ordered magnitude, use a sequential muted palette; if it encodes signed delta around a reference, use a diverging muted palette with a neutral midpoint.
+- Avoid rainbow / jet-like colormaps, 3D effects, and over-annotated dashboards.
+- If the chart may later be reused in the paper, export a vector copy (`pdf` or `svg`) alongside the connector `png`.
+- If the figure matters beyond transient debugging, open `figure-polish/SKILL.md` and follow its render-inspect-revise workflow before treating the image as final.
+- If plotting in Python, reuse the fixed Morandi plotting starter from the system prompt rather than inventing a new bright style for each run.
+- If the runtime starts an auto-continue turn with no new user message, continue from the current run state, logs, artifacts, and active requirements instead of replaying the previous user turn.
 - Progress message templates are references only. Adapt to the actual context and vary wording so messages feel human, respectful, and non-robotic.
 - Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
 - For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, wait up to 1 day when feasible, then choose the best option yourself and notify the user of the chosen option if the timeout expires.
@@ -32,6 +60,12 @@ It should preserve the strongest old experiment-planning and execution disciplin
 
 The experiment stage is not just "run code".
 It is the stage that converts an idea contract into evidence that other stages can trust.
+It is also the stage that should decide the next route once the measured result exists.
+
+Use `references/evidence-ladder.md` when deciding whether the current package is merely executable, solid enough to carry the main claim, or already in the stage where broader polish is justified.
+
+Completing one main run is not quest completion.
+After reporting the run, keep moving to iterate, analyze, write, or finalize unless a genuine blocking decision remains.
 
 ## Non-negotiable rules
 
@@ -43,6 +77,17 @@ It is the stage that converts an idea contract into evidence that other stages c
 - Implement the claimed mechanism, not a convenient shortcut that changes the theory.
 - Keep the baseline reference read-only.
 - Avoid asking the user to fix the environment unless there is no credible agent-side path left.
+- After each `artifact.record_main_experiment(...)`, route from the measured result:
+  - if paper mode is enabled, decide whether to strengthen evidence, analyze, or write
+  - if paper mode is disabled, prefer iterate / revise-idea / branch over default writing
+
+## Experiment mental guardrails
+
+- Baseline reproduction is not wasted time; untrusted comparison is wasted time.
+- Failed runs are still data when the delta and diagnosis are recorded clearly.
+- Suspiciously good results deserve the same skepticism as obvious failures.
+- Change less, learn more.
+- If a retry does not add new evidence, it is budget burn rather than progress.
 
 ## Use when
 
@@ -130,6 +175,7 @@ Recommended additional files:
   - Python version
   - package freeze
   - GPU info when applicable
+- a live execution note or rolling run log when the experiment spans multiple implementation or execution steps
 
 `run_manifest.json` should capture at least:
 
@@ -152,6 +198,10 @@ If a command needed for environment capture is unavailable, record that gap in t
 Before implementation or execution, state:
 
 - `run_id`
+- experiment tier: `auxiliary/dev` or `main/test`
+- research question
+- null hypothesis
+- alternative hypothesis
 - hypothesis
 - baseline id or variant
 - metric targets
@@ -164,7 +214,25 @@ Before implementation or execution, state:
 - strongest alternative hypothesis
 - exact metric keys that will decide success or failure
 
+For substantial runs, also record the following seven experiment fields early and keep them updated during execution:
+
+1. research question
+2. research type
+3. research objective
+4. experimental setup
+5. experimental results
+6. experimental analysis
+7. experimental conclusions
+
 If the run contract changes materially later, record the change durably.
+
+Treat the run contract as a research question contract, not only an execution checklist.
+Before coding, be able to explain:
+
+- why this run is the best current route rather than the main alternatives
+- what observation would count as a real answer to the research question
+- what result would force a downgrade, retry, or route change
+- what confounder would make the run non-comparable even if it finishes successfully
 
 If multiple candidate experiment packages exist, prefer the one with the best balance of:
 
@@ -174,12 +242,25 @@ If multiple candidate experiment packages exist, prefer the one with the best ba
 
 Do not choose a package only because it sounds ambitious.
 
+For paper-facing lines, default to this evidence ladder:
+
+- `auxiliary/dev`
+  - clarify parameters, settings, mechanisms, or diagnostics
+- `main/test`
+  - carry the core comparison the paper will rely on
+- `minimum -> solid -> maximum`
+  - first make the result executable and comparable
+  - then make it strong enough to carry the claim
+  - only then spend effort on broader supporting polish
+
 ### 2. Run a preflight check
 
 Before editing or executing:
 
 - confirm the dataset path, version, and split contract
 - confirm the baseline metrics reference
+- if durable state exposes `active_baseline_metric_contract_json`, read that JSON file before planning commands or comparisons
+- treat `active_baseline_metric_contract_json` as the default authoritative baseline comparison contract unless you record a concrete reason to override it
 - confirm the selected idea claim and code-level plan
 - look up prior incidents or repeated failure patterns when available
 - confirm output directories and naming
@@ -191,6 +272,31 @@ Also confirm before comparison work:
 
 - the baseline verification is trustworthy enough
 - the planned comparison still uses the same metric contract
+- the metric keys and primary metric still match `active_baseline_metric_contract_json` when that file is available
+- if the run is `main/test` and superiority is likely to be claimed, define the significance-testing plan before execution rather than after seeing the numbers
+
+Before you begin a substantial run, send a concise threaded `artifact.interact(kind='progress', ...)` update naming:
+
+- the run contract you are about to execute
+- the main evidence it is testing
+- the expected durable outputs
+- the next checkpoint for reporting back
+
+### 2.1 Diagnostic mode trigger
+
+Switch from ordinary execution mode into diagnosis mode when any of the following becomes true:
+
+- two retries in a row add no new evidence or no interpretable delta
+- the baseline gap is much larger than expected and the cause is unclear
+- the metrics are suspiciously strong, suspiciously identical to baseline, or highly unstable
+- logs, checkpoints, or intermediate outputs conflict with the claimed behavior
+
+In diagnosis mode:
+
+- stop brute-force retrying
+- prefer the smallest discriminative test that can separate competing hypotheses
+- resolve obvious environment or data-contract issues before launching another comparison run
+- make the diagnosis goal explicit: explain the behavior, not just "try something else"
 
 ### 3. Confirm the execution workspace
 
@@ -198,8 +304,10 @@ The normal experiment workspace is the current active idea worktree returned by 
 
 - do not create a fresh manual branch for the main experiment unless recovery or debugging truly requires it
 - implement and run inside the current active idea workspace
-- if the idea itself changed materially before execution, revise it first with `artifact.submit_idea(mode='revise', ...)`
+- if the idea package changes materially before execution, submit a new durable idea branch with `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)` instead of silently mutating the old node
 - after a real main run finishes, record it with `artifact.record_main_experiment(...)` before moving to analysis or writing
+- once that durable main result exists, treat the branch as a fixed round node; a later new optimization round should usually compare foundations and create a new `continue_line` child branch or `branch_alternative` sibling-like branch
+- after `artifact.record_main_experiment(...)`, if QQ milestone media is enabled and the metrics are stable enough to summarize honestly, prefer one concise summary PNG over multiple attachments
 
 ### 4. Implement the minimum required change
 
@@ -213,6 +321,14 @@ Implementation rules:
 - add robustness checks when the mechanism risks NaN, inf, or unstable behavior
 
 Prefer to complete one experiment cleanly before expanding to the next, unless parallel execution is explicitly justified and isolated.
+For substantial experiment packages, the default is one experiment at a time, with each one reaching a recoverable recorded state before the next begins.
+
+Retry-delta discipline:
+
+- unless the current state is completely non-executable, change only one major variable per retry
+- if broader recovery is unavoidable, record exactly which layer changed: data, preprocessing, model, objective, optimization, evaluation, or environment
+- before each retry, state the expected effect and the fastest falsification signal
+- if the retry produced no interpretable delta, do not treat it as meaningful evidence about the underlying research hypothesis
 
 ### 5. Execute the run
 
@@ -226,6 +342,7 @@ Execution rules:
 - keep logs durable
 - report progress for long runs
 - avoid silent metric-definition changes
+- do not drift away from `active_baseline_metric_contract_json` silently when that file exists
 - avoid silently changing the baseline comparison recipe
 - run the full agreed evaluation, not only a smoke test
 
@@ -237,6 +354,24 @@ Pilot-before-scale rule:
 - use the pilot to catch implementation mistakes early
 - record pilot outcomes explicitly
 - do not mistake pilot success for final evidence
+
+Incremental-recording rule:
+
+- do not wait until the end to reconstruct the run from memory
+- update the durable run note after:
+  - contract definition
+  - important code changes
+  - pilot validation
+  - full execution checkpoints
+  - post-run analysis
+- include timestamps when they materially help reconstruction
+- preserve failed attempts, anomalies, and partial outcomes rather than overwriting them
+
+Last-known-good rule:
+
+- keep track of the most recent state that was executable, comparable, and explainable
+- when a new attempt breaks that state, debug forward from the last-known-good point instead of stacking more speculative edits on top of the broken state
+- if the last-known-good state is unclear, reconstruct it before spending more budget on new hypotheses
 
 ### 5.1 Long-running command protocol
 
@@ -253,7 +388,8 @@ For commands that may run longer than a few minutes:
   - wait about `1800s`, then inspect logs
   - then keep checking about every `1800s` while the run is still active
 - if needed, use shell `sleep` between checks or an equivalent bounded `bash_exec(mode='await', id=..., timeout_seconds=...)`
-- after the first meaningful signal and then at real checkpoints (e.g., completion, or roughly every ~30 minutes if still running), send `artifact.interact(kind='progress', ...)` with the latest real status and next check point
+- after every completed sleep / await cycle, inspect logs and send `artifact.interact(kind='progress', ...)` with the latest real status, latest evidence, the next checkpoint, and the estimated next reply time
+- after the first meaningful signal and then at real checkpoints (e.g., completion, or roughly every ~30 minutes if still running), keep those progress updates going rather than waiting silently
 - do not report completion until logs and output files both confirm completion
 
 Always preserve the managed `bash_exec` log and export it into the experiment artifact directory when the run artifact is written.
@@ -266,6 +402,7 @@ Long loops should emit structured progress markers rather than noisy raw progres
 - keep them throttled
 - treat them as UI signals, not narrative prose
 - do not paste raw progress lines into summaries
+- when possible include `eta` in seconds and `next_reply_at` or `next_check_at` so web/TUI can show the next expected update
 
 If the codebase uses `tqdm` or similar tooling, disable or redirect the native bar and emit concise structured progress instead.
 
@@ -297,6 +434,7 @@ Also verify baseline comparability before claiming deltas:
 - was the baseline verification stable?
 - was the evaluation path the same?
 - are the compared metric keys identical?
+- if the run is claim-carrying, are the significance results or uncertainty estimates strong enough for main-text use?
 - do known caveats make the delta weaker than it first appears?
 
 ### 7. Record the run
@@ -329,6 +467,21 @@ That call is responsible for writing:
 - changed files
 - relevant config paths when applicable
 
+After `artifact.record_main_experiment(...)` succeeds, do not assume the same branch should absorb the next round by default.
+Interpret the measured result first, then either:
+
+- launch analysis from this branch, or
+- compare candidate foundations and create the next child research branch
+
+When `artifact.record_main_experiment(...)` succeeds, send a richer threaded `artifact.interact(kind='milestone', ...)` update rather than a generic one-line progress ping.
+That milestone should state:
+
+- the research question that was tested
+- the primary result and baseline delta
+- whether the run supports, weakens, or leaves the idea inconclusive
+- the main caveat or confidence note that still matters
+- the exact recommended next move
+
 Do not treat a main run as durably complete until `artifact.record_main_experiment(...)` succeeds.
 
 Recommended per-run documentation fields:
@@ -340,6 +493,8 @@ Recommended per-run documentation fields:
 5. experimental results
 6. experimental analysis
 7. experimental conclusions
+
+These seven fields should be progressively filled as the run advances, not only at final packaging time.
 
 `RUN.md` should make it easy for later stages to answer:
 
@@ -398,6 +553,7 @@ If the result is confounded, say so directly.
 Before marking the run complete, verify all of the following:
 
 - all required baseline metric keys are present
+- the reported comparison contract still matches `active_baseline_metric_contract_json` when that file exists
 - metric values are finite numbers
 - claim-to-metric traceability is recorded
 - run manifest includes exact command, config, seed, and environment snapshot
@@ -456,6 +612,8 @@ Use tags to refine retrieval when helpful, for example:
 - `type:metric-contract`
 - `type:claim-validation`
 - `topic:<mechanism>`
+
+When calling `memory.write(...)`, pass `tags` as an array like `["stage:experiment", "type:failure-pattern", "topic:<mechanism>"]`, not as one comma-joined string.
 
 Recommended read timing:
 
@@ -526,6 +684,17 @@ Prefer a primary failure type such as:
 - `implementation_bug`
 - `evaluation_pipeline_failure`
 - `external_dependency_blocked`
+- `direction_underperforming`
+
+Also classify the broader failure layer when possible:
+
+- implementation
+- evaluation
+- environment
+- direction
+
+Do not collapse these into one bucket.
+A direction should only be treated as failing when repeated, well-instrumented evidence still points to underperformance after implementation, evaluation, and environment explanations have been checked.
 
 Blocked experiment states commonly include:
 
@@ -541,6 +710,14 @@ When results are suspicious, such as identical to baseline, implausibly perfect,
 2. isolate preprocessing, tokenization, model init, training, and evaluation one by one
 3. compare intermediate outputs on the same inputs
 4. align inputs first, then outputs, then metrics
+
+Default diagnosis loop:
+
+1. collect the concrete failure or anomaly cases
+2. identify the last-known-good comparable state
+3. define the smallest delta between working and broken states
+4. write `2-4` concrete hypotheses
+5. run the cheapest discriminative check before another full retry
 
 ## Exit criteria
 

@@ -4,10 +4,12 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   AlertCircle,
+  Brain,
   Bot,
   CheckCircle2,
   GitCommitHorizontal,
   Loader2,
+  Square,
   Sparkles,
   User2,
 } from 'lucide-react'
@@ -16,6 +18,12 @@ import { Badge } from '@/components/ui/badge'
 import { AgentCommentBlock } from '@/components/feed/AgentCommentBlock'
 import { QuestBashExecOperation } from '@/components/workspace/QuestBashExecOperation'
 import { QuestMcpOperation } from '@/components/workspace/QuestMcpOperation'
+import {
+  findLatestRenderedOperationId,
+  mergeFeedItemsForRender,
+  type RenderFeedItem,
+  type RenderOperationFeedItem,
+} from '@/lib/feedOperations'
 import OrbitLogoStatus from '@/lib/plugins/ai-manus/components/OrbitLogoStatus'
 import { ThinkingIndicator } from '@/lib/plugins/ai-manus/components/ThinkingIndicator'
 import { buildToolOperationContent, extractToolSubject, toolTheme } from '@/lib/toolOperations'
@@ -29,6 +37,7 @@ type EventFeedProps = {
   restoring?: boolean
   connectionState?: 'connecting' | 'connected' | 'reconnecting' | 'error'
   emptyLabel?: string
+  bottomInset?: number
 }
 
 function isBashExecOperation(item: Extract<FeedItem, { type: 'operation' }>) {
@@ -151,6 +160,7 @@ function MessageBubble({
   streaming: boolean
 }) {
   const isAssistant = item.role === 'assistant'
+  const isReasoning = Boolean(item.reasoning)
   const renderedContent = useStreamingContent(item.content, streaming)
 
   return (
@@ -163,7 +173,9 @@ function MessageBubble({
       className={cn(
         'group relative flex gap-4 rounded-[30px] px-4 py-4 transition-all sm:px-5',
         isAssistant
-          ? 'border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.94),rgba(246,243,238,0.98))] shadow-[0_18px_42px_-34px_rgba(17,24,39,0.18)] dark:border-white/[0.08] dark:bg-[linear-gradient(180deg,rgba(34,37,44,0.94),rgba(27,30,36,0.96))]'
+          ? isReasoning
+            ? 'border border-black/[0.06] bg-[linear-gradient(180deg,rgba(251,249,244,0.86),rgba(244,239,233,0.92))] shadow-[0_16px_36px_-32px_rgba(17,24,39,0.16)] dark:border-white/[0.08] dark:bg-[linear-gradient(180deg,rgba(40,42,48,0.84),rgba(30,33,39,0.92))]'
+            : 'border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.94),rgba(246,243,238,0.98))] shadow-[0_18px_42px_-34px_rgba(17,24,39,0.18)] dark:border-white/[0.08] dark:bg-[linear-gradient(180deg,rgba(34,37,44,0.94),rgba(27,30,36,0.96))]'
           : 'bg-transparent'
       )}
     >
@@ -171,16 +183,24 @@ function MessageBubble({
         className={cn(
           'mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-[18px] border',
           isAssistant
-            ? 'border-black/10 bg-[rgba(47,52,55,0.08)] text-foreground dark:border-white/[0.12] dark:bg-[rgba(231,223,210,0.08)]'
+            ? isReasoning
+              ? 'border-black/10 bg-[rgba(183,165,154,0.12)] text-foreground dark:border-white/[0.12] dark:bg-[rgba(183,165,154,0.16)]'
+              : 'border-black/10 bg-[rgba(47,52,55,0.08)] text-foreground dark:border-white/[0.12] dark:bg-[rgba(231,223,210,0.08)]'
             : 'border-black/10 bg-white/[0.60] text-foreground dark:border-white/[0.12] dark:bg-white/[0.05]'
         )}
       >
-        {isAssistant ? <Bot className="h-4 w-4" /> : <User2 className="h-4 w-4" />}
+        {isAssistant ? (
+          isReasoning ? <Brain className="h-4 w-4" /> : <Bot className="h-4 w-4" />
+        ) : (
+          <User2 className="h-4 w-4" />
+        )}
       </div>
 
       <div className="min-w-0 flex-1 space-y-2.5">
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-          <span className="font-medium text-foreground">{isAssistant ? 'DeepScientist' : 'You'}</span>
+          <span className="font-medium text-foreground">
+            {isAssistant ? (isReasoning ? 'Thinking' : 'DeepScientist') : 'You'}
+          </span>
           {item.source ? <span>{item.source}</span> : null}
           {item.skillId ? <Badge className="bg-black/[0.03] dark:bg-white/[0.04]">{item.skillId}</Badge> : null}
           {streaming ? <span className="inline-flex h-2 w-2 rounded-full bg-[#2F3437] animate-caret dark:bg-[#E7DFD2]" /> : null}
@@ -345,9 +365,11 @@ function EventLine({ item }: { item: Extract<FeedItem, { type: 'event' }> }) {
 function OperationBlock({
   item,
   questId,
+  isLatestBash,
 }: {
-  item: Extract<FeedItem, { type: 'operation' }>
+  item: RenderOperationFeedItem
   questId?: string
+  isLatestBash?: boolean
 }) {
   if (questId && isBashExecOperation(item)) {
     return (
@@ -366,6 +388,7 @@ function OperationBlock({
         monitorPlanSeconds={item.monitorPlanSeconds}
         monitorStepIndex={item.monitorStepIndex}
         nextCheckAfterSeconds={item.nextCheckAfterSeconds}
+        isLatest={Boolean(isLatestBash)}
       />
     )
   }
@@ -391,13 +414,30 @@ function OperationBlock({
   const theme = toolTheme(item.toolName, item.args, item.output)
   const Icon = theme.icon
   const subject = item.subject || extractToolSubject(item.toolName, item.args, item.output)
-  const detail = item.label === 'tool_result' ? item.output || item.args : item.args || item.output
-  const content = item.content || buildToolOperationContent(item.label, item.toolName, item.args, item.output)
-  const isRunning = item.label === 'tool_call' && item.status !== 'completed' && item.status !== 'failed'
-  const isFailed = item.status === 'failed'
-  const accentClass = isFailed
-    ? 'text-rose-600 dark:text-rose-300'
-    : 'text-blue-600 dark:text-blue-300'
+  const title =
+    item.content ||
+    buildToolOperationContent(item.hasResult ? 'tool_result' : 'tool_call', item.toolName, item.args, item.output)
+  const rawStatus = String(item.status || '').trim().toLowerCase()
+  const isFailed = rawStatus.includes('fail') || rawStatus.includes('error')
+  const isStopped = rawStatus === 'stopped' || rawStatus === 'terminated' || rawStatus === 'cancelled'
+  const isRunning =
+    !item.hasResult ||
+    ['running', 'calling', 'pending', 'queued', 'starting', 'terminating'].includes(rawStatus)
+  const resolvedStatus = isFailed
+    ? rawStatus || 'failed'
+    : isStopped
+      ? rawStatus
+      : isRunning
+        ? rawStatus || 'running'
+        : rawStatus || 'completed'
+  const StatusIcon = isFailed ? AlertCircle : isStopped ? Square : isRunning ? Loader2 : CheckCircle2
+  const statusClass = isFailed
+    ? 'border-rose-500/20 bg-rose-500/10 text-rose-700 dark:border-rose-300/20 dark:bg-rose-300/10 dark:text-rose-200'
+    : isStopped
+      ? 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:border-amber-300/20 dark:bg-amber-300/10 dark:text-amber-200'
+      : isRunning
+        ? 'border-black/[0.08] bg-black/[0.04] text-foreground dark:border-white/[0.10] dark:bg-white/[0.06]'
+        : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:border-emerald-300/20 dark:bg-emerald-300/10 dark:text-emerald-200'
 
   return (
     <motion.article
@@ -408,7 +448,7 @@ function OperationBlock({
       transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
       className={cn(
         'rounded-[28px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(246,243,238,0.98))] px-5 py-4 shadow-[0_18px_42px_-34px_rgba(17,24,39,0.18)] dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(34,37,44,0.94),rgba(27,30,36,0.96))]',
-        isRunning && 'ring-1 ring-blue-400/20 dark:ring-blue-300/20'
+        isRunning && 'ring-1 ring-black/[0.05] dark:ring-white/[0.08]'
       )}
     >
       <div className="mb-3 flex flex-wrap items-start gap-3">
@@ -424,36 +464,22 @@ function OperationBlock({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-medium text-foreground">DeepScientist</span>
-            <Badge>{theme.label}</Badge>
-            {item.toolName ? <Badge>{item.toolName}</Badge> : null}
-            {item.status ? <Badge>{item.status}</Badge> : null}
-            {item.toolCallId ? <Badge>{item.toolCallId}</Badge> : null}
+            <Badge className="bg-black/[0.03] dark:bg-white/[0.04]">{theme.label}</Badge>
+            {item.toolName ? <Badge className="bg-black/[0.03] dark:bg-white/[0.04]">{item.toolName}</Badge> : null}
+            <span className={cn('inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium', statusClass)}>
+              <StatusIcon className={cn('h-3.5 w-3.5', isRunning && 'animate-spin')} />
+              {resolvedStatus}
+            </span>
             {item.createdAt ? <span className="ml-auto">{formatTime(item.createdAt)}</span> : null}
           </div>
-          <div className={cn('mt-2 text-base font-semibold leading-7', accentClass)}>
-            {content}
+          <div className="mt-2 text-[15px] font-semibold leading-7 text-foreground">
+            {title}
           </div>
-        </div>
-
-        <div className="shrink-0">
-          {isRunning ? (
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300">
-              <Loader2 className="h-4 w-4 animate-spin" />
-            </span>
-          ) : isFailed ? (
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/10 text-rose-600 dark:text-rose-300">
-              <AlertCircle className="h-4 w-4" />
-            </span>
-          ) : (
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
-              <CheckCircle2 className="h-4 w-4" />
-            </span>
-          )}
         </div>
       </div>
 
       {subject ? (
-        <div className="mb-3 inline-flex max-w-full rounded-full bg-blue-500/[0.08] px-3 py-1.5 text-xs text-blue-700 dark:bg-blue-400/[0.10] dark:text-blue-200">
+        <div className="mb-3 inline-flex max-w-full rounded-full border border-black/[0.05] bg-black/[0.03] px-3 py-1.5 text-xs text-muted-foreground dark:border-white/[0.06] dark:bg-white/[0.04]">
           {subject}
         </div>
       ) : null}
@@ -468,12 +494,26 @@ function OperationBlock({
         />
       ) : null}
 
-      {detail ? (
+      {item.args ? (
         <div className="overflow-hidden rounded-[20px] border border-black/[0.05] bg-black/[0.025] dark:border-white/[0.06] dark:bg-white/[0.04]">
           <div className="border-b border-black/[0.05] px-3 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground dark:border-white/[0.06]">
-            {item.label === 'tool_result' ? 'Output' : 'Arguments'}
+            Arguments
           </div>
-          <pre className="feed-scrollbar max-h-[240px] overflow-auto px-3 py-3 text-[12px] leading-6 text-foreground">{detail}</pre>
+          <pre className="feed-scrollbar max-h-[220px] overflow-auto px-3 py-3 text-[12px] leading-6 text-foreground">{item.args}</pre>
+        </div>
+      ) : null}
+
+      {item.output ? (
+        <div
+          className={cn(
+            'overflow-hidden rounded-[20px] border border-black/[0.05] bg-black/[0.025] dark:border-white/[0.06] dark:bg-white/[0.04]',
+            item.args ? 'mt-3' : ''
+          )}
+        >
+          <div className="border-b border-black/[0.05] px-3 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground dark:border-white/[0.06]">
+            Output
+          </div>
+          <pre className="feed-scrollbar max-h-[260px] overflow-auto px-3 py-3 text-[12px] leading-6 text-foreground">{item.output}</pre>
         </div>
       ) : null}
     </motion.article>
@@ -487,14 +527,20 @@ export function EventFeed({
   restoring = false,
   connectionState = 'connected',
   emptyLabel = 'ACP-compatible copilot events will appear here.',
+  bottomInset = 32,
 }: EventFeedProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const renderItems = useMemo(() => mergeFeedItemsForRender(items), [items])
   const streamingMessageId = useMemo(
     () =>
       [...items]
         .reverse()
         .find((item) => item.type === 'message' && item.role === 'assistant' && item.stream)?.id ?? null,
     [items]
+  )
+  const latestBashOperationId = useMemo(
+    () => findLatestRenderedOperationId(renderItems, (item: RenderOperationFeedItem) => isBashExecOperation(item)),
+    [renderItems]
   )
 
   useEffect(() => {
@@ -504,13 +550,20 @@ export function EventFeed({
     }
     container.scrollTo({
       top: container.scrollHeight,
-      behavior: items.length > 1 ? 'smooth' : 'auto',
+      behavior: renderItems.length > 1 ? 'smooth' : 'auto',
     })
-  }, [items, loading, restoring])
+  }, [loading, renderItems, restoring])
 
   return (
-    <div ref={containerRef} className="feed-scrollbar flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
-      {items.length === 0 ? (
+    <div
+      ref={containerRef}
+      className="feed-scrollbar flex min-h-0 flex-1 flex-col gap-3 overflow-y-scroll pr-1"
+      style={{
+        paddingBottom: bottomInset,
+        scrollPaddingBottom: bottomInset,
+      }}
+    >
+      {renderItems.length === 0 ? (
         <StatusPlaceholder
           loading={loading}
           restoring={restoring}
@@ -520,7 +573,7 @@ export function EventFeed({
       ) : null}
 
       <AnimatePresence initial={false}>
-        {items.map((item) => {
+        {renderItems.map((item: RenderFeedItem) => {
           if (item.type === 'message') {
             return <MessageBubble key={item.id} item={item} streaming={item.id === streamingMessageId} />
           }
@@ -528,7 +581,14 @@ export function EventFeed({
             return <ArtifactBlock key={item.id} item={item} />
           }
           if (item.type === 'operation') {
-            return <OperationBlock key={item.id} item={item} questId={questId} />
+            return (
+              <OperationBlock
+                key={item.renderId}
+                item={item}
+                questId={questId}
+                isLatestBash={(item.toolCallId || item.renderId) === latestBashOperationId}
+              />
+            )
           }
           return <EventLine key={item.id} item={item} />
         })}

@@ -9,7 +9,10 @@ export type GitStrategy =
   | 'branch_per_analysis_then_paper'
   | 'semantic_head_plus_controlled_integration'
   | 'manual_integration_only'
-export type StartResearchContractPresetId = 'safe_baseline' | 'direction_probe' | 'full_sprint'
+export type ResearchIntensity = 'light' | 'balanced' | 'sprint'
+export type DecisionPolicy = 'autonomous' | 'user_gated'
+export type LaunchMode = 'standard' | 'custom'
+export type CustomProfile = 'continue_existing_state' | 'revision_rebuttal' | 'freeform'
 
 export type StartResearchTemplate = {
   title: string
@@ -21,18 +24,24 @@ export type StartResearchTemplate = {
   paper_urls: string
   runtime_constraints: string
   objectives: string
+  need_research_paper: boolean
+  research_intensity: ResearchIntensity
+  decision_policy: DecisionPolicy
+  launch_mode: LaunchMode
+  custom_profile: CustomProfile
+  entry_state_summary: string
+  review_summary: string
+  custom_brief: string
+  user_language: 'en' | 'zh'
+}
+
+export type StartResearchContractFields = {
   scope: ResearchScope
   baseline_mode: BaselineMode
   resource_policy: ResourcePolicy
   time_budget_hours: string
   git_strategy: GitStrategy
-  user_language: 'en' | 'zh'
 }
-
-export type StartResearchContractFields = Pick<
-  StartResearchTemplate,
-  'scope' | 'baseline_mode' | 'resource_policy' | 'time_budget_hours' | 'git_strategy'
->
 
 export type StartResearchTemplateEntry = StartResearchTemplate & {
   id: string
@@ -40,15 +49,22 @@ export type StartResearchTemplateEntry = StartResearchTemplate & {
   compiled_prompt: string
 }
 
-const START_RESEARCH_CONTRACT_PRESETS: Record<
-  StartResearchContractPresetId,
+type PersistedStartResearchTemplate = Partial<
+  StartResearchTemplate &
+    StartResearchContractFields & {
+      baseline_root_id?: string
+    }
+>
+
+const START_RESEARCH_INTENSITY_PRESETS: Record<
+  ResearchIntensity,
   {
-    id: StartResearchContractPresetId
+    id: ResearchIntensity
     contract: StartResearchContractFields
   }
 > = {
-  safe_baseline: {
-    id: 'safe_baseline',
+  light: {
+    id: 'light',
     contract: {
       scope: 'baseline_only',
       baseline_mode: 'stop_if_insufficient',
@@ -57,8 +73,8 @@ const START_RESEARCH_CONTRACT_PRESETS: Record<
       git_strategy: 'manual_integration_only',
     },
   },
-  direction_probe: {
-    id: 'direction_probe',
+  balanced: {
+    id: 'balanced',
     contract: {
       scope: 'baseline_plus_direction',
       baseline_mode: 'restore_from_url',
@@ -67,8 +83,8 @@ const START_RESEARCH_CONTRACT_PRESETS: Record<
       git_strategy: 'semantic_head_plus_controlled_integration',
     },
   },
-  full_sprint: {
-    id: 'full_sprint',
+  sprint: {
+    id: 'sprint',
     contract: {
       scope: 'full_research',
       baseline_mode: 'allow_degraded_minimal_reproduction',
@@ -79,14 +95,12 @@ const START_RESEARCH_CONTRACT_PRESETS: Record<
   },
 }
 
-export const START_RESEARCH_CONTRACT_PRESET_ORDER: StartResearchContractPresetId[] = [
-  'safe_baseline',
-  'direction_probe',
-  'full_sprint',
-]
+export const START_RESEARCH_INTENSITY_ORDER: ResearchIntensity[] = ['light', 'balanced', 'sprint']
 
-export const START_RESEARCH_STORAGE_KEY = 'ds:start-research:v3'
-export const START_RESEARCH_HISTORY_KEY = 'ds:start-research:history:v2'
+export const START_RESEARCH_STORAGE_KEY = 'ds:start-research:v5'
+export const START_RESEARCH_HISTORY_KEY = 'ds:start-research:history:v4'
+const LEGACY_START_RESEARCH_STORAGE_KEYS = ['ds:start-research:v4', 'ds:start-research:v3']
+const LEGACY_START_RESEARCH_HISTORY_KEYS = ['ds:start-research:history:v3', 'ds:start-research:history:v2']
 const MAX_TEMPLATE_HISTORY = 8
 
 export function slugifyQuestRepo(value: string) {
@@ -118,44 +132,90 @@ export function defaultStartResearchTemplate(language: 'en' | 'zh'): StartResear
     paper_urls: '',
     runtime_constraints: '',
     objectives: '',
-    scope: 'full_research',
-    baseline_mode: 'stop_if_insufficient',
-    resource_policy: 'balanced',
-    time_budget_hours: '',
-    git_strategy: 'branch_per_analysis_then_paper',
+    need_research_paper: true,
+    research_intensity: 'balanced',
+    decision_policy: 'autonomous',
+    launch_mode: 'standard',
+    custom_profile: 'freeform',
+    entry_state_summary: '',
+    review_summary: '',
+    custom_brief: '',
     user_language: language,
   }
 }
 
-export function listStartResearchContractPresets() {
-  return START_RESEARCH_CONTRACT_PRESET_ORDER.map((presetId) => START_RESEARCH_CONTRACT_PRESETS[presetId])
+export function listStartResearchIntensityPresets() {
+  return START_RESEARCH_INTENSITY_ORDER.map((presetId) => START_RESEARCH_INTENSITY_PRESETS[presetId])
 }
 
-export function applyStartResearchContractPreset(
+export function applyStartResearchIntensityPreset(
   input: StartResearchTemplate,
-  presetId: StartResearchContractPresetId
+  presetId: ResearchIntensity
 ): StartResearchTemplate {
   return {
     ...input,
-    ...START_RESEARCH_CONTRACT_PRESETS[presetId].contract,
+    research_intensity: presetId,
   }
 }
 
-export function detectStartResearchContractPreset(
-  input: Pick<StartResearchTemplate, keyof StartResearchContractFields>
-): StartResearchContractPresetId | null {
-  const fields: (keyof StartResearchContractFields)[] = [
-    'scope',
-    'baseline_mode',
-    'resource_policy',
-    'time_budget_hours',
-    'git_strategy',
-  ]
-  return (
-    START_RESEARCH_CONTRACT_PRESET_ORDER.find((presetId) =>
-      fields.every((field) => START_RESEARCH_CONTRACT_PRESETS[presetId].contract[field] === input[field])
-    ) ?? null
-  )
+export function detectStartResearchIntensity(
+  input: Pick<StartResearchTemplate, 'research_intensity' | 'baseline_id'> &
+    Partial<StartResearchContractFields>
+): ResearchIntensity {
+  return sanitizeResearchIntensity(input.research_intensity, input)
+}
+
+function sanitizeResearchIntensity(
+  value: unknown,
+  input?: Partial<StartResearchTemplate & StartResearchContractFields>
+): ResearchIntensity {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'light' || normalized === 'balanced' || normalized === 'sprint') {
+    return normalized
+  }
+  const scope = String(input?.scope || '').trim()
+  const resourcePolicy = String(input?.resource_policy || '').trim()
+  const gitStrategy = String(input?.git_strategy || '').trim()
+  const timeBudget = String(input?.time_budget_hours || '').trim()
+  if (
+    scope === 'baseline_only' ||
+    resourcePolicy === 'conservative' ||
+    gitStrategy === 'manual_integration_only' ||
+    timeBudget === '8'
+  ) {
+    return 'light'
+  }
+  if (
+    scope === 'full_research' ||
+    resourcePolicy === 'aggressive' ||
+    gitStrategy === 'branch_per_analysis_then_paper' ||
+    timeBudget === '48'
+  ) {
+    return 'sprint'
+  }
+  return 'balanced'
+}
+
+function sanitizeDecisionPolicy(value: unknown): DecisionPolicy {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'user_gated' ? 'user_gated' : 'autonomous'
+}
+
+function sanitizeLaunchMode(value: unknown): LaunchMode {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'custom' ? 'custom' : 'standard'
+}
+
+function sanitizeCustomProfile(value: unknown): CustomProfile {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (
+    normalized === 'continue_existing_state' ||
+    normalized === 'revision_rebuttal' ||
+    normalized === 'freeform'
+  ) {
+    return normalized
+  }
+  return 'freeform'
 }
 
 function sanitizeLines(text: string) {
@@ -165,30 +225,97 @@ function sanitizeLines(text: string) {
     .filter(Boolean)
 }
 
-function sanitizeTemplate(input: StartResearchTemplate): StartResearchTemplate {
-  const legacyBaselineId = (input as StartResearchTemplate & { baseline_root_id?: string }).baseline_root_id
+export function resolveStartResearchContractFields(
+  input: Pick<StartResearchTemplate, 'research_intensity' | 'baseline_id'>
+): StartResearchContractFields {
+  const intensity = sanitizeResearchIntensity(input.research_intensity, input)
+  const resolved = {
+    ...START_RESEARCH_INTENSITY_PRESETS[intensity].contract,
+  }
+  if (String(input.baseline_id || '').trim()) {
+    resolved.baseline_mode = 'existing'
+  }
+  return resolved
+}
+
+function sanitizeTemplate(input: PersistedStartResearchTemplate): StartResearchTemplate {
+  const legacyBaselineId = input.baseline_root_id
   return {
-    ...input,
-    title: input.title.trim(),
-    quest_id: slugifyQuestRepo(input.quest_id),
-    goal: input.goal.trim(),
+    title: String(input.title || '').trim(),
+    quest_id: slugifyQuestRepo(String(input.quest_id || '')),
+    goal: String(input.goal || '').trim(),
     baseline_id: String(input.baseline_id || legacyBaselineId || '').trim(),
-    baseline_variant_id: input.baseline_variant_id.trim(),
-    baseline_urls: input.baseline_urls.trim(),
-    paper_urls: input.paper_urls.trim(),
-    runtime_constraints: input.runtime_constraints.trim(),
-    objectives: input.objectives.trim(),
-    time_budget_hours: input.time_budget_hours.trim(),
+    baseline_variant_id: String(input.baseline_variant_id || '').trim(),
+    baseline_urls: String(input.baseline_urls || '').trim(),
+    paper_urls: String(input.paper_urls || '').trim(),
+    runtime_constraints: String(input.runtime_constraints || '').trim(),
+    objectives: String(input.objectives || '').trim(),
+    need_research_paper: input.need_research_paper !== false,
+    research_intensity: sanitizeResearchIntensity(input.research_intensity, input),
+    decision_policy: sanitizeDecisionPolicy(input.decision_policy),
+    launch_mode: sanitizeLaunchMode(input.launch_mode),
+    custom_profile: sanitizeCustomProfile(input.custom_profile),
+    entry_state_summary: String(input.entry_state_summary || '').trim(),
+    review_summary: String(input.review_summary || '').trim(),
+    custom_brief: String(input.custom_brief || '').trim(),
+    user_language: input.user_language === 'en' ? 'en' : 'zh',
+  }
+}
+
+function withoutPersistedQuestId(input: StartResearchTemplate): StartResearchTemplate {
+  return {
+    ...sanitizeTemplate(input),
+    quest_id: '',
   }
 }
 
 function stableId(input: StartResearchTemplate) {
-  const source = JSON.stringify(sanitizeTemplate(input))
+  const source = JSON.stringify(withoutPersistedQuestId(input))
   let hash = 0
   for (let index = 0; index < source.length; index += 1) {
     hash = (hash * 31 + source.charCodeAt(index)) >>> 0
   }
   return `tmpl_${hash.toString(36)}`
+}
+
+function labelResearchIntensity(value: ResearchIntensity) {
+  switch (value) {
+    case 'light':
+      return 'Light: keep the first round tight, conservative, and baseline-first.'
+    case 'sprint':
+      return 'Sprint: use a larger round to push through baseline, implementation, and analysis-ready evidence faster.'
+    default:
+      return 'Balanced: secure a trustworthy baseline and probe one justified direction without overcommitting.'
+  }
+}
+
+function labelDecisionPolicy(value: DecisionPolicy) {
+  switch (value) {
+    case 'user_gated':
+      return 'User-gated: ask the user for a blocking decision only when continuation truly depends on their preference or approval.'
+    default:
+      return 'Autonomous: decide ordinary route choices yourself, keep the user informed through threaded updates, and do not hand routine decisions back to the user.'
+  }
+}
+
+function labelLaunchMode(value: LaunchMode) {
+  switch (value) {
+    case 'custom':
+      return 'Custom mode: start from an existing state, review-driven task, or a user-defined brief instead of assuming a blank full-research launch.'
+    default:
+      return 'Standard mode: start from the ordinary canonical research loop and let the default stage graph drive the first round.'
+  }
+}
+
+function labelCustomProfile(value: CustomProfile) {
+  switch (value) {
+    case 'continue_existing_state':
+      return 'Continue existing state: audit and normalize an existing baseline, result, draft, or mixed quest state before deciding the next anchor.'
+    case 'revision_rebuttal':
+      return 'Revision / rebuttal: treat the current paper and reviewer package as the active contract, then route supplementary experiments and manuscript edits from that state.'
+    default:
+      return 'Freeform: follow the user-defined custom brief and open only the skills actually needed.'
+  }
 }
 
 function labelScope(value: ResearchScope) {
@@ -205,7 +332,7 @@ function labelScope(value: ResearchScope) {
 function labelBaselineMode(value: BaselineMode) {
   switch (value) {
     case 'existing':
-      return 'Use existing baseline: select a reusable baseline entry and let runtime attach and confirm it before the quest begins.'
+      return 'Use existing baseline: trust the selected reusable baseline first and let runtime attach and confirm it before the quest begins.'
     case 'restore_from_url':
       return 'Restore from URL: recover the baseline from provided repositories or artifact links.'
     case 'allow_degraded_minimal_reproduction':
@@ -237,8 +364,81 @@ function labelGitStrategy(value: GitStrategy) {
   }
 }
 
+function deliveryModeLines(needResearchPaper: boolean) {
+  if (needResearchPaper) {
+    return [
+      '- A research paper is required for this quest.',
+      '- The quest should normally continue through baseline, literature-grounded idea selection, implementation, main experiments, necessary analysis, paper outline, drafting, revision, and paper bundle preparation.',
+      '- Do not stop after obtaining only one improved algorithm or one promising run.',
+      '- After each `artifact.record_main_experiment(...)`, first interpret the measured result, then decide whether to improve further, run necessary follow-up analysis, or move into writing.',
+      '- The idea stage only creates or revises a candidate direction; the round is not complete until a main experiment result is recorded and routed.',
+      '- Unless the user explicitly changes scope, do not terminate the quest before at least one paper-like deliverable exists.',
+    ]
+  }
+  return [
+    '- A research paper is NOT required for this quest.',
+    '- The primary goal is the strongest justified algorithmic result, not paper drafting or paper packaging.',
+    '- The quest must still do rigorous baseline work, literature-grounded idea selection, implementation, and main experiments.',
+    '- After each `artifact.record_main_experiment(...)`, use the measured result to decide the next optimization step.',
+    '- The idea stage only creates or revises a candidate direction; it does not by itself decide the next round.',
+    '- The agent should decide how to continue from durable evidence such as the accepted baseline, the current research head, and the strongest recent main-experiment result.',
+    '- Do not default into `artifact.submit_paper_outline(...)`, `artifact.submit_paper_bundle(...)`, or paper/finalize work unless the user later explicitly asks for paper writing.',
+    '- Even without paper writing, all important decisions, runs, evidence, and conclusions must be recorded durably so later rounds can build on them.',
+  ]
+}
+
+function decisionPolicyLines(value: DecisionPolicy) {
+  if (value === 'user_gated') {
+    return [
+      '- User-gated decision mode is active.',
+      '- If a real route choice cannot be resolved safely from local evidence, ask the user with a structured blocking decision request.',
+      '- Even in user-gated mode, ordinary progress and stage completions should stay threaded and non-blocking.',
+    ]
+  }
+  return [
+    '- Autonomous decision mode is active.',
+    '- Do not hand ordinary route, branch, cost, baseline-reuse, or experiment-selection decisions back to the user.',
+    '- Report chosen routes through threaded progress or milestone updates, and keep moving unless you are explicitly requesting final quest-completion approval.',
+  ]
+}
+
+function customLaunchLines(input: StartResearchTemplate) {
+  const normalized = sanitizeTemplate(input)
+  if (normalized.launch_mode !== 'custom') {
+    return [
+      '- Standard launch mode is active.',
+      '- Start from the canonical research graph unless durable state later proves that a non-standard entry path is better.',
+    ]
+  }
+  const lines = [
+    '- Custom launch mode is active.',
+    '- Do not force the quest into a blank full-research loop if the custom brief is narrower or the quest already has meaningful durable state.',
+    `- Custom profile: ${labelCustomProfile(normalized.custom_profile)}`,
+  ]
+  if (normalized.entry_state_summary) {
+    lines.push('- Existing state summary:', normalized.entry_state_summary)
+  }
+  if (normalized.review_summary) {
+    lines.push('- Review / revision summary:', normalized.review_summary)
+  }
+  if (normalized.custom_brief) {
+    lines.push('- Custom brief:', normalized.custom_brief)
+  }
+  if (normalized.custom_profile === 'continue_existing_state') {
+    lines.push('- First action: audit and trust-rank existing baselines, results, drafts, or review assets before rerunning expensive work.')
+    lines.push('- Prefer `intake-audit` first if the starting state is not already normalized.')
+  } else if (normalized.custom_profile === 'revision_rebuttal') {
+    lines.push('- First action: interpret reviewer comments and current paper state before ordinary writing or fresh ideation.')
+    lines.push('- Prefer `rebuttal` first, and route supplementary runs only when a reviewer issue genuinely requires them.')
+  } else {
+    lines.push('- First action: follow the custom brief and open only the minimum necessary skills.')
+  }
+  return lines
+}
+
 export function compileStartResearchPrompt(input: StartResearchTemplate) {
   const normalized = sanitizeTemplate(input)
+  const derivedContract = resolveStartResearchContractFields(normalized)
   const baselineUrls = sanitizeLines(normalized.baseline_urls)
   const paperUrls = sanitizeLines(normalized.paper_urls)
   const baselineVariant = normalized.baseline_variant_id
@@ -247,7 +447,7 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
     : baselineUrls.length > 0
       ? baselineUrls.map((url) => `- ${url}`).join('\n')
       : 'No baseline link has been attached yet. The first obligation is to discover, repair, or reconstruct a reusable baseline.'
-  const questRepo = normalized.quest_id || deriveQuestRepoId(normalized) || 'auto-generated-on-create'
+  const questRepo = normalized.quest_id || 'auto-assigned-sequential-on-create'
   const objectiveLines = normalized.objectives
     ? sanitizeLines(normalized.objectives).map((line) => `- ${line}`).join('\n')
     : '- Produce a trustworthy baseline\n- Decide whether the current direction is worth implementation\n- Preserve clean artifacts, metrics, and reasons for each decision'
@@ -255,7 +455,7 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
   return [
     'Quest Bootstrap',
     `- Quest title: ${normalized.title || 'Untitled quest'}`,
-    `- Quest repository id: ${questRepo}`,
+    `- Quest id: ${questRepo}`,
     `- User language: ${normalized.user_language === 'zh' ? 'Chinese' : 'English'}`,
     '',
     'Primary Research Request',
@@ -273,20 +473,52 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
     'Operational Constraints',
     normalized.runtime_constraints || 'No explicit runtime, privacy, dataset, or hardware constraints were provided.',
     '',
+    'Research Delivery Mode',
+    ...deliveryModeLines(normalized.need_research_paper),
+    '',
+    'Decision Handling Mode',
+    ...decisionPolicyLines(normalized.decision_policy),
+    '',
+    'Launch Mode',
+    ...customLaunchLines(normalized),
+    '',
     'Research Contract',
-    `- Scope: ${labelScope(normalized.scope)}`,
-    `- Baseline policy: ${labelBaselineMode(normalized.baseline_mode)}`,
-    `- Resource policy: ${labelResourcePolicy(normalized.resource_policy)}`,
-    `- Git strategy: ${labelGitStrategy(normalized.git_strategy)}`,
-    `- Time budget per research round: ${normalized.time_budget_hours ? `${normalized.time_budget_hours} hour(s)` : 'Not specified. Treat each round as bounded and report before starting another expensive round.'}`,
+    `- Launch mode: ${labelLaunchMode(normalized.launch_mode)}`,
+    `- Research intensity: ${labelResearchIntensity(normalized.research_intensity)}`,
+    `- Decision policy: ${labelDecisionPolicy(normalized.decision_policy)}`,
+    `- Research paper required: ${normalized.need_research_paper ? 'Yes' : 'No; optimize for the strongest justified algorithmic result.'}`,
+    `- Scope: ${labelScope(derivedContract.scope)}`,
+    `- Baseline policy: ${labelBaselineMode(derivedContract.baseline_mode)}`,
+    `- Resource policy: ${labelResourcePolicy(derivedContract.resource_policy)}`,
+    `- Git strategy: ${labelGitStrategy(derivedContract.git_strategy)}`,
+    `- Time budget per research round: ${derivedContract.time_budget_hours} hour(s)`,
     '',
     'Mandatory Working Rules',
     '- Keep all durable files inside the quest root.',
     '- Reuse existing baseline artifacts whenever possible before rebuilding them.',
+    normalized.launch_mode === 'custom'
+      ? '- Custom launch mode is authoritative here: do not restart from scratch unless the existing state is unusable or misleading.'
+      : '- Standard launch mode is active here: use the canonical research graph unless later durable evidence justifies a different entry path.',
     '- Emit explicit milestone updates after each meaningful step.',
     '- Every decision must include reasons, evidence, and the next recommended action.',
-    '- Ask the user before crossing a major cost, scope, or direction boundary.',
+    '- If the startup contract already fixes the delivery mode and baseline policy, follow it without asking the user again unless cost, safety, or scope changes materially.',
+    normalized.decision_policy === 'autonomous'
+      ? '- Autonomous mode is the default contract here: decide the route yourself and continue unless you are requesting explicit quest-completion approval.'
+      : '- User-gated mode is enabled here: if local evidence is insufficient for a safe route decision, ask the user with one blocking decision request.',
   ].join('\n')
+}
+
+function loadPersistedJson(primaryKey: string, fallbackKeys: string[]) {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  for (const storageKey of [primaryKey, ...fallbackKeys]) {
+    const raw = window.localStorage.getItem(storageKey)
+    if (raw) {
+      return raw
+    }
+  }
+  return null
 }
 
 export function loadStartResearchTemplate(language: 'en' | 'zh') {
@@ -294,22 +526,20 @@ export function loadStartResearchTemplate(language: 'en' | 'zh') {
     return defaultStartResearchTemplate(language)
   }
   try {
-    const raw = window.localStorage.getItem(START_RESEARCH_STORAGE_KEY)
+    const raw = loadPersistedJson(START_RESEARCH_STORAGE_KEY, LEGACY_START_RESEARCH_STORAGE_KEYS)
     if (!raw) {
       return defaultStartResearchTemplate(language)
     }
-    const parsed = JSON.parse(raw) as Partial<StartResearchTemplate>
+    const parsed = JSON.parse(raw) as PersistedStartResearchTemplate
     const base = {
       ...defaultStartResearchTemplate(language),
-      ...parsed,
-      baseline_id: String(
-        (parsed as Partial<StartResearchTemplate> & { baseline_root_id?: string }).baseline_root_id || parsed.baseline_id || ''
-      ),
+      ...sanitizeTemplate(parsed),
+      quest_id: '',
       user_language: language,
     }
     return {
       ...base,
-      quest_id: base.quest_id || deriveQuestRepoId(base),
+      quest_id: '',
     }
   } catch {
     return defaultStartResearchTemplate(language)
@@ -320,7 +550,11 @@ export function saveStartResearchDraft(input: StartResearchTemplate) {
   if (typeof window === 'undefined') {
     return
   }
-  window.localStorage.setItem(START_RESEARCH_STORAGE_KEY, JSON.stringify(sanitizeTemplate(input)))
+  window.localStorage.setItem(START_RESEARCH_STORAGE_KEY, JSON.stringify(withoutPersistedQuestId(input)))
+}
+
+function languageFromHistory(item: Partial<StartResearchTemplateEntry>): 'en' | 'zh' {
+  return item.user_language === 'en' ? 'en' : 'zh'
 }
 
 export function loadStartResearchHistory(): StartResearchTemplateEntry[] {
@@ -328,7 +562,7 @@ export function loadStartResearchHistory(): StartResearchTemplateEntry[] {
     return []
   }
   try {
-    const raw = window.localStorage.getItem(START_RESEARCH_HISTORY_KEY)
+    const raw = loadPersistedJson(START_RESEARCH_HISTORY_KEY, LEGACY_START_RESEARCH_HISTORY_KEYS)
     if (!raw) {
       return []
     }
@@ -339,15 +573,14 @@ export function loadStartResearchHistory(): StartResearchTemplateEntry[] {
     return parsed
       .filter((item) => item && typeof item === 'object')
       .map((item) => {
-        const rawItem = item as Partial<StartResearchTemplateEntry> & { baseline_root_id?: string }
         const normalized = sanitizeTemplate({
-          ...defaultStartResearchTemplate((rawItem.user_language as 'en' | 'zh') || languageFromHistory(rawItem)),
-          ...rawItem,
-          baseline_id: String(rawItem.baseline_id || rawItem.baseline_root_id || ''),
+          ...defaultStartResearchTemplate((item.user_language as 'en' | 'zh') || languageFromHistory(item)),
+          ...(item as PersistedStartResearchTemplate),
         })
         return {
-          ...rawItem,
+          ...item,
           ...normalized,
+          quest_id: '',
         } as StartResearchTemplateEntry
       })
       .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
@@ -357,24 +590,30 @@ export function loadStartResearchHistory(): StartResearchTemplateEntry[] {
   }
 }
 
-function languageFromHistory(item: Partial<StartResearchTemplateEntry>): 'en' | 'zh' {
-  return item.user_language === 'en' ? 'en' : 'zh'
-}
-
 export function saveStartResearchTemplate(input: StartResearchTemplate): StartResearchTemplateEntry {
   const normalized = sanitizeTemplate(input)
-  const next: StartResearchTemplateEntry = {
-    ...normalized,
-    quest_id: normalized.quest_id || deriveQuestRepoId(normalized),
-    id: stableId(normalized),
+  const persisted = withoutPersistedQuestId(normalized)
+  const persistedEntry: StartResearchTemplateEntry = {
+    ...persisted,
+    quest_id: '',
+    id: stableId(persisted),
     updated_at: new Date().toISOString(),
-    compiled_prompt: compileStartResearchPrompt(normalized),
+    compiled_prompt: compileStartResearchPrompt(persisted),
+  }
+  const savedQuestId = normalized.quest_id
+  const next: StartResearchTemplateEntry = {
+    ...persistedEntry,
+    quest_id: savedQuestId,
+    compiled_prompt: compileStartResearchPrompt({
+      ...normalized,
+      quest_id: savedQuestId,
+    }),
   }
 
   if (typeof window !== 'undefined') {
-    saveStartResearchDraft(next)
-    const current = loadStartResearchHistory().filter((item) => item.id !== next.id)
-    const merged = [next, ...current].slice(0, MAX_TEMPLATE_HISTORY)
+    saveStartResearchDraft(normalized)
+    const current = loadStartResearchHistory().filter((item) => item.id !== persistedEntry.id)
+    const merged = [persistedEntry, ...current].slice(0, MAX_TEMPLATE_HISTORY)
     window.localStorage.setItem(START_RESEARCH_HISTORY_KEY, JSON.stringify(merged))
   }
 

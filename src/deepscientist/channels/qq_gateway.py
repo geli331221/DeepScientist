@@ -210,6 +210,7 @@ class QQGatewayService:
                 "sender_name": str(author.get("id") or openid).strip(),
                 "conversation_id": f"qq:direct:{openid}",
                 "content": str(data.get("content") or "").strip(),
+                "attachments": list(data.get("attachments") or []),
                 "message_id": str(data.get("id") or "").strip(),
                 "raw_event": {"t": event_type, "d": data},
             }
@@ -227,6 +228,7 @@ class QQGatewayService:
                 "sender_name": member_openid or group_openid,
                 "conversation_id": f"qq:group:{group_openid}",
                 "content": str(data.get("content") or "").strip(),
+                "attachments": list(data.get("attachments") or []),
                 "message_id": str(data.get("id") or "").strip(),
                 "mentioned": True,
                 "raw_event": {"t": event_type, "d": data},

@@ -268,7 +268,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
   const custom = (context.customData ?? {}) as LatexTabContext;
   const projectId = custom.projectId ?? undefined;
   const latexFolderId = custom.latexFolderId ?? context.resourceId ?? undefined;
-  const shareReadOnly = Boolean(custom.readOnly);
+  const viewReadOnly = Boolean(custom.readOnly);
   const user = useAuthStore((s) => s.user);
   const { t, language } = useI18n("latex");
   const updateWorkspaceTabState = useWorkspaceSurfaceStore((state) => state.updateTabState);
@@ -330,8 +330,8 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
   const labelIndexRef = React.useRef<LabelEntry[]>([]);
   const latexCompletionDisposablesRef = React.useRef<Array<{ dispose?: () => void }>>([]);
 
-  const effectiveReadOnly = shareReadOnly || roleWritable === false;
-  const socketAuthMode = shareReadOnly ? "share" : "user";
+  const effectiveReadOnly = viewReadOnly || roleWritable === false;
+  const socketAuthMode = "user";
   const isBibFile = activeFileName.toLowerCase().endsWith(".bib");
 
   React.useEffect(() => {
@@ -378,7 +378,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
   // Resolve project write permission (owner/admin/editor).
   React.useEffect(() => {
     if (!projectId) return;
-    if (shareReadOnly) {
+    if (viewReadOnly) {
       setRoleWritable(null);
       return;
     }
@@ -398,7 +398,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
     return () => {
       cancelled = true;
     };
-  }, [projectId, shareReadOnly]);
+  }, [projectId, viewReadOnly]);
 
   // Load folder file list.
   React.useEffect(() => {
@@ -1095,7 +1095,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
   const compile = React.useCallback(
     async (opts?: { auto?: boolean }) => {
       if (!projectId || !latexFolderId) return;
-      if (shareReadOnly) return;
+      if (viewReadOnly) return;
       if (isDirty && !effectiveReadOnly) {
         const saved = await save();
         if (!saved) return;
@@ -1120,7 +1120,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
         setBuildStatus("error");
       }
     },
-    [compiler, effectiveReadOnly, isDirty, latexFolderId, projectId, save, shareReadOnly, t]
+    [compiler, effectiveReadOnly, isDirty, latexFolderId, projectId, save, t, viewReadOnly]
   );
 
   React.useEffect(() => {
@@ -1150,7 +1150,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
     };
   }, [latexFolderId, projectId]);
 
-  // Load the latest build (useful for shared view where compile may be disabled).
+  // Load the latest build even in read-only tabs where compile is unavailable.
   React.useEffect(() => {
     if (!projectId || !latexFolderId) return;
     if (buildId) return;
@@ -1836,7 +1836,7 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
                 type="button"
                 onClick={() => void compile({ auto: false })}
                 disabled={
-                  shareReadOnly ||
+                  viewReadOnly ||
                   saveState === "saving" ||
                   buildStatus === "queued" ||
                   buildStatus === "running"
@@ -1848,8 +1848,8 @@ export default function LatexPlugin({ context, tabId, setDirty, setTitle }: Plug
                   "disabled:opacity-50 disabled:cursor-not-allowed"
                 )}
                 title={
-                  shareReadOnly
-                    ? t("compile_disabled_shared")
+                  viewReadOnly
+                    ? t("compile_disabled_read_only")
                     : isDirty && !effectiveReadOnly
                       ? t("button_save_and_compile")
                       : t("button_compile")

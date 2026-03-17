@@ -5,12 +5,6 @@ import type { UILanguage } from '@/lib/i18n/types'
 const PROFILE_CACHE_KEY = "ds:user-profile";
 const PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
 
-export interface UserSearchItem {
-  id: string;
-  username: string;
-  email: string;
-}
-
 export interface UserProfile {
   id: string;
   email: string;
@@ -60,11 +54,6 @@ export interface UserVerificationInfo {
 
 export interface UserVerificationSummary {
   verification?: UserVerificationInfo | null;
-}
-
-export interface OrcidStartResponse {
-  authorization_url: string;
-  expires_at: string;
 }
 
 export interface GithubIdentityStartResponse {
@@ -133,19 +122,6 @@ export interface UserProfileUpdate {
   orcid?: string | null;
 }
 
-export async function searchUsers(
-  query: string,
-  limit: number = 10
-): Promise<UserSearchItem[]> {
-  const q = query.trim();
-  if (!q) return [];
-  const response = await apiClient.get<{ items: UserSearchItem[] }>(
-    `/api/v1/users/search`,
-    { params: { q, limit } }
-  );
-  return response.data.items || [];
-}
-
 export async function getMyProfile(forceRefresh: boolean = true): Promise<UserProfile> {
   if (!forceRefresh) {
     const cached = getCachedValue<UserProfile>(PROFILE_CACHE_KEY);
@@ -182,13 +158,6 @@ export async function getMyVerificationSummary(): Promise<UserVerificationSummar
   return response.data;
 }
 
-export async function startMyOrcidLink(returnPath: string = "/settings"): Promise<OrcidStartResponse> {
-  const response = await apiClient.get<OrcidStartResponse>("/api/v1/users/me/orcid/start", {
-    params: { return_path: returnPath },
-  });
-  return response.data;
-}
-
 export async function startMyGithubIdentityLink(
   returnPath: string = "/settings"
 ): Promise<GithubIdentityStartResponse> {
@@ -199,7 +168,7 @@ export async function startMyGithubIdentityLink(
 }
 
 export async function startMyGithubStarMissionAuthorization(
-  returnPath: string = "/projects?points_activity=github_star"
+  returnPath: string = "/"
 ): Promise<GithubIdentityStartResponse> {
   const response = await apiClient.get<GithubIdentityStartResponse>("/api/v1/auth/github/start", {
     params: { purpose: 'star_mission', return_path: returnPath },

@@ -45,7 +45,7 @@ const FINAL_REPORT_SECTION_LABEL_KEYS: Record<string, string> = {
   references: 'detail_final_report_section_references',
 }
 
-type ReviewT = (key: string, variables?: Record<string, string | number>, fallback?: string) => string
+type TranslateT = (key: string, variables?: Record<string, string | number>, fallback?: string) => string
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
@@ -56,12 +56,12 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-function resolveFinalReportSectionLabel(section: unknown, tReview: ReviewT): string | null {
+function resolveFinalReportSectionLabel(section: unknown, tWorkspace: TranslateT): string | null {
   if (typeof section === 'string') {
     const normalized = section.trim().toLowerCase()
     if (!normalized) return null
     const labelKey = FINAL_REPORT_SECTION_LABEL_KEYS[normalized]
-    if (labelKey) return tReview(labelKey, undefined, section)
+    if (labelKey) return tWorkspace(labelKey, undefined, section)
     return section.trim()
   }
 
@@ -71,7 +71,7 @@ function resolveFinalReportSectionLabel(section: unknown, tReview: ReviewT): str
   if (normalizedId) {
     const labelKey = FINAL_REPORT_SECTION_LABEL_KEYS[normalizedId]
     if (labelKey) {
-      return tReview(labelKey, undefined, asString(descriptor.title) || normalizedId)
+      return tWorkspace(labelKey, undefined, asString(descriptor.title) || normalizedId)
     }
   }
 
@@ -177,7 +177,7 @@ function ToolUseDefault({
 }) {
   const toolInfo = useMemo(() => getToolInfo(tool), [tool])
   const actorLabel = useMemo(() => resolveToolActorLabel(tool), [tool])
-  const { t: tReview } = useI18n('review')
+  const { t: tWorkspace } = useI18n('workspace')
   const Icon = toolInfo.icon
   const isCompact = Boolean(compact)
   const [expanded, setExpanded] = useState(false)
@@ -996,12 +996,12 @@ function ToolUseDefault({
     ).trim().toLowerCase()
     const retryRequired = normalizedContent.retry_required === true || content.retry_required === true
     const currentSectionLabel =
-      resolveFinalReportSectionLabel(normalizedContent.current_section, tReview) ||
-      resolveFinalReportSectionLabel(content.current_section, tReview) ||
-      resolveFinalReportSectionLabel(asString(toolArgs.section_id) || asString(toolArgs.section), tReview)
+      resolveFinalReportSectionLabel(normalizedContent.current_section, tWorkspace) ||
+      resolveFinalReportSectionLabel(content.current_section, tWorkspace) ||
+      resolveFinalReportSectionLabel(asString(toolArgs.section_id) || asString(toolArgs.section), tWorkspace)
     const nextSectionLabel =
-      resolveFinalReportSectionLabel(normalizedContent.next_required_section, tReview) ||
-      resolveFinalReportSectionLabel(content.next_required_section, tReview)
+      resolveFinalReportSectionLabel(normalizedContent.next_required_section, tWorkspace) ||
+      resolveFinalReportSectionLabel(content.next_required_section, tWorkspace)
     const missingSections = Array.isArray(normalizedContent.missing_sections)
       ? normalizedContent.missing_sections
       : Array.isArray(content.missing_sections)
@@ -1021,8 +1021,8 @@ function ToolUseDefault({
     if (toolStatus === 'calling') {
       return {
         headline: currentSectionLabel
-          ? tReview('detail_final_report_tool_writing_section', { section: currentSectionLabel })
-          : tReview('detail_final_report_tool_writing_generic'),
+          ? tWorkspace('detail_final_report_tool_writing_section', { section: currentSectionLabel })
+          : tWorkspace('detail_final_report_tool_writing_generic'),
         detail: null as string | null,
         tone: 'active' as const,
       }
@@ -1030,7 +1030,7 @@ function ToolUseDefault({
 
     if (['ok', 'success', 'completed'].includes(resultStatus)) {
       return {
-        headline: tReview('detail_final_report_tool_completed'),
+        headline: tWorkspace('detail_final_report_tool_completed'),
         detail,
         tone: 'success' as const,
       }
@@ -1039,10 +1039,10 @@ function ToolUseDefault({
     if (resultStatus === 'partial' || reason === 'required_sections_missing') {
       return {
         headline: nextSectionLabel
-          ? tReview('detail_final_report_tool_partial_next', { section: nextSectionLabel })
+          ? tWorkspace('detail_final_report_tool_partial_next', { section: nextSectionLabel })
           : missingCount > 0
-            ? tReview('detail_final_report_tool_partial_generic')
-            : tReview('detail_final_report_tool_writing_generic'),
+            ? tWorkspace('detail_final_report_tool_partial_generic')
+            : tWorkspace('detail_final_report_tool_writing_generic'),
         detail,
         tone: 'active' as const,
       }
@@ -1055,10 +1055,10 @@ function ToolUseDefault({
     ) {
       const headline =
         reason === 'paper_search_calls_not_met' || reason === 'paper_search_distinct_queries_not_met'
-          ? tReview('detail_final_report_tool_gate_paper_search')
+          ? tWorkspace('detail_final_report_tool_gate_paper_search')
           : reason === 'annotation_count_not_met'
-            ? tReview('detail_final_report_tool_gate_annotation')
-            : tReview('detail_final_report_tool_retry_required')
+            ? tWorkspace('detail_final_report_tool_gate_annotation')
+            : tWorkspace('detail_final_report_tool_retry_required')
       return {
         headline,
         detail,
@@ -1076,12 +1076,12 @@ function ToolUseDefault({
 
     return {
       headline: currentSectionLabel
-        ? tReview('detail_final_report_tool_writing_section', { section: currentSectionLabel })
-        : tReview('detail_final_report_tool_writing_generic'),
+        ? tWorkspace('detail_final_report_tool_writing_section', { section: currentSectionLabel })
+        : tWorkspace('detail_final_report_tool_writing_generic'),
       detail: null as string | null,
       tone: 'active' as const,
     }
-  }, [isFinalReportWrite, tReview, tool.status, toolArgs.section, toolArgs.section_id, toolResult])
+  }, [isFinalReportWrite, tWorkspace, tool.status, toolArgs.section, toolArgs.section_id, toolResult])
 
   if (isMcpTemplate) {
     const chipClasses = cn(

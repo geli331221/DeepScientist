@@ -11,6 +11,7 @@ import type {
   CopilotSuggestionItem,
   CopilotSuggestionPayload,
 } from '@/lib/plugins/ai-manus/view-types'
+import OrbitLogoStatus from '@/lib/plugins/ai-manus/components/OrbitLogoStatus'
 import type { ChatSurface } from '@/lib/types/chat-events'
 import { GlareHover, Noise, SpotlightCard } from '@/components/react-bits'
 import RotatingText from '@/components/RotatingText'
@@ -95,6 +96,7 @@ const isCopilotMetaEqual = (prev: AiManusChatMeta | null, next: AiManusChatMeta)
     prev.threadId === next.threadId &&
     prev.historyOpen === next.historyOpen &&
     prev.isResponding === next.isResponding &&
+    prev.toolCount === next.toolCount &&
     prev.ready === next.ready &&
     prev.isRestoring === next.isRestoring &&
     prev.restoreAttempted === next.restoreAttempted &&
@@ -837,9 +839,12 @@ export function CopilotDockOverlay({
       ? [statusPrevText, statusText]
       : [statusText]
     : []
-  const showStatus = statusTexts.length > 0 && Boolean(copilotMeta?.isResponding)
+  const showStatus = statusTexts.length > 0
   const statusAnimate = statusTexts.length > 1
   const historyOpen = historyOpenOverride
+  const headerOrbitResetKey = `${copilotMeta?.threadId ?? projectId}:${copilotMeta?.statusKey ?? 0}:${
+    copilotMeta?.isResponding ? 'busy' : 'idle'
+  }`
 
   React.useEffect(() => {
     if (!activeTab) {
@@ -979,6 +984,16 @@ export function CopilotDockOverlay({
                   </div>
                 ) : (
                   <div className="ds-copilot-header-left ds-copilot-drag-area">
+                    <div className="ds-copilot-header-orbit-wrap" aria-hidden="true">
+                      <OrbitLogoStatus
+                        compact
+                        sizePx={20}
+                        className="ds-copilot-header-orbit"
+                        toolCount={copilotMeta?.toolCount}
+                        resetKey={headerOrbitResetKey}
+                        animated={Boolean(copilotMeta?.isResponding)}
+                      />
+                    </div>
                     <div className="ds-copilot-title-stack">
                       <div className="ds-copilot-title-row">
                         <span className="ds-copilot-title">{t('copilot_title')}</span>

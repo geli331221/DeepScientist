@@ -3,14 +3,18 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
+import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import pytest
+from websockets.sync.client import connect as websocket_connect
 
 from deepscientist.artifact import ArtifactService
 from deepscientist.config import ConfigManager
@@ -19,12 +23,87 @@ from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
 from deepscientist.mcp.context import McpContext
 from deepscientist.runners import RunResult
-from deepscientist.shared import append_jsonl, ensure_dir, generate_id, read_yaml, utc_now, write_yaml
+from deepscientist.shared import append_jsonl, ensure_dir, generate_id, read_jsonl, read_yaml, utc_now, write_yaml
 
 
 def _get_json(url: str):
     with urlopen(url) as response:  # noqa: S310
         return json.loads(response.read().decode("utf-8"))
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_json(url: str, *, timeout: float = 10.0) -> dict | list:
+    deadline = time.time() + timeout
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            return _get_json(url)
+        except (ConnectionError, TimeoutError, URLError, ValueError, HTTPError) as exc:
+            last_error = exc
+            time.sleep(0.1)
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError(f"Timed out waiting for JSON response from {url}")
+
+
+def test_runtime_state_updates_do_not_revert_status_on_concurrent_writes(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    service = DaemonApp(temp_home).quest_service
+    snapshot = service.create("concurrent runtime state quest")
+    quest_root = Path(snapshot["quest_root"])
+    service.update_runtime_state(quest_root=quest_root, status="stopped", stop_reason="crash_recovered")
+
+    original_write = service._write_runtime_state
+    slow_write_entered = threading.Event()
+    release_slow_write = threading.Event()
+    run_update_done = threading.Event()
+
+    def _write_runtime_state_with_pause(target_root: Path, payload: dict[str, object]) -> None:
+        if (
+            target_root == quest_root
+            and payload.get("active_interaction_id") == "milestone-1"
+            and payload.get("status") == "stopped"
+        ):
+            slow_write_entered.set()
+            assert release_slow_write.wait(timeout=5), "timed out waiting to release slow runtime_state write"
+        original_write(target_root, payload)
+
+    service._write_runtime_state = _write_runtime_state_with_pause  # type: ignore[method-assign]
+
+    def _set_interaction() -> None:
+        service.update_runtime_state(
+            quest_root=quest_root,
+            active_interaction_id="milestone-1",
+            last_artifact_interact_at="2026-03-15T10:51:08+00:00",
+        )
+
+    interaction_thread = threading.Thread(target=_set_interaction)
+    interaction_thread.start()
+    assert slow_write_entered.wait(timeout=2), "runtime_state interaction write never entered paused section"
+
+    def _set_running() -> None:
+        service.update_runtime_state(quest_root=quest_root, status="running", active_run_id="run-123")
+        run_update_done.set()
+
+    run_thread = threading.Thread(target=_set_running)
+    run_thread.start()
+    assert not run_update_done.wait(timeout=0.2), "second runtime_state update should block until the lock is released"
+    release_slow_write.set()
+    interaction_thread.join(timeout=2)
+    run_thread.join(timeout=2)
+    assert not interaction_thread.is_alive()
+    assert not run_thread.is_alive()
+
+    state = json.loads((quest_root / ".ds" / "runtime_state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "running"
+    assert state["display_status"] == "running"
+    assert state["active_run_id"] == "run-123"
+    assert state["active_interaction_id"] == "milestone-1"
 
 
 def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, pythonpath_env) -> None:
@@ -49,8 +128,25 @@ def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, python
     quest_root = temp_home / "quests" / quest_id
     (quest_root / "docs").mkdir(parents=True, exist_ok=True)
     (quest_root / "figures").mkdir(parents=True, exist_ok=True)
+    (quest_root / "paper" / "latex").mkdir(parents=True, exist_ok=True)
     (quest_root / "docs" / "appendix.pdf").write_bytes(b"%PDF-1.4\n%quest-pdf\n")
     (quest_root / "figures" / "plot.png").write_bytes(b"\x89PNG\r\n\x1a\nquest-plot")
+    (quest_root / "paper" / "latex" / "main.tex").write_text(
+        "\n".join(
+            [
+                r"\documentclass{article}",
+                r"\title{Daemon API Paper}",
+                r"\author{DeepScientist}",
+                r"\date{}",
+                r"\begin{document}",
+                r"\maketitle",
+                "Hello from daemon API test.",
+                r"\end{document}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     server = subprocess.Popen(
         [
@@ -82,6 +178,24 @@ def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, python
         node_traces = _get_json(f"http://127.0.0.1:20901/api/quests/{quest_id}/node-traces")
         assert node_traces["quest_id"] == quest_id
         assert "items" in node_traces
+        stage_view_request = Request(
+            f"http://127.0.0.1:20901/api/quests/{quest_id}/stage-view",
+            data=json.dumps(
+                {
+                    "selection_ref": "stage:main:baseline",
+                    "selection_type": "stage_node",
+                    "branch_name": "main",
+                    "stage_key": "baseline",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(stage_view_request) as response:  # noqa: S310
+            stage_view = json.loads(response.read().decode("utf-8"))
+        assert stage_view["quest_id"] == quest_id
+        assert stage_view["stage_key"] == "baseline"
+        assert "sections" in stage_view
         explorer = _get_json(f"http://127.0.0.1:20901/api/quests/{quest_id}/explorer")
         assert explorer["view"]["mode"] == "live"
         search = _get_json(
@@ -142,6 +256,55 @@ def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, python
         with urlopen(f"http://127.0.0.1:20901{pdf_doc['asset_url']}") as response:  # noqa: S310
             assert response.headers["Content-Type"] == "application/pdf"
             assert response.read().startswith(b"%PDF-1.4")
+        if shutil.which("pdflatex"):
+            folder_id = f"quest-dir::{quest_id}::paper%2Flatex"
+            compile_request = Request(
+                f"http://127.0.0.1:20901/api/v1/projects/{quest_id}/latex/{folder_id}/compile",
+                data=json.dumps({"compiler": "pdflatex"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(compile_request) as response:  # noqa: S310
+                compile_payload = json.loads(response.read().decode("utf-8"))
+            assert compile_payload["project_id"] == quest_id
+            assert compile_payload["folder_id"] == folder_id
+            assert compile_payload["status"] == "success"
+            assert compile_payload["pdf_ready"] is True
+            build_id = compile_payload["build_id"]
+            builds = _get_json(
+                f"http://127.0.0.1:20901/api/v1/projects/{quest_id}/latex/{folder_id}/builds?limit=5"
+            )
+            assert any(item["build_id"] == build_id for item in builds)
+            build = _get_json(
+                f"http://127.0.0.1:20901/api/v1/projects/{quest_id}/latex/{folder_id}/builds/{build_id}"
+            )
+            assert build["status"] == "success"
+            with urlopen(  # noqa: S310
+                f"http://127.0.0.1:20901/api/v1/projects/{quest_id}/latex/{folder_id}/builds/{build_id}/log"
+            ) as response:
+                log_text = response.read().decode("utf-8")
+            assert "pdflatex" in log_text
+            with urlopen(  # noqa: S310
+                f"http://127.0.0.1:20901/api/v1/projects/{quest_id}/latex/{folder_id}/builds/{build_id}/pdf"
+            ) as response:
+                assert response.headers["Content-Type"] == "application/pdf"
+                assert response.read().startswith(b"%PDF-")
+            with urlopen(  # noqa: S310
+                f"http://127.0.0.1:20901/api/v1/projects/{quest_id}/latex/{folder_id}/archive"
+            ) as response:
+                assert response.headers["Content-Type"] == "application/zip"
+                archive_bytes = response.read()
+            assert archive_bytes.startswith(b"PK")
+        with urlopen(  # noqa: S310
+            Request(
+                f"http://127.0.0.1:20901/api/quests/{quest_id}/documents/open",
+                data=json.dumps({"document_id": "questpath::docs/appendix.pdf"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        ) as response:
+            pdf_doc_from_questpath = json.loads(response.read().decode("utf-8"))
+        assert pdf_doc_from_questpath["meta"]["renderer_hint"] == "pdf"
         with urlopen(  # noqa: S310
             Request(
                 f"http://127.0.0.1:20901/api/quests/{quest_id}/documents/open",
@@ -200,6 +363,44 @@ def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, python
             font_payload = response.read(16)
             assert response.headers["Content-Type"] == "font/woff2"
         assert font_payload
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+def test_daemon_serves_docs_assets(temp_home: Path, project_root: Path, pythonpath_env) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    port = _pick_free_port()
+    base_url = f"http://127.0.0.1:{port}"
+
+    server = subprocess.Popen(
+        [
+            "python3",
+            "-m",
+            "deepscientist.cli",
+            "--home",
+            str(temp_home),
+            "daemon",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        cwd=project_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        _wait_for_json(f"{base_url}/api/health")
+        docs_index = _get_json(f"{base_url}/api/docs")
+        assert any(item["document_id"] == "zh/03_QQ_CONNECTOR_GUIDE.md" for item in docs_index)
+        with urlopen(f"{base_url}/api/v1/docs/assets/images/qq/tencent-cloud-qq-register.png") as response:  # noqa: S310
+            asset_payload = response.read()
+            asset_content_type = response.info().get_content_type()
+        assert asset_content_type == "image/png"
+        assert asset_payload.startswith(b"\x89PNG")
     finally:
         server.terminate()
         server.wait(timeout=10)
@@ -264,7 +465,10 @@ def test_router_matches_quest_search_path() -> None:
     assert params["quest_id"] == "q-123456"
 
 
-def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(temp_home: Path) -> None:
+def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
@@ -273,6 +477,16 @@ def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(temp_h
     connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
     write_yaml(manager.path_for("connectors"), connectors)
     app = DaemonApp(temp_home)
+    monkeypatch.setattr(
+        app,
+        "schedule_turn",
+        lambda quest_id, reason="user_message": {
+            "scheduled": True,
+            "started": True,
+            "queued": False,
+            "reason": reason,
+        },
+    )
 
     first = app.handle_connector_inbound(
         "whatsapp",
@@ -287,12 +501,41 @@ def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(temp_h
     assert "/use" in first["reply"]["payload"]["text"]
     assert app.list_connector_bindings("whatsapp") == []
 
-    payload = app.handlers.quest_create({"goal": "daemon api connector bind quest", "source": "web"})
+    payload = app.handlers.quest_create({"goal": "daemon api connector bind quest", "source": "web", "auto_start": True})
 
     assert payload["ok"] is True
     quest_id = payload["snapshot"]["quest_id"]
     bindings = app.list_connector_bindings("whatsapp")
     assert any(item["conversation_id"] == "whatsapp:direct:+15550001111" and item["quest_id"] == quest_id for item in bindings)
+    outbox = read_jsonl(temp_home / "logs" / "connectors" / "whatsapp" / "outbox.jsonl")
+    assert outbox
+    assert outbox[-1]["conversation_id"] == "whatsapp:direct:+15550001111"
+    assert quest_id in str(outbox[-1]["text"] or "")
+    assert "自动使用这个新 quest 保持连接" in str(outbox[-1]["text"] or "")
+    history = app.quest_service.history(quest_id)
+    assert history
+    assert history[-1]["content"] == "daemon api connector bind quest"
+    assert history[-1]["source"] == "web"
+
+
+def test_quest_create_handler_summary_includes_visible_quest_metadata(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+
+    payload = app.handlers.quest_create(
+        {
+            "goal": "Summarize this quest.",
+            "title": "Summary visible metadata quest",
+            "quest_id": "summary-visible-metadata",
+        }
+    )
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    summary = app._format_summary("summary-visible-metadata")
+    assert "quest_id: summary-visible-metadata" in summary
+    assert "title: Summary visible metadata quest" in summary
 
 
 def test_quest_settings_handler_updates_quest_yaml(temp_home: Path) -> None:
@@ -339,6 +582,18 @@ def test_quest_settings_handler_rejects_invalid_anchor(temp_home: Path) -> None:
     assert status_code == 400
     assert payload["ok"] is False
     assert "active anchor" in str(payload["message"]).lower()
+
+
+def test_quest_next_id_handler_returns_next_sequential_numeric_id(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+
+    assert app.handlers.quest_next_id() == {"quest_id": "001"}
+
+    app.quest_service.create("first quest")
+
+    assert app.handlers.quest_next_id() == {"quest_id": "002"}
 
 
 def test_quest_bindings_handler_detects_conflicts_and_forces_rebind(temp_home: Path) -> None:
@@ -394,6 +649,30 @@ def test_quest_delete_handler_removes_repo_and_unbinds_connectors(temp_home: Pat
     assert payload["deleted"] is True
     assert not quest_root.exists()
     assert all(item["conversation_id"] != conversation_id for item in app.list_connector_bindings("qq"))
+
+
+def test_update_quest_binding_keeps_only_one_external_connector_per_quest(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("single external connector quest")
+    quest_id = quest["quest_id"]
+
+    first = app.update_quest_binding(quest_id, "qq:direct:OPENID_SINGLE", force=True)
+    assert isinstance(first, dict)
+    assert first["ok"] is True
+    assert first["removed_conversations"] == []
+
+    second = app.update_quest_binding(quest_id, "telegram:direct:tg-single", force=True)
+    assert isinstance(second, dict)
+    assert second["ok"] is True
+    assert second["conversation_id"] == "telegram:direct:tg-single"
+    assert second["removed_conversations"] == ["qq:direct:OPENID_SINGLE"]
+
+    sources = app.quest_service.binding_sources(quest_id)
+    assert sources == ["local:default", "telegram:direct:tg-single"]
+    assert not any(item["conversation_id"] == "qq:direct:OPENID_SINGLE" for item in app.list_connector_bindings("qq"))
+    assert any(item["conversation_id"] == "telegram:direct:tg-single" for item in app.list_connector_bindings("telegram"))
 
 
 def test_bash_exec_handlers_expose_sessions_logs_and_stop(temp_home: Path) -> None:
@@ -470,6 +749,60 @@ def test_terminal_handlers_ensure_input_restore_and_stop(temp_home: Path) -> Non
     assert session["bash_id"] == "terminal-main"
     assert session["kind"] == "terminal"
     assert session["status"] == "running"
+
+    deadline = time.time() + 6
+    saw_prompt = False
+    while time.time() < deadline:
+        entries, _meta = app.bash_exec_service.read_log_entries(quest_root, "terminal-main", limit=200, order="asc")
+        if any(
+            entry.get("stream") == "partial"
+            and str(quest_root) in str(entry.get("line") or "")
+            and str(entry.get("line") or "").endswith("$ ")
+            for entry in entries
+        ):
+            saw_prompt = True
+            assert not any(str(entry.get("line") or "").startswith("bash-") for entry in entries)
+            break
+        time.sleep(0.2)
+    assert saw_prompt is True
+
+    partial_input = app.handlers.terminal_input(
+        quest_id,
+        "terminal-main",
+        {
+            "data": "abc",
+            "source": "pytest",
+            "conversation_id": f"quest:{quest_id}:pytest",
+            "user_id": "user:pytest",
+        },
+    )
+    assert isinstance(partial_input, dict)
+    assert partial_input["ok"] is True
+    assert partial_input["completed_commands"] == []
+
+    deadline = time.time() + 6
+    saw_partial_echo = False
+    while time.time() < deadline:
+        entries, _meta = app.bash_exec_service.read_log_entries(quest_root, "terminal-main", limit=200, order="asc")
+        if any(entry.get("stream") == "partial" and "abc" in str(entry.get("line") or "") for entry in entries):
+            saw_partial_echo = True
+            break
+        time.sleep(0.1)
+    assert saw_partial_echo is True
+
+    clear_input = app.handlers.terminal_input(
+        quest_id,
+        "terminal-main",
+        {
+            "data": "\x7f\x7f\x7f",
+            "source": "pytest",
+            "conversation_id": f"quest:{quest_id}:pytest",
+            "user_id": "user:pytest",
+        },
+    )
+    assert isinstance(clear_input, dict)
+    assert clear_input["ok"] is True
+    assert clear_input["completed_commands"] == []
 
     accepted = app.handlers.terminal_input(
         quest_id,
@@ -594,6 +927,89 @@ def test_terminal_handlers_create_new_terminal_session(temp_home: Path) -> None:
     assert final_created["status"] == "terminated"
     final_main = app.bash_exec_service.wait_for_session(quest_root, "terminal-main", timeout_seconds=10)
     assert final_main["status"] == "terminated"
+
+
+def test_terminal_attach_websocket_smoke_supports_live_python_io(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app._start_terminal_attach_server("127.0.0.1", 0)
+    quest_root: Path | None = None
+    try:
+        quest = app.quest_service.create("terminal attach smoke")
+        quest_id = quest["quest_id"]
+        quest_root = Path(quest["quest_root"])
+        ensured = app.handlers.terminal_session_ensure(
+            quest_id,
+            {
+                "source": "pytest",
+                "conversation_id": f"quest:{quest_id}:pytest",
+                "user_id": "user:pytest",
+            },
+        )
+        assert ensured["ok"] is True
+        attach = app.handlers.terminal_attach(quest_id, "terminal-main", {})
+        assert isinstance(attach, dict)
+        assert attach["ok"] is True
+        ws_url = f"ws://127.0.0.1:{attach['port']}{attach['path']}?token={attach['token']}"
+        with websocket_connect(ws_url, open_timeout=5, close_timeout=2, max_size=None) as websocket:
+            ready = json.loads(websocket.recv())
+            assert ready["type"] == "ready"
+
+            def _read_until_contains(needle: str, *, timeout: float = 10.0) -> str:
+                deadline = time.time() + timeout
+                chunks: list[str] = []
+                while time.time() < deadline:
+                    try:
+                        message = websocket.recv(timeout=1)
+                    except TimeoutError:
+                        continue
+                    if isinstance(message, bytes):
+                        chunks.append(message.decode("utf-8", errors="replace"))
+                    else:
+                        try:
+                            payload = json.loads(message)
+                        except Exception:
+                            chunks.append(str(message))
+                            if needle in "".join(chunks):
+                                return "".join(chunks)
+                            continue
+                        if payload.get("type") == "exit":
+                            break
+                        continue
+                    joined = "".join(chunks)
+                    if needle in joined:
+                        return joined
+                raise AssertionError(
+                    f"Timed out waiting for terminal output containing {needle!r}. Collected: {''.join(chunks)!r}"
+                )
+
+            websocket.send(json.dumps({"type": "input", "data": "python\n"}))
+            _read_until_contains(">>>")
+            websocket.send(json.dumps({"type": "input", "data": "print(123)\n"}))
+            _read_until_contains("123")
+            websocket.send(json.dumps({"type": "input", "data": "exit()\n"}))
+            _read_until_contains("$ ")
+            websocket.send(json.dumps({"type": "input", "data": "nano ds_smoke.txt\n"}))
+            _read_until_contains("GNU nano", timeout=8)
+            websocket.send(json.dumps({"type": "input", "data": "hello nano"}))
+            websocket.send(json.dumps({"type": "input", "data": "\u0018"}))
+            _read_until_contains("Save modified buffer", timeout=8)
+
+        history = read_jsonl(app.bash_exec_service.history_path(quest_root, "terminal-main"))
+        commands = [str(item.get("command") or "") for item in history]
+        assert "python" in commands
+        assert "print(123)" in commands
+        assert "exit()" in commands
+        assert "nano ds_smoke.txt" in commands
+    finally:
+        try:
+            if quest_root is not None:
+                app.bash_exec_service.request_stop(quest_root, "terminal-main", reason="pytest-stop")
+        except Exception:
+            pass
+        app._stop_terminal_attach_server()
+        app.bash_exec_service.shutdown()
 
 
 def test_chat_endpoint_schedules_background_runner(temp_home: Path) -> None:
@@ -834,6 +1250,110 @@ def test_chat_endpoint_relays_assistant_reply_to_bound_connector(temp_home: Path
     assert outbound["message"] == "Assistant relay payload."
 
 
+def test_connector_outbound_events_are_persisted_to_quest_stream(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    def fake_deliver(_self, _payload, _config):  # noqa: ANN001
+        return {"ok": True, "queued": False, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_deliver)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("connector outbound event quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    result = app.artifact_service._deliver_to_channel(
+        "qq",
+        {
+            "quest_root": str(quest_root),
+            "quest_id": quest_id,
+            "conversation_id": "qq:direct:UserABC123",
+            "kind": "progress",
+            "message": "Connector outbound payload.",
+            "response_phase": "control",
+            "importance": "info",
+        },
+        connectors=app.artifact_service._connectors_config(),
+    )
+
+    assert result["ok"] is True
+    events = read_jsonl(quest_root / ".ds" / "events.jsonl")
+    outbound_event = next(item for item in events if item.get("type") == "connector.outbound")
+    assert outbound_event["quest_id"] == quest_id
+    assert outbound_event["conversation_id"] == "qq:direct:UserABC123"
+    assert outbound_event["channel"] == "qq"
+    assert outbound_event["kind"] == "progress"
+    assert outbound_event["ok"] is True
+    assert outbound_event["queued"] is False
+    assert outbound_event["transport"] == "qq-http"
+
+
+def test_qq_inbound_reply_auto_links_to_latest_threaded_interaction(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    deliveries: list[dict] = []
+
+    def fake_deliver(_self, payload, _config):  # noqa: ANN001
+        deliveries.append(dict(payload))
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_deliver)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("qq threaded reply quest")
+    quest_root = Path(quest["quest_root"])
+    conversation_id = "qq:direct:CF8D2D559AA956B48751539ADFB98865"
+    app.update_quest_binding(quest["quest_id"], conversation_id, force=True)
+
+    progress = app.artifact_service.interact(
+        quest_root,
+        kind="progress",
+        message="老师，我已经完成第一轮审计，正在继续核对依赖入口。",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+    )
+
+    assert progress["status"] == "ok"
+    assert progress["delivered"] is True
+    assert progress["interaction_id"]
+    assert deliveries
+    assert deliveries[-1]["conversation_id"] == conversation_id
+
+    response = app.handle_qq_inbound(
+        {
+            "chat_type": "direct",
+            "sender_id": "CF8D2D559AA956B48751539ADFB98865",
+            "sender_name": "Tester",
+            "text": "继续，把数据入口也一起核对。",
+        }
+    )
+
+    assert response["accepted"] is True
+    history = app.quest_service.history(quest["quest_id"])
+    assert history
+    latest = history[-1]
+    assert latest["role"] == "user"
+    assert latest["source"] == conversation_id
+    assert latest["content"] == "继续，把数据入口也一起核对。"
+    assert latest["reply_to_interaction_id"] == progress["interaction_id"]
+
+
 def test_chat_endpoint_persists_client_message_delivery_state(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -1003,6 +1523,7 @@ def test_quest_control_pause_marks_quest_paused_and_interrupts_runner(temp_home:
     assert pause_payload["action"] == "pause"
     assert pause_payload["interrupted"] is True
     assert pause_payload["snapshot"]["status"] == "paused"
+    assert "发送任意新指令" in str(pause_payload["notice"]["message"])
 
     deadline = time.time() + 3
     while time.time() < deadline:
@@ -1012,6 +1533,95 @@ def test_quest_control_pause_marks_quest_paused_and_interrupts_runner(temp_home:
         time.sleep(0.05)
     else:
         raise AssertionError("paused quest did not clear active_run_id after the runner exited")
+
+
+def test_quest_control_stop_stops_runner_owned_bash_exec_sessions(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("stop quest with bash")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    class InterruptibleRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.interrupted = threading.Event()
+
+        def run(self, request):
+            self.started.set()
+            while not self.interrupted.is_set():
+                time.sleep(0.05)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=False,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="Interrupted.",
+                exit_code=130,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="stopped by user",
+            )
+
+        def interrupt(self, quest_id: str) -> bool:
+            self.interrupted.set()
+            return True
+
+    runner = InterruptibleRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.chat(quest_id, {"text": "Stop this long task.", "source": "web-react"})
+    assert payload["ok"] is True
+    assert runner.started.wait(timeout=2)
+
+    running_snapshot = app.quest_service.snapshot(quest_id)
+    active_run_id = str(running_snapshot["active_run_id"] or "")
+    assert active_run_id
+
+    context = McpContext(
+        home=temp_home,
+        quest_id=quest_id,
+        quest_root=quest_root,
+        run_id=active_run_id,
+        active_anchor="experiment",
+        conversation_id=f"quest:{quest_id}",
+        agent_role="pi",
+        worker_id=None,
+        worktree_root=None,
+        team_mode="single",
+    )
+    session = app.bash_exec_service.start_session(
+        context,
+        command="printf 'alpha\\n'; sleep 5; printf 'omega\\n'",
+        mode="detach",
+    )
+    bash_id = session["bash_id"]
+    time.sleep(0.6)
+
+    stop_payload = app.handlers.quest_control(quest_id, {"action": "stop", "source": "web-react"})
+
+    assert stop_payload["ok"] is True
+    assert stop_payload["action"] == "stop"
+    assert stop_payload["interrupted"] is True
+    assert stop_payload["snapshot"]["status"] == "stopped"
+    assert bash_id in stop_payload["stopped_bash_session_ids"]
+    assert "发送任意新指令" in str(stop_payload["notice"]["message"])
+
+    final = app.bash_exec_service.wait_for_session(quest_root, bash_id, timeout_seconds=10)
+    assert final["status"] == "terminated"
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        stopped_snapshot = app.quest_service.snapshot(quest_id)
+        if stopped_snapshot["status"] == "stopped" and stopped_snapshot["active_run_id"] is None:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("stopped quest did not clear active_run_id after the runner exited")
 
 
 def test_admin_shutdown_endpoint_requests_daemon_shutdown(temp_home: Path) -> None:
@@ -1083,6 +1693,159 @@ def test_daemon_startup_reconciles_stale_running_quest(temp_home: Path) -> None:
         item.get("type") == "quest.runtime_reconciled"
         and item.get("abandoned_run_id") == "run-crashed-001"
         for item in events
+    )
+
+
+def test_daemon_retries_failed_runner_attempt_and_continues_with_retry_context(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app.runners_config["codex"].update(
+        {
+            "retry_on_failure": True,
+            "retry_max_attempts": 5,
+            "retry_initial_backoff_sec": 0,
+            "retry_backoff_multiplier": 2,
+            "retry_max_backoff_sec": 0,
+        }
+    )
+    quest = app.quest_service.create("retry success quest")
+    quest_id = quest["quest_id"]
+
+    class FlakyRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            if len(self.requests) == 1:
+                return RunResult(
+                    ok=False,
+                    run_id=request.run_id,
+                    model=request.model,
+                    output_text="Partial answer before failure.",
+                    exit_code=1,
+                    history_root=history_root,
+                    run_root=run_root,
+                    stderr_text="temporary transport failure",
+                )
+            assert request.attempt_index == 2
+            assert request.max_attempts == 5
+            assert isinstance(request.retry_context, dict)
+            assert request.retry_context["previous_run_id"] == self.requests[0].run_id
+            assert "temporary transport failure" in str(request.retry_context["failure_summary"])
+            assert "Partial answer before failure." in str(request.retry_context["previous_output_text"])
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="Recovered answer after retry.",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = FlakyRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.chat(quest_id, {"text": "Please continue reliably.", "source": "tui-ink"})
+    assert payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        history = app.quest_service.history(quest_id, limit=20)
+        if any(
+            str(item.get("role") or "") == "assistant"
+            and str(item.get("content") or "") == "Recovered answer after retry."
+            for item in history
+        ):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("retrying runner did not produce a recovered answer")
+
+    assert len(runner.requests) == 2
+    events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+    assert any(item.get("type") == "runner.turn_retry_scheduled" for item in events)
+    assert any(item.get("type") == "runner.turn_retry_started" for item in events)
+    assert not any(
+        str(item.get("role") or "") == "assistant"
+        and str(item.get("content") or "") == "Partial answer before failure."
+        for item in app.quest_service.history(quest_id, limit=20)
+    )
+
+
+def test_daemon_retry_exhausts_after_five_attempts(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app.runners_config["codex"].update(
+        {
+            "retry_on_failure": True,
+            "retry_max_attempts": 5,
+            "retry_initial_backoff_sec": 0,
+            "retry_backoff_multiplier": 2,
+            "retry_max_backoff_sec": 0,
+        }
+    )
+    quest = app.quest_service.create("retry exhausted quest")
+    quest_id = quest["quest_id"]
+
+    class AlwaysFailRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=False,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="Partial failed output.",
+                exit_code=1,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="persistent upstream failure",
+            )
+
+    runner = AlwaysFailRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.chat(quest_id, {"text": "Keep going until exhausted.", "source": "tui-ink"})
+    assert payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+        if any(item.get("type") == "runner.turn_retry_exhausted" for item in events):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("retry sequence did not exhaust within the expected time")
+
+    snapshot = app.quest_service.snapshot(quest_id)
+    events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+
+    assert len(runner.requests) == 5
+    assert snapshot["runtime_status"] == "active"
+    assert snapshot["status"] == "error"
+    assert snapshot["retry_state"] is None
+    assert any(item.get("type") == "runner.turn_error" for item in events)
+    assert any(item.get("type") == "runner.turn_retry_exhausted" for item in events)
+    assert not any(
+        str(item.get("role") or "") == "assistant"
+        and str(item.get("content") or "") == "Partial failed output."
+        for item in app.quest_service.history(quest_id, limit=20)
     )
 
 
@@ -1195,6 +1958,189 @@ def test_chat_reply_auto_links_interaction_and_resumes_with_decision_skill(temp_
         and item.get("reply_to_interaction_id") == interaction_id
         for item in events
     )
+
+
+def test_new_user_message_restarts_turn_after_error_display_status(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("resume after error")
+    quest_id = quest["quest_id"]
+
+    class OneShotFailRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=False,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="forced upstream 403",
+                exit_code=1,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="subscription missing",
+            )
+
+    runner = OneShotFailRunner()
+    app.runners["codex"] = runner
+    app.runners_config["codex"]["retry_on_failure"] = False
+    app.runners_config["codex"]["retry_max_attempts"] = 1
+
+    payload = app.handlers.chat(quest_id, {"text": "first try", "source": "web-react"})
+    assert payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        if len(runner.requests) == 1 and snapshot["runtime_status"] == "active" and snapshot["status"] == "error":
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("initial failing turn did not finish as expected")
+
+    payload = app.handlers.chat(quest_id, {"text": "second try", "source": "web-react"})
+    assert payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if len(runner.requests) >= 2:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("new user message did not restart the turn after error display status")
+
+    assert runner.requests[0].message == "first try"
+    assert runner.requests[1].message == "second try"
+
+
+def test_daemon_auto_continue_starts_next_turn_without_replaying_last_user_message(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("auto continue quest")
+    quest_id = quest["quest_id"]
+
+    class AutoContinueRunner:
+        binary = ""
+
+        def __init__(self, app: DaemonApp) -> None:
+            self.app = app
+            self.requests: list[dict[str, str]] = []
+
+        def run(self, request):
+            self.requests.append(
+                {
+                    "run_id": request.run_id,
+                    "message": request.message,
+                    "skill_id": request.skill_id,
+                    "turn_reason": request.turn_reason,
+                }
+            )
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            output_text = f"turn:{request.turn_reason or 'user_message'}"
+            if len(self.requests) >= 2:
+                self.app.quest_service.mark_completed(request.quest_id)
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text=output_text,
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = AutoContinueRunner(app)
+    app.runners["codex"] = runner
+
+    app.handlers.chat(quest_id, {"text": "Keep going until the quest is done.", "source": "tui-ink"})
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        if snapshot["status"] == "completed" and len(runner.requests) >= 2:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("quest did not auto-continue into a second turn")
+
+    assert runner.requests[0]["turn_reason"] == "user_message"
+    assert runner.requests[0]["message"] == "Keep going until the quest is done."
+    assert runner.requests[1]["turn_reason"] == "auto_continue"
+    assert runner.requests[1]["message"] == ""
+
+
+def test_daemon_does_not_auto_continue_while_waiting_for_blocking_user_decision(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("waiting quest")
+    quest_id = quest["quest_id"]
+
+    class WaitingRunner:
+        binary = ""
+
+        def __init__(self, artifact_service: ArtifactService) -> None:
+            self.artifact_service = artifact_service
+            self.requests: list[dict[str, str]] = []
+
+        def run(self, request):
+            self.requests.append(
+                {
+                    "run_id": request.run_id,
+                    "message": request.message,
+                    "skill_id": request.skill_id,
+                    "turn_reason": request.turn_reason,
+                }
+            )
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            self.artifact_service.interact(
+                request.quest_root,
+                kind="decision_request",
+                message="Please confirm whether I should stop here.",
+                deliver_to_bound_conversations=False,
+                include_recent_inbound_messages=False,
+                reply_mode="blocking",
+                reply_schema={"decision_type": "quest_completion_approval"},
+            )
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="Waiting for approval.",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = WaitingRunner(app.artifact_service)
+    app.runners["codex"] = runner
+
+    app.handlers.chat(quest_id, {"text": "Finish if everything is done.", "source": "tui-ink"})
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        if snapshot["status"] == "waiting_for_user":
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("quest never entered waiting_for_user")
+
+    time.sleep(0.25)
+    assert len(runner.requests) == 1
+    assert runner.requests[0]["turn_reason"] == "user_message"
 
 
 def test_chat_reply_auto_links_latest_threaded_progress_without_forcing_decision_skill(temp_home: Path) -> None:
@@ -1458,6 +2404,7 @@ def test_stop_then_user_text_continues_same_quest_context(temp_home: Path) -> No
     assert stop_payload["snapshot"]["pending_user_message_count"] == 0
     assert "DeepScientist" in str(stop_payload["notice"]["message"])
     assert "停止状态" in str(stop_payload["notice"]["message"])
+    assert "发送任意新指令" in str(stop_payload["notice"]["message"])
     queue_after_stop = json.loads((quest_root / ".ds" / "user_message_queue.json").read_text(encoding="utf-8"))
     assert queue_after_stop["pending"] == []
     completed_status_by_id = {
@@ -1494,6 +2441,7 @@ def test_stop_then_user_text_continues_same_quest_context(temp_home: Path) -> No
     assert any(
         "DeepScientist" in str(item.get("message") or "")
         and "停止状态" in str(item.get("message") or "")
+        and "发送任意新指令" in str(item.get("message") or "")
         for item in outbox
     )
 

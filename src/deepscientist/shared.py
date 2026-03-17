@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -151,3 +153,37 @@ def run_command(
 
 def which(binary: str) -> str | None:
     return shutil.which(binary)
+
+
+def resolve_runner_binary(binary: str, *, runner_name: str | None = None) -> str | None:
+    normalized = str(binary or "").strip()
+    if not normalized:
+        return None
+
+    candidate = Path(normalized).expanduser()
+    if candidate.is_absolute() or os.path.sep in normalized or (os.path.altsep and os.path.altsep in normalized):
+        return str(candidate) if candidate.exists() else None
+
+    discovered = shutil.which(normalized)
+    if discovered:
+        return discovered
+
+    normalized_runner = str(runner_name or candidate.name or normalized).strip().lower()
+    if normalized_runner != "codex":
+        return None
+
+    for env_name in ("DEEPSCIENTIST_CODEX_BINARY", "DS_CODEX_BINARY"):
+        override = os.environ.get(env_name)
+        if override:
+            override_path = Path(override).expanduser()
+            if override_path.exists():
+                return str(override_path)
+
+    repo_root = Path(__file__).resolve().parents[2]
+    node_bin_root = repo_root / "node_modules" / ".bin"
+    names = ["codex.cmd", "codex.exe", "codex"] if sys.platform.startswith("win") else ["codex"]
+    for name in names:
+        package_local = node_bin_root / name
+        if package_local.exists():
+            return str(package_local)
+    return None

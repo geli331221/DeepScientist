@@ -34,7 +34,7 @@ function fallbackQuestSurfaceGuess(): boolean {
         ? pathname.slice('/ui'.length)
         : pathname
   if (normalizedPath.startsWith('/projects/')) return true
-  if (normalizedPath === '/' || normalizedPath === '/projects') return true
+  if (normalizedPath === '/') return true
   if (normalizedPath.startsWith('/docs') || normalizedPath.startsWith('/settings')) return true
   return false
 }

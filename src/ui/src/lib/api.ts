@@ -19,6 +19,7 @@ import type {
   QuestDocumentAssetUploadPayload,
   QuestNodeTraceDetailPayload,
   QuestNodeTraceListPayload,
+  QuestStageViewPayload,
   QuestArtifactListPayload,
   QuestRawEventListPayload,
   QuestDocument,
@@ -74,6 +75,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const client = {
   quests: () => api<QuestSummary[]>('/api/quests'),
+  nextQuestId: () => api<{ quest_id: string }>('/api/quest-id/next'),
   baselines: () => api<BaselineRegistryEntry[]>('/api/baselines'),
   session: (questId: string) => api<SessionPayload>(`/api/quests/${questId}/session`),
   updateQuestSettings: (
@@ -159,13 +161,39 @@ export const client = {
         selectionType ? `?selection_type=${encodeURIComponent(selectionType)}` : ''
       }`
     ),
-  explorer: (questId: string, options?: { revision?: string | null; mode?: string | null }) => {
+  stageView: (
+    questId: string,
+    payload: {
+      selection_ref?: string | null
+      selection_type?: string | null
+      branch_name?: string | null
+      stage_key?: string | null
+      worktree_rel_path?: string | null
+      scope_paths?: string[] | null
+      compare_base?: string | null
+      compare_head?: string | null
+      label?: string | null
+      summary?: string | null
+      baseline_gate?: string | null
+    }
+  ) =>
+    api<QuestStageViewPayload>(`/api/quests/${questId}/stage-view`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  explorer: (
+    questId: string,
+    options?: { revision?: string | null; mode?: string | null; profile?: string | null }
+  ) => {
     const params = new URLSearchParams()
     if (options?.revision) {
       params.set('revision', options.revision)
     }
     if (options?.mode) {
       params.set('mode', options.mode)
+    }
+    if (options?.profile) {
+      params.set('profile', options.profile)
     }
     const suffix = params.toString()
     return api<ExplorerPayload>(`/api/quests/${questId}/explorer${suffix ? `?${suffix}` : ''}`)
@@ -256,6 +284,11 @@ export const client = {
       method: 'POST',
       body: JSON.stringify({ command, source: 'web-react' }),
     }),
+  controlQuest: (questId: string, action: 'pause' | 'stop' | 'resume') =>
+    api<Record<string, unknown>>(`/api/quests/${questId}/control`, {
+      method: 'POST',
+      body: JSON.stringify({ action, source: 'web-react' }),
+    }),
   runSkill: (questId: string, payload: { skill_id: string; model?: string; message: string }) =>
     api<Record<string, unknown>>(`/api/quests/${questId}/runs`, {
       method: 'POST',
@@ -270,6 +303,10 @@ export const client = {
     goal: string
     title?: string
     quest_id?: string
+    source?: string
+    auto_start?: boolean
+    initial_message?: string
+    preferred_connector_conversation_id?: string
     requested_baseline_ref?: { baseline_id: string; variant_id?: string | null } | null
     startup_contract?: Record<string, unknown> | null
   }) =>

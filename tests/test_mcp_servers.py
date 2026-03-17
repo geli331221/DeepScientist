@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+
+import pytest
 
 from deepscientist.artifact import ArtifactService
 from deepscientist.config import ConfigManager
@@ -9,6 +12,7 @@ from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.mcp.context import McpContext
 from deepscientist.mcp.server import build_artifact_server, build_bash_exec_server, build_memory_server
 from deepscientist.quest import QuestService
+from deepscientist.shared import read_jsonl, write_yaml
 from deepscientist.skills import SkillInstaller
 
 
@@ -59,6 +63,25 @@ def test_memory_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert write_result["scope"] == "quest"
         assert Path(write_result["path"]).exists()
+        assert write_result["metadata"]["tags"] == ["mcp"]
+
+        string_tags_result = _unwrap_tool_result(
+            await server.call_tool(
+                "write",
+                {
+                    "kind": "decisions",
+                    "title": "String tags coercion",
+                    "body": "string tags body",
+                    "tags": "stage:baseline, quest:test, type:route-decision",
+                },
+            )
+        )
+        assert string_tags_result["metadata"]["tags"] == [
+            "stage:baseline",
+            "quest:test",
+            "type:route-decision",
+        ]
+        assert Path(string_tags_result["path"]).exists()
 
         read_result = _unwrap_tool_result(await server.call_tool("read", {"card_id": write_result["id"]}))
         assert read_result["id"] == write_result["id"]
@@ -76,6 +99,92 @@ def test_memory_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         promote_result = _unwrap_tool_result(await server.call_tool("promote_to_global", {"card_id": write_result["id"]}))
         assert promote_result["scope"] == "global"
         assert Path(promote_result["path"]).exists()
+
+    asyncio.run(scenario())
+
+
+def test_artifact_mcp_server_interact_delivers_to_bound_qq_connector(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        manager = ConfigManager(temp_home)
+        manager.ensure_files()
+        connectors = manager.load_named("connectors")
+        connectors["qq"]["enabled"] = True
+        write_yaml(manager.path_for("connectors"), connectors)
+
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp artifact qq quest")
+        quest_root = Path(quest["quest_root"])
+        conversation_id = "qq:direct:CF8D2D559AA956B48751539ADFB98865"
+        (quest_root / ".ds" / "bindings.json").write_text(
+            json.dumps({"sources": ["local:default", conversation_id]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        connector_root = temp_home / "logs" / "connectors" / "qq"
+        connector_root.mkdir(parents=True, exist_ok=True)
+        (connector_root / "bindings.json").write_text(
+            json.dumps(
+                {
+                    "bindings": {
+                        conversation_id: {
+                            "quest_id": quest["quest_id"],
+                            "updated_at": "2026-03-14T09:10:33+00:00",
+                        }
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        deliveries: list[dict] = []
+
+        def fake_deliver(self, payload, config):  # noqa: ANN001
+            deliveries.append({"payload": dict(payload), "config": dict(config or {})})
+            return {"ok": True, "transport": "qq-http"}
+
+        monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_deliver)
+
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-artifact-qq",
+            active_anchor="baseline",
+            conversation_id="quest:test",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        server = build_artifact_server(context)
+
+        interact_result = _unwrap_tool_result(
+            await server.call_tool(
+                "interact",
+                {
+                    "kind": "progress",
+                    "message": "mcp artifact qq delivery ok",
+                    "deliver_to_bound_conversations": True,
+                    "include_recent_inbound_messages": False,
+                },
+            )
+        )
+
+        assert interact_result["status"] == "ok"
+        assert interact_result["delivered"] is True
+        assert conversation_id in interact_result["delivery_targets"]
+        assert "local:default" in interact_result["delivery_targets"]
+        assert len(deliveries) == 1
+        assert deliveries[0]["payload"]["conversation_id"] == conversation_id
+        assert deliveries[0]["payload"]["text"] == "mcp artifact qq delivery ok"
+        outbox = read_jsonl(connector_root / "outbox.jsonl")
+        assert outbox
+        assert outbox[-1]["conversation_id"] == conversation_id
+        assert outbox[-1]["delivery"]["ok"] is True
 
     asyncio.run(scenario())
 
@@ -105,8 +214,14 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
             "checkpoint",
             "prepare_branch",
             "submit_idea",
+            "list_research_branches",
+            "resolve_runtime_refs",
+            "get_analysis_campaign",
             "record_main_experiment",
             "create_analysis_campaign",
+            "submit_paper_outline",
+            "list_paper_outlines",
+            "submit_paper_bundle",
             "record_analysis_slice",
             "publish_baseline",
             "attach_baseline",
@@ -116,6 +231,7 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
             "refresh_summary",
             "render_git_graph",
             "interact",
+            "complete_quest",
         ]
 
         record_result = _unwrap_tool_result(
@@ -215,17 +331,21 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
                 "submit_idea",
                 {
                     "mode": "create",
+                    "lineage_intent": "continue_line",
                     "title": "Adapter route",
                     "problem": "Baseline saturates.",
                     "hypothesis": "A lightweight adapter helps.",
                     "mechanism": "Insert a residual adapter.",
                     "decision_reason": "Promote the strongest current idea.",
+                    "draft_markdown": "# Adapter route draft\n\n## Code-Level Change Plan\n\nInsert a residual adapter.\n",
                 },
             )
         )
         assert idea_result["ok"] is True
         assert idea_result["branch"].startswith(f"idea/{quest['quest_id']}-")
+        assert idea_result["lineage_intent"] == "continue_line"
         assert Path(idea_result["worktree_root"]).exists()
+        assert Path(idea_result["idea_draft_path"]).exists()
 
         main_result = _unwrap_tool_result(
             await server.call_tool(
@@ -245,6 +365,54 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         assert main_result["ok"] is True
         assert Path(main_result["result_json_path"]).exists()
         assert main_result["progress_eval"]["breakthrough"] is True
+
+        refs_after_main = _unwrap_tool_result(await server.call_tool("resolve_runtime_refs", {}))
+        assert refs_after_main["latest_main_run_id"] == "main-mcp-001"
+        assert refs_after_main["active_idea_id"] == idea_result["idea_id"]
+
+        branches_after_run = _unwrap_tool_result(await server.call_tool("list_research_branches", {}))
+        assert branches_after_run["ok"] is True
+        assert branches_after_run["count"] == 1
+        assert branches_after_run["branches"][0]["branch_no"] == "001"
+        assert branches_after_run["branches"][0]["branch_name"] == idea_result["branch"]
+        assert branches_after_run["branches"][0]["latest_main_experiment"]["run_id"] == "main-mcp-001"
+
+        second_idea_result = _unwrap_tool_result(
+            await server.call_tool(
+                "submit_idea",
+                {
+                    "mode": "create",
+                    "lineage_intent": "continue_line",
+                    "title": "Run-informed route",
+                    "problem": "Need a follow-up route grounded in the measured win.",
+                    "hypothesis": "The best measured branch is the right foundation.",
+                    "mechanism": "Extend the winning adapter logic into a new branch.",
+                    "decision_reason": "Use the best measured main run as the next foundation.",
+                    "foundation_ref": {"kind": "run", "ref": "main-mcp-001"},
+                    "foundation_reason": "Carry forward the strongest measured branch.",
+                },
+            )
+        )
+        assert second_idea_result["ok"] is True
+        assert second_idea_result["branch_no"] == "002"
+        assert second_idea_result["lineage_intent"] == "continue_line"
+        assert second_idea_result["foundation_ref"]["kind"] == "run"
+        assert second_idea_result["foundation_ref"]["ref"] == "main-mcp-001"
+        assert Path(second_idea_result["worktree_root"]).exists()
+
+        branches_after_second_idea = _unwrap_tool_result(await server.call_tool("list_research_branches", {}))
+        assert branches_after_second_idea["ok"] is True
+        assert branches_after_second_idea["count"] == 2
+        by_branch = {item["branch_name"]: item for item in branches_after_second_idea["branches"]}
+        assert by_branch[idea_result["branch"]]["branch_no"] == "001"
+        assert by_branch[idea_result["branch"]]["latest_main_experiment"]["run_id"] == "main-mcp-001"
+        assert by_branch[second_idea_result["branch"]]["branch_no"] == "002"
+        assert by_branch[second_idea_result["branch"]]["foundation_ref"]["kind"] == "run"
+        assert by_branch[second_idea_result["branch"]]["foundation_reason"] == "Carry forward the strongest measured branch."
+
+        outlines_before = _unwrap_tool_result(await server.call_tool("list_paper_outlines", {}))
+        assert outlines_before["selected_outline_ref"] is None
+        assert outlines_before["count"] == 0
 
         campaign_result = _unwrap_tool_result(
             await server.call_tool(
@@ -268,6 +436,17 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         assert campaign_result["campaign_id"]
         assert Path(campaign_result["slices"][0]["worktree_root"]).exists()
 
+        campaign_view = _unwrap_tool_result(
+            await server.call_tool(
+                "get_analysis_campaign",
+                {
+                    "campaign_id": "active",
+                },
+            )
+        )
+        assert campaign_view["campaign_id"] == campaign_result["campaign_id"]
+        assert campaign_view["next_pending_slice_id"] == "ablation"
+
         slice_result = _unwrap_tool_result(
             await server.call_tool(
                 "record_analysis_slice",
@@ -284,7 +463,7 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert slice_result["ok"] is True
         assert slice_result["completed"] is True
-        assert slice_result["returned_to_branch"] == idea_result["branch"]
+        assert slice_result["returned_to_branch"] == second_idea_result["branch"]
 
         summary_result = _unwrap_tool_result(await server.call_tool("refresh_summary", {"reason": "mcp test"}))
         assert summary_result["ok"] is True
@@ -306,6 +485,37 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert interact_result["status"] == "ok"
         assert interact_result["delivered"] is False
+
+        completion_request = _unwrap_tool_result(
+            await server.call_tool(
+                "interact",
+                {
+                    "kind": "decision_request",
+                    "message": "May I end this quest now?",
+                    "deliver_to_bound_conversations": False,
+                    "include_recent_inbound_messages": False,
+                    "reply_mode": "blocking",
+                    "reply_schema": {"decision_type": "quest_completion_approval"},
+                },
+            )
+        )
+        QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).append_message(
+            quest["quest_id"],
+            role="user",
+            content="approve",
+            source="tui-ink",
+            reply_to_interaction_id=completion_request["interaction_id"],
+        )
+        completion_result = _unwrap_tool_result(
+            await server.call_tool(
+                "complete_quest",
+                {
+                    "summary": "Quest complete after MCP verification.",
+                },
+            )
+        )
+        assert completion_result["ok"] is True
+        assert completion_result["snapshot"]["status"] == "completed"
 
     asyncio.run(scenario())
 

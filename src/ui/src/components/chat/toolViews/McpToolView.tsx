@@ -17,6 +17,11 @@ import type { ToolViewProps } from './types'
 import { McpMemoryToolView } from './McpMemoryToolView'
 import { McpArtifactToolView } from './McpArtifactToolView'
 
+const detailTextClass =
+  'mt-1 max-w-full break-words [overflow-wrap:anywhere] text-xs text-[var(--text-secondary)]'
+const detailPreClass =
+  'mt-2 max-w-full overflow-x-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs'
+
 export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
   const showHeader = panelMode == null
   const findNodeByPath = useFileTreeStore((state) => state.findNodeByPath)
@@ -359,19 +364,19 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
             ) : null}
           </div>
         ) : null}
-        <div className="relative flex-1 overflow-y-auto">
-          <div className="mx-auto flex max-w-[640px] flex-col gap-4 px-4 py-3 text-xs text-[var(--text-secondary)]">
+        <div className="relative flex-1 overflow-x-hidden overflow-y-auto">
+          <div className="mx-auto flex min-w-0 max-w-[640px] flex-col gap-4 px-4 py-3 text-xs text-[var(--text-secondary)]">
             <div className="text-xs font-medium text-[var(--text-primary)]">{label}</div>
             {isMcpReadFile || isMcpAppendFile || isMcpPullFile || isMcpListFile || isMcpListDir ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Title</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpDetailTitle}</div>
+                <div className={detailTextClass}>{mcpDetailTitle}</div>
               </div>
             ) : null}
             {isMcpGrepText ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Query</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                <div className={detailTextClass}>
                   {mcpSearchQuery || '—'}
                 </div>
               </div>
@@ -379,7 +384,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
             {isMcpGlobFiles || isMcpGrepFiles ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Pattern</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                <div className={detailTextClass}>
                   {mcpSearchPattern || '—'}
                 </div>
               </div>
@@ -387,7 +392,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
             {isMcpWriteMemory ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Memory title</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                <div className={detailTextClass}>
                   {mcpMemoryTitle || '—'}
                 </div>
               </div>
@@ -395,13 +400,13 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
             {isMcpRequestPatch ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Target path</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpPatchTarget}</div>
+                <div className={detailTextClass}>{mcpPatchTarget}</div>
               </div>
             ) : null}
             {isMcpBashExec ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Command</div>
-                <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                <pre className={detailPreClass}>
                   {mcpBashCommand || '—'}
                 </pre>
               </div>
@@ -409,25 +414,25 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
             {isMcpBashExec && mcpBashWorkdir ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Workdir</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpBashWorkdir}</div>
+                <div className={detailTextClass}>{mcpBashWorkdir}</div>
               </div>
             ) : null}
             {isMcpBashExec && mcpBashMode ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Mode</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpBashMode}</div>
+                <div className={detailTextClass}>{mcpBashMode}</div>
               </div>
             ) : null}
             {isMcpBashExec && mcpBashTimeout ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Timeout</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpBashTimeout}</div>
+                <div className={detailTextClass}>{mcpBashTimeout}</div>
               </div>
             ) : null}
             {isMcpBashExec && mcpBashMode === 'read' ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Log</div>
-                <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                <pre className={detailPreClass}>
                   {sanitizedBashLog || 'No log output returned.'}
                 </pre>
               </div>
@@ -435,7 +440,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
             {isMcpBashExec && mcpBashMode === 'kill' ? (
               <div>
                 <div className="text-xs font-medium text-[var(--text-primary)]">Status</div>
-                <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                <div className={detailTextClass}>
                   {mcpBashStatus || (toolContent.status === 'calling' ? 'Terminating…' : 'Termination requested.')}
                 </div>
               </div>
@@ -449,7 +454,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
               ) : (
                 <div>
                   <div className="text-xs font-medium text-[var(--text-primary)]">Content</div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                  <pre className={detailPreClass}>
                     {mcpReadText}
                   </pre>
                 </div>
@@ -465,13 +470,13 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 ) : null}
                 <div>
                   <div className="text-xs font-medium text-[var(--text-primary)]">Reason</div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                  <pre className={detailPreClass}>
                     {mcpReason}
                   </pre>
                 </div>
                 <div>
                   <div className="text-xs font-medium text-[var(--text-primary)]">Content</div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                  <pre className={detailPreClass}>
                     {mcpContent}
                   </pre>
                 </div>
@@ -486,7 +491,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
               ) : (
                 <div>
                   <div className="text-xs font-medium text-[var(--text-primary)]">Content</div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                  <pre className={detailPreClass}>
                     {mcpPullContent}
                   </pre>
                 </div>
@@ -502,7 +507,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 ) : null}
                 <div>
                   <div className="text-xs font-medium text-[var(--text-primary)]">Items</div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                  <pre className={detailPreClass}>
                     {mcpListContent || mcpListLines || 'No items returned.'}
                   </pre>
                 </div>
@@ -521,7 +526,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 ) : null}
                 <div>
                   <div className="text-xs font-medium text-[var(--text-primary)]">Matches</div>
-                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                  <pre className={detailPreClass}>
                     {(isMcpGrepText
                       ? mcpSearchLines
                       : isMcpGrepFiles
@@ -545,13 +550,13 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpMemoryKind ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Kind</div>
-                    <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpMemoryKind}</div>
+                    <div className={detailTextClass}>{mcpMemoryKind}</div>
                   </div>
                 ) : null}
                 {mcpMemoryTags.length > 0 ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Tags</div>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                    <pre className={detailPreClass}>
                       {mcpMemoryTags.join(', ')}
                     </pre>
                   </div>
@@ -559,7 +564,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpMemoryConfidence != null ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Confidence</div>
-                    <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                    <div className={detailTextClass}>
                       {mcpMemoryConfidence}
                     </div>
                   </div>
@@ -567,25 +572,25 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpMemoryId ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Memory ID</div>
-                    <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpMemoryId}</div>
+                    <div className={detailTextClass}>{mcpMemoryId}</div>
                   </div>
                 ) : null}
                 {mcpMemoryPath ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Path</div>
-                    <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpMemoryPath}</div>
+                    <div className={detailTextClass}>{mcpMemoryPath}</div>
                   </div>
                 ) : null}
                 {mcpMemoryIndexPath ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Index path</div>
-                    <div className="mt-1 text-xs text-[var(--text-secondary)]">{mcpMemoryIndexPath}</div>
+                    <div className={detailTextClass}>{mcpMemoryIndexPath}</div>
                   </div>
                 ) : null}
                 {mcpMemoryWarnings.length > 0 ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Warnings</div>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                    <pre className={detailPreClass}>
                       {mcpMemoryWarnings.join(', ')}
                     </pre>
                   </div>
@@ -593,7 +598,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpMemoryErrors.length > 0 ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Errors</div>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                    <pre className={detailPreClass}>
                       {mcpMemoryErrors.join(', ')}
                     </pre>
                   </div>
@@ -611,7 +616,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpPatchRationale ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Rationale</div>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                    <pre className={detailPreClass}>
                       {mcpPatchRationale}
                     </pre>
                   </div>
@@ -625,7 +630,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpPatchEvidence.length > 0 ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Evidence refs</div>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                    <pre className={detailPreClass}>
                       {mcpPatchEvidence.join(', ')}
                     </pre>
                   </div>
@@ -633,7 +638,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
                 {mcpPatchAppliedLines ? (
                   <div>
                     <div className="text-xs font-medium text-[var(--text-primary)]">Applied</div>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+                    <pre className={detailPreClass}>
                       {mcpPatchAppliedLines}
                     </pre>
                   </div>
@@ -661,16 +666,16 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
           </div>
         </div>
       ) : null}
-      <div className="relative flex-1 overflow-y-auto">
-        <div className="mx-auto flex max-w-[640px] flex-col gap-4 px-4 py-3 text-xs text-[var(--text-secondary)]">
+      <div className="relative flex-1 overflow-x-hidden overflow-y-auto">
+        <div className="mx-auto flex min-w-0 max-w-[640px] flex-col gap-4 px-4 py-3 text-xs text-[var(--text-secondary)]">
           <div>
             <div className="text-xs font-medium text-[var(--text-primary)]">Tool</div>
-            <div className="mt-1">{toolContent.function}</div>
+            <div className={detailTextClass}>{toolContent.function}</div>
           </div>
           {hasArgs ? (
             <div>
               <div className="text-xs font-medium text-[var(--text-primary)]">Arguments</div>
-              <pre className="mt-2 rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+              <pre className={detailPreClass}>
                 {JSON.stringify(args, null, 2)}
               </pre>
             </div>
@@ -678,7 +683,7 @@ export function McpToolView({ toolContent, panelMode }: ToolViewProps) {
           {result ? (
             <div>
               <div className="text-xs font-medium text-[var(--text-primary)]">Result</div>
-              <div className="mt-2 whitespace-pre-wrap rounded-lg bg-[var(--fill-tsp-gray-main)] p-3 text-xs">
+              <div className={detailPreClass}>
                 {String(result)}
               </div>
             </div>

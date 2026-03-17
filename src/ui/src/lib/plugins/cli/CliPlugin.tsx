@@ -14,7 +14,6 @@ import { OperationLogs } from './components/OperationLogs'
 import { TasksPanel } from './components/TasksPanel'
 import { FindingsPanel } from './components/FindingsPanel'
 import { MethodPanel } from './components/MethodPanel'
-import { AdminPanel } from './components/AdminPanel'
 import { useCliAccess } from './hooks/useCliAccess'
 import { Noise } from '@/components/react-bits'
 import { useChatActions } from '@/lib/stores/chat'
@@ -31,7 +30,6 @@ type CliTabKey =
   | 'logs'
   | 'tasks'
   | 'findings'
-  | 'admin'
 
 const isOfflineStatus = (status?: string | null) => status === 'offline' || status === 'error'
 
@@ -101,13 +99,11 @@ export default function CliPlugin({ context, setTitle }: PluginComponentProps) {
     readOnly,
   })
   const canManageServers = access.permission === 'admin' || access.permission === 'owner'
-  const canSeeAdmin = access.capabilities.manage_permissions
   const canTerminalInput = access.capabilities.terminal_input
   const canFileEdit = access.capabilities.file_edit
   const canFileDelete = access.capabilities.file_delete
   const canFileUpload = access.capabilities.file_upload
   const canFileDownload = access.capabilities.file_download
-  const canManagePermissions = access.capabilities.manage_permissions
   const canUnbindServer = access.capabilities.disconnect_server
 
   const tabItems = React.useMemo(
@@ -120,20 +116,11 @@ export default function CliPlugin({ context, setTitle }: PluginComponentProps) {
         { value: 'tasks', label: t('tab_tasks') },
         { value: 'findings', label: t('tab_findings') },
       ]
-      if (canSeeAdmin) {
-        items.push({ value: 'admin', label: t('tab_admin') })
-      }
       items.push({ value: 'overview', label: t('tab_overview') })
       return items
     },
-    [canSeeAdmin, t]
+    [t]
   )
-
-  React.useEffect(() => {
-    if (activeTab === 'admin' && !canSeeAdmin) {
-      setActiveTab('overview')
-    }
-  }, [activeTab, canSeeAdmin])
 
   if (!projectId) {
     return (
@@ -207,7 +194,6 @@ export default function CliPlugin({ context, setTitle }: PluginComponentProps) {
                       projectId={projectId}
                       server={activeServer}
                       readOnly={!canTerminalInput}
-                      authMode={access.isShareView ? 'share' : 'user'}
                       canUnbind={canUnbindServer}
                     />
                   </div>
@@ -220,7 +206,6 @@ export default function CliPlugin({ context, setTitle }: PluginComponentProps) {
                           server={activeServer}
                           connectionStatus={connectionStatus}
                           accessLabel={access.permission}
-                          isShareView={access.isShareView}
                           canUnbind={canUnbindServer}
                         />
                       ) : null}
@@ -229,7 +214,6 @@ export default function CliPlugin({ context, setTitle }: PluginComponentProps) {
                           projectId={projectId}
                           serverId={activeServer.id}
                           canCreate={canFileEdit}
-                          authMode={access.isShareView ? 'share' : 'user'}
                         />
                       ) : null}
                       {activeTab === 'files' ? (
@@ -257,13 +241,6 @@ export default function CliPlugin({ context, setTitle }: PluginComponentProps) {
                       ) : null}
                       {activeTab === 'findings' ? (
                         <FindingsPanel projectId={projectId} serverId={activeServer.id} />
-                      ) : null}
-                      {activeTab === 'admin' && canSeeAdmin ? (
-                        <AdminPanel
-                          projectId={projectId}
-                          serverId={activeServer.id}
-                          readOnly={!canManagePermissions}
-                        />
                       ) : null}
                     </div>
                   </ScrollArea>

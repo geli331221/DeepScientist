@@ -223,6 +223,9 @@ export async function createProject(
     const created = await questClient.createQuestWithOptions({
       goal: data.description || data.name,
       title: data.name,
+      source: 'web-react',
+      auto_start: true,
+      initial_message: data.description || data.name,
     });
     return mapQuestSummaryToProject(created.snapshot);
   }
@@ -236,6 +239,9 @@ export async function createProject(
     const created = await questClient.createQuestWithOptions({
       goal: data.description || data.name,
       title: data.name,
+      source: 'web-react',
+      auto_start: true,
+      initial_message: data.description || data.name,
     });
     return mapQuestSummaryToProject(created.snapshot);
   }

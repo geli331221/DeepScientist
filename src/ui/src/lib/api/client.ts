@@ -1,64 +1,8 @@
 import axios, { type AxiosError, type AxiosRequestConfig } from "axios";
-import {
-  clearShareSession,
-  getActiveShareProjectId,
-  getShareSessionMeta,
-  getShareSessionToken,
-} from "@/lib/share-session";
 import { redirectToLanding } from "@/lib/navigation";
 import { toast } from "@/components/ui/toast";
 import { redactSensitive, sanitizeUrl, truncateText } from "@/lib/bugbash/sanitize";
 import { recordRequestEvent } from "@/lib/bugbash/repro-recorder";
-
-function isFilesApiRequest(url: unknown): boolean {
-  if (!url || typeof url !== "string") return false;
-  return url.startsWith("/api/v1/files") || url.includes("/api/v1/files");
-}
-
-function isLatexApiRequest(url: unknown): boolean {
-  if (!url || typeof url !== "string") return false;
-  return url.startsWith("/api/v1/projects/") && url.includes("/latex");
-}
-
-function isArxivApiRequest(url: unknown): boolean {
-  if (!url || typeof url !== "string") return false;
-  return url.startsWith("/api/v1/arxiv") || url.includes("/api/v1/arxiv");
-}
-
-function isSessionsApiRequest(url: unknown): boolean {
-  if (!url || typeof url !== "string") return false;
-  return url.startsWith("/api/v1/sessions") || url.includes("/api/v1/sessions");
-}
-
-function isCliApiRequest(url: unknown): boolean {
-  if (!url || typeof url !== "string") return false;
-  return (
-    (url.startsWith("/api/v1/projects/") && url.includes("/cli/")) ||
-    url.startsWith("/api/v1/cli")
-  );
-}
-
-function shouldPreferShareSessionForRequest(url: unknown): boolean {
-  if (
-    !isFilesApiRequest(url) &&
-    !isLatexApiRequest(url) &&
-    !isArxivApiRequest(url) &&
-    !isSessionsApiRequest(url) &&
-    !isCliApiRequest(url)
-  ) {
-    return false;
-  }
-  const shareToken = getShareSessionToken();
-  const meta = getShareSessionMeta();
-  const activeProjectId = getActiveShareProjectId();
-  return Boolean(
-    shareToken &&
-      meta?.access === "view" &&
-      meta.projectId &&
-      activeProjectId &&
-      meta.projectId === activeProjectId
-  );
-}
 
 /**
  * Resolve API base URL from environment or default configuration.
@@ -211,21 +155,9 @@ apiClient.interceptors.request.use((config) => {
   }
   if (typeof window !== "undefined") {
     const userToken = localStorage.getItem("ds_access_token");
-    const shareSessionToken = getShareSessionToken();
-
-    const preferShare = shouldPreferShareSessionForRequest(config.url);
-    if (preferShare && shareSessionToken) {
-      config.headers.Authorization = `Bearer ${shareSessionToken}`;
-      return config;
-    }
 
     if (userToken) {
       config.headers.Authorization = `Bearer ${userToken}`;
-      return config;
-    }
-
-    if (shareSessionToken) {
-      config.headers.Authorization = `Bearer ${shareSessionToken}`;
     }
   }
   return config;
@@ -264,25 +196,8 @@ apiClient.interceptors.response.use(
     if (error.response?.status === 401) {
       if (typeof window !== "undefined") {
         const userToken = localStorage.getItem("ds_access_token");
-        const shareSessionToken = getShareSessionToken();
-
         const hasUserToken = Boolean(userToken);
-        const hasShareSession = Boolean(shareSessionToken);
-
-        const authHeader =
-          typeof error.config?.headers?.Authorization === "string"
-            ? error.config.headers.Authorization
-            : null;
-        const usedShareSession = Boolean(
-          authHeader && shareSessionToken && authHeader === `Bearer ${shareSessionToken}`
-        );
-
-        if (usedShareSession || (!hasUserToken && hasShareSession)) {
-          clearShareSession();
-          if (!window.location.pathname.startsWith("/share")) {
-            window.location.href = "/share-error?error=session_expired";
-          }
-        } else if (hasUserToken) {
+        if (hasUserToken) {
           localStorage.removeItem("ds_access_token");
           redirectToLanding("session_expired");
         }

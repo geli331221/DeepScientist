@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { client } from '@/lib/api'
 import { extractArtifactComment, extractOperationComment, extractOperationMonitorFields } from '@/lib/agentComment'
+import { deriveMcpIdentity } from '@/lib/mcpIdentity'
 import { buildToolOperationContent, extractToolSubject } from '@/lib/toolOperations'
 import type {
   ExplorerPayload,
@@ -82,31 +83,6 @@ function stringifyToolPayload(value: unknown) {
 function normalizeMetadata(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
-}
-
-function deriveMcpIdentity(
-  toolName?: string,
-  mcpServer?: string,
-  mcpTool?: string
-): { server?: string; tool?: string } {
-  const server = typeof mcpServer === 'string' && mcpServer.trim() ? mcpServer.trim() : ''
-  const tool = typeof mcpTool === 'string' && mcpTool.trim() ? mcpTool.trim() : ''
-  if (server || tool) {
-    return {
-      ...(server ? { server } : {}),
-      ...(tool ? { tool } : {}),
-    }
-  }
-  const normalized = (toolName || '').trim().toLowerCase()
-  for (const prefix of ['memory', 'artifact', 'bash_exec']) {
-    if (normalized.startsWith(`${prefix}.`)) {
-      return {
-        server: prefix,
-        tool: normalized.slice(prefix.length + 1),
-      }
-    }
-  }
-  return {}
 }
 
 function normalizeUpdate(raw: Record<string, unknown>): FeedItem {
@@ -248,6 +224,8 @@ type FeedState = {
   pending: FeedItem[]
 }
 
+type QuestWorkspaceDataView = 'canvas' | 'details' | 'memory' | 'terminal' | 'settings' | 'stage'
+
 export type QuestConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'error'
 
 function appendHistoryItem(history: FeedItem[], item: FeedItem): FeedItem[] {
@@ -255,6 +233,22 @@ function appendHistoryItem(history: FeedItem[], item: FeedItem): FeedItem[] {
     return history
   }
   return [...history, item].slice(-MAX_FEED_HISTORY)
+}
+
+function mergeAssistantMessageContent(left: string, right: string) {
+  const base = left || ''
+  const next = right || ''
+  if (!base) return next
+  if (!next) return base
+  if (next.startsWith(base)) return next
+  if (base.endsWith(next)) return base
+  const maxOverlap = Math.min(base.length, next.length)
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (base.slice(-size) === next.slice(0, size)) {
+      return `${base}${next.slice(size)}`
+    }
+  }
+  return `${base}${next}`
 }
 
 function removeMatchingLocalPendingUser(pending: FeedItem[], item: MessageFeedItem): FeedItem[] {
@@ -297,7 +291,7 @@ function upsertPendingAssistant(pending: FeedItem[], item: MessageFeedItem): Fee
     if (current.type === 'message') {
       next[matchIndex] = {
         ...current,
-        content: `${current.content}${item.content}`,
+        content: mergeAssistantMessageContent(current.content, item.content),
         createdAt: item.createdAt || current.createdAt,
         skillId: item.skillId || current.skillId,
         source: item.source || current.source,
@@ -336,6 +330,31 @@ function flushPendingAssistant(
           ...item,
           content: pendingText,
         },
+  }
+}
+
+function sealPendingAssistantStreams(
+  state: FeedState,
+  runIds?: Iterable<string>
+): FeedState {
+  const allowedRunIds = runIds ? new Set(Array.from(runIds).filter(Boolean)) : null
+  let nextHistory = [...state.history]
+  const nextPending = state.pending.filter((item) => {
+    if (!(item.type === 'message' && item.role === 'assistant' && item.stream)) {
+      return true
+    }
+    if (allowedRunIds && (!item.runId || !allowedRunIds.has(item.runId))) {
+      return true
+    }
+    nextHistory = appendHistoryItem(nextHistory, {
+      ...item,
+      stream: false,
+    })
+    return false
+  })
+  return {
+    history: nextHistory,
+    pending: nextPending,
   }
 }
 
@@ -439,12 +458,6 @@ function snapshotIndicatesLiveRun(snapshot?: QuestSummary | null) {
   return bashRunningCount > 0
 }
 
-function dropPendingAssistantStreams(pending: FeedItem[]) {
-  return pending.filter(
-    (item) => !(item.type === 'message' && item.role === 'assistant' && item.stream)
-  )
-}
-
 export function useQuestWorkspace(questId: string | null) {
   const [snapshot, setSnapshot] = useState<QuestSummary | null>(null)
   const [session, setSession] = useState<SessionPayload | null>(null)
@@ -453,6 +466,8 @@ export function useQuestWorkspace(questId: string | null) {
   const [graph, setGraph] = useState<GraphPayload | null>(null)
   const [workflow, setWorkflow] = useState<WorkflowPayload | null>(null)
   const [explorer, setExplorer] = useState<ExplorerPayload | null>(null)
+  const [detailsLoading, setDetailsLoading] = useState(false)
+  const [detailsReady, setDetailsReady] = useState(false)
   const [history, setHistory] = useState<FeedItem[]>([])
   const [pendingFeed, setPendingFeed] = useState<FeedItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -470,9 +485,10 @@ export function useQuestWorkspace(questId: string | null) {
   const streamReconnectRef = useRef<number | null>(null)
   const historyRef = useRef<FeedItem[]>([])
   const pendingFeedRef = useRef<FeedItem[]>([])
-  const operationalRefreshTimerRef = useRef<number | null>(null)
-  const operationalRefreshInFlightRef = useRef(false)
-  const operationalRefreshPendingRef = useRef(false)
+  const detailsEnabledRef = useRef(false)
+  const detailsRefreshTimerRef = useRef<number | null>(null)
+  const detailsRefreshInFlightRef = useRef(false)
+  const detailsRefreshPendingRef = useRef(false)
   const pendingStreamCleanupTimerRef = useRef<number | null>(null)
   const lastEventIdRef = useRef<string | null>(null)
 
@@ -509,26 +525,28 @@ export function useQuestWorkspace(questId: string | null) {
   }, [])
 
   const hydrateState = useCallback(async (targetQuestId: string) => {
-    const [nextSession, nextMemory, nextDocuments, nextGraph, nextWorkflow, nextExplorer] =
-      await Promise.all([
-        client.session(targetQuestId),
-        client.memory(targetQuestId),
-        client.documents(targetQuestId),
-        client.graph(targetQuestId),
-        client.workflow(targetQuestId),
-        client.explorer(targetQuestId),
-      ])
+    const nextSession = await client.session(targetQuestId)
     if (questIdRef.current !== targetQuestId) {
       return null
     }
     setSession(nextSession)
     setSnapshot(nextSession.snapshot)
+    return nextSession
+  }, [])
+
+  const hydrateDetailsState = useCallback(async (targetQuestId: string) => {
+    const [nextMemory, nextDocuments, nextWorkflow] = await Promise.all([
+      client.memory(targetQuestId),
+      client.documents(targetQuestId),
+      client.workflow(targetQuestId),
+    ])
+    if (questIdRef.current !== targetQuestId) {
+      return
+    }
     setMemory(nextMemory)
     setDocuments(nextDocuments)
-    setGraph(nextGraph)
     setWorkflow(nextWorkflow)
-    setExplorer(nextExplorer)
-    return nextSession
+    setDetailsReady(true)
   }, [])
 
   const syncSessionSnapshot = useCallback(async (targetQuestId: string) => {
@@ -541,12 +559,12 @@ export function useQuestWorkspace(questId: string | null) {
     return nextSession
   }, [])
 
-  const clearOperationalRefresh = useCallback(() => {
-    if (operationalRefreshTimerRef.current) {
-      window.clearTimeout(operationalRefreshTimerRef.current)
-      operationalRefreshTimerRef.current = null
+  const clearDetailsRefresh = useCallback(() => {
+    if (detailsRefreshTimerRef.current) {
+      window.clearTimeout(detailsRefreshTimerRef.current)
+      detailsRefreshTimerRef.current = null
     }
-    operationalRefreshPendingRef.current = false
+    detailsRefreshPendingRef.current = false
   }, [])
 
   const clearPendingStreamCleanup = useCallback(() => {
@@ -560,14 +578,17 @@ export function useQuestWorkspace(questId: string | null) {
     clearPendingStreamCleanup()
     pendingStreamCleanupTimerRef.current = window.setTimeout(() => {
       pendingStreamCleanupTimerRef.current = null
-      const nextPending = dropPendingAssistantStreams(pendingFeedRef.current)
-      if (nextPending.length === pendingFeedRef.current.length) {
+      const nextState = sealPendingAssistantStreams({
+        history: historyRef.current,
+        pending: pendingFeedRef.current,
+      })
+      if (
+        nextState.pending.length === pendingFeedRef.current.length &&
+        nextState.history.length === historyRef.current.length
+      ) {
         return
       }
-      updateFeedState({
-        history: historyRef.current,
-        pending: nextPending,
-      })
+      updateFeedState(nextState)
     }, 1400)
   }, [clearPendingStreamCleanup, updateFeedState])
 
@@ -582,62 +603,54 @@ export function useQuestWorkspace(questId: string | null) {
     }
   }, [])
 
-  const refreshOperationalViews = useCallback(async (targetQuestId: string) => {
-    const [nextWorkflow, nextExplorer] = await Promise.all([
-      client.workflow(targetQuestId),
-      client.explorer(targetQuestId),
-    ])
-    if (questIdRef.current !== targetQuestId) {
-      return
-    }
-    setWorkflow(nextWorkflow)
-    setExplorer(nextExplorer)
-  }, [])
-
-  const flushOperationalRefresh = useCallback(
+  const flushDetailsRefresh = useCallback(
     async (targetQuestId: string) => {
-      if (questIdRef.current !== targetQuestId) {
+      if (questIdRef.current !== targetQuestId || !detailsEnabledRef.current) {
         return
       }
-      if (operationalRefreshInFlightRef.current) {
-        operationalRefreshPendingRef.current = true
+      if (detailsRefreshInFlightRef.current) {
+        detailsRefreshPendingRef.current = true
         return
       }
-      operationalRefreshInFlightRef.current = true
+      detailsRefreshInFlightRef.current = true
+      setDetailsLoading(true)
       try {
-        await refreshOperationalViews(targetQuestId)
+        await hydrateDetailsState(targetQuestId)
       } catch (caught) {
         if (questIdRef.current === targetQuestId) {
           setError(caught instanceof Error ? caught.message : String(caught))
         }
       } finally {
-        operationalRefreshInFlightRef.current = false
-        if (operationalRefreshPendingRef.current && questIdRef.current === targetQuestId) {
-          operationalRefreshPendingRef.current = false
+        detailsRefreshInFlightRef.current = false
+        if (questIdRef.current === targetQuestId) {
+          setDetailsLoading(false)
+        }
+        if (detailsRefreshPendingRef.current && questIdRef.current === targetQuestId) {
+          detailsRefreshPendingRef.current = false
           window.setTimeout(() => {
-            void flushOperationalRefresh(targetQuestId)
+            void flushDetailsRefresh(targetQuestId)
           }, 180)
         }
       }
     },
-    [refreshOperationalViews]
+    [hydrateDetailsState]
   )
 
-  const queueOperationalRefresh = useCallback(
-    (targetQuestId: string, delay = 260) => {
-      if (questIdRef.current !== targetQuestId) {
+  const queueDetailsRefresh = useCallback(
+    (targetQuestId: string, delay = 180) => {
+      if (questIdRef.current !== targetQuestId || !detailsEnabledRef.current) {
         return
       }
-      if (operationalRefreshTimerRef.current) {
-        operationalRefreshPendingRef.current = true
+      if (detailsRefreshTimerRef.current) {
+        detailsRefreshPendingRef.current = true
         return
       }
-      operationalRefreshTimerRef.current = window.setTimeout(() => {
-        operationalRefreshTimerRef.current = null
-        void flushOperationalRefresh(targetQuestId)
+      detailsRefreshTimerRef.current = window.setTimeout(() => {
+        detailsRefreshTimerRef.current = null
+        void flushDetailsRefresh(targetQuestId)
       }, delay)
     },
-    [flushOperationalRefresh]
+    [flushDetailsRefresh]
   )
 
   const applyUpdates = useCallback(
@@ -646,48 +659,68 @@ export function useQuestWorkspace(questId: string | null) {
         return
       }
       const normalized = updates.map((item) => normalizeUpdate(item))
-      const nextState = applyIncomingFeedUpdates(
+      const finishedRunIds = updates.flatMap((item) => {
+        if (String(item.event_type ?? '') !== 'runner.turn_finish') {
+          return []
+        }
+        const data = item.data
+        if (!data || typeof data !== 'object') {
+          return []
+        }
+        const runId = String((data as Record<string, unknown>).run_id ?? '').trim()
+        return runId ? [runId] : []
+      })
+      let nextState = applyIncomingFeedUpdates(
         {
           history: historyRef.current,
           pending: pendingFeedRef.current,
         },
         normalized
       )
+      if (finishedRunIds.length > 0) {
+        nextState = sealPendingAssistantStreams(nextState, finishedRunIds)
+      }
       updateFeedState(nextState)
       if (normalized.some((item) => shouldRefreshSessionSnapshot(item))) {
         const nextSession = await syncSessionSnapshot(targetQuestId)
         if (snapshotIndicatesLiveRun(nextSession?.snapshot ?? null)) {
           clearPendingStreamCleanup()
-        } else if (
-          nextState.pending.some(
-            (item) => item.type === 'message' && item.role === 'assistant' && item.stream
-          )
-        ) {
-          schedulePendingStreamCleanup()
+        } else {
+          clearPendingStreamCleanup()
+          const sealedState = sealPendingAssistantStreams({
+            history: historyRef.current,
+            pending: pendingFeedRef.current,
+          })
+          if (
+            sealedState.pending.length !== pendingFeedRef.current.length ||
+            sealedState.history.length !== historyRef.current.length
+          ) {
+            updateFeedState(sealedState)
+          }
         }
       }
       if (normalized.some((item) => item.type === 'message' && item.role === 'assistant' && !item.stream)) {
         clearPendingStreamCleanup()
       }
-      if (normalized.some((item) => item.type === 'message' && item.stream && item.role === 'assistant')) {
-        queueOperationalRefresh(targetQuestId)
-      }
-      if (normalized.some((item) => shouldRefreshWorkflow(item) && item.type !== 'artifact')) {
-        clearOperationalRefresh()
-        await flushOperationalRefresh(targetQuestId)
+      if (
+        detailsEnabledRef.current &&
+        normalized.some(
+          (item) =>
+            item.type === 'artifact' ||
+            (shouldRefreshWorkflow(item) &&
+              item.type === 'event' &&
+              ['run_finished', 'runner.turn_error', 'quest.control'].includes(item.label || ''))
+        )
+      ) {
+        queueDetailsRefresh(targetQuestId)
       }
       if (normalized.some((item) => item.type === 'artifact')) {
-        clearOperationalRefresh()
-        await hydrateState(targetQuestId)
+        await syncSessionSnapshot(targetQuestId)
       }
     },
     [
-      clearOperationalRefresh,
       clearPendingStreamCleanup,
-      flushOperationalRefresh,
-      hydrateState,
-      queueOperationalRefresh,
-      schedulePendingStreamCleanup,
+      queueDetailsRefresh,
       syncSessionSnapshot,
       updateFeedState,
     ]
@@ -727,12 +760,10 @@ export function useQuestWorkspace(questId: string | null) {
         const baseState: FeedState = reset
           ? { history: [], pending: [] }
           : { history: historyRef.current, pending: pendingFeedRef.current }
-        const nextState = applyIncomingFeedUpdates(baseState, normalized)
+        let nextState = applyIncomingFeedUpdates(baseState, normalized)
 
         if (hydrated.snapshot?.status && hydrated.snapshot.status !== 'running') {
-          nextState.pending = nextState.pending.filter(
-            (item) => !(item.type === 'message' && item.role === 'assistant' && item.stream)
-          )
+          nextState = sealPendingAssistantStreams(nextState)
         }
 
         updateFeedState(nextState)
@@ -795,7 +826,7 @@ export function useQuestWorkspace(questId: string | null) {
         }
       }
 
-      const nextState = applyIncomingFeedUpdates(
+      let nextState = applyIncomingFeedUpdates(
         {
           history: [],
           pending: [],
@@ -804,9 +835,7 @@ export function useQuestWorkspace(questId: string | null) {
       )
 
       if (hydrated.snapshot?.status && hydrated.snapshot.status !== 'running') {
-        nextState.pending = nextState.pending.filter(
-          (item) => !(item.type === 'message' && item.role === 'assistant' && item.stream)
-        )
+        nextState = sealPendingAssistantStreams(nextState)
       }
 
       updateFeedState(nextState)
@@ -876,9 +905,29 @@ export function useQuestWorkspace(questId: string | null) {
 
   const stopRun = useCallback(async () => {
     if (!questId) return
-    await client.sendCommand(questId, '/stop')
+    await client.controlQuest(questId, 'stop')
     await bootstrap(false)
   }, [bootstrap, questId])
+
+  const ensureViewData = useCallback(
+    async (view: QuestWorkspaceDataView, options?: { force?: boolean }) => {
+      if (!questId) {
+        return
+      }
+      const detailsView = view === 'details' || view === 'memory'
+      detailsEnabledRef.current = detailsView
+      if (!detailsView) {
+        clearDetailsRefresh()
+        return
+      }
+      if (detailsReady && !options?.force) {
+        return
+      }
+      clearDetailsRefresh()
+      await flushDetailsRefresh(questId)
+    },
+    [clearDetailsRefresh, detailsReady, flushDetailsRefresh, questId]
+  )
 
   useEffect(() => {
     questIdRef.current = questId
@@ -892,6 +941,8 @@ export function useQuestWorkspace(questId: string | null) {
     setGraph(null)
     setWorkflow(null)
     setExplorer(null)
+    setDetailsLoading(false)
+    setDetailsReady(false)
     setHistory([])
     setPendingFeed([])
     historyRef.current = []
@@ -903,9 +954,10 @@ export function useQuestWorkspace(questId: string | null) {
     setHistoryLoadingFull(false)
     setConnectionState(questId ? 'connecting' : 'connected')
     setError(null)
-    clearOperationalRefresh()
+    detailsEnabledRef.current = false
+    detailsRefreshInFlightRef.current = false
+    clearDetailsRefresh()
     clearPendingStreamCleanup()
-    operationalRefreshInFlightRef.current = false
     stopEventStream()
     lastEventIdRef.current = null
     if (!questId) {
@@ -913,7 +965,7 @@ export function useQuestWorkspace(questId: string | null) {
     }
     setRestoring(true)
     void bootstrap(true)
-  }, [bootstrap, clearOperationalRefresh, clearPendingStreamCleanup, questId, stopEventStream])
+  }, [bootstrap, clearDetailsRefresh, clearPendingStreamCleanup, questId, stopEventStream])
 
   const runEventStream = useCallback(
     async (targetQuestId: string, attempt = 0) => {
@@ -1028,10 +1080,20 @@ export function useQuestWorkspace(questId: string | null) {
     void runEventStream(targetQuestId, 0)
     return () => {
       stopEventStream()
-      clearOperationalRefresh()
+      clearDetailsRefresh()
       clearPendingStreamCleanup()
     }
-  }, [clearOperationalRefresh, clearPendingStreamCleanup, questId, restoring, runEventStream, stopEventStream])
+  }, [clearDetailsRefresh, clearPendingStreamCleanup, questId, restoring, runEventStream, stopEventStream])
+
+  const refreshWorkspace = useCallback(
+    async (reset = true) => {
+      await bootstrap(reset)
+      if (!reset && detailsEnabledRef.current) {
+        await ensureViewData('details', { force: true })
+      }
+    },
+    [bootstrap, ensureViewData]
+  )
 
   return {
     snapshot,
@@ -1041,6 +1103,8 @@ export function useQuestWorkspace(questId: string | null) {
     graph,
     workflow,
     explorer,
+    detailsLoading,
+    detailsReady,
     feed,
     history,
     pendingFeed,
@@ -1050,6 +1114,7 @@ export function useQuestWorkspace(questId: string | null) {
     historyLimit,
     historyExpanded,
     historyLoadingFull,
+    hasLiveRun,
     streaming,
     activeToolCount,
     connectionState,
@@ -1058,7 +1123,8 @@ export function useQuestWorkspace(questId: string | null) {
     activeDocument,
     replyTargetId,
     setActiveDocument,
-    refresh: (reset = true) => bootstrap(reset),
+    refresh: refreshWorkspace,
+    ensureViewData,
     loadFullHistory,
     submit,
     stopRun,

@@ -15,13 +15,6 @@ jest.mock('@/lib/api/bash', () => ({
   listBashSessions: jest.fn(async () => []),
 }))
 
-jest.mock('@/lib/share-session', () => ({
-  clearShareSession: jest.fn(),
-  getActiveShareProjectId: jest.fn(() => null),
-  getShareSessionMeta: jest.fn(() => null),
-  getShareSessionToken: jest.fn(() => null),
-}))
-
 const buildSnapshotStream = () => {
   const encoder = new TextEncoder()
   const Stream = globalThis.ReadableStream ?? NodeReadableStream

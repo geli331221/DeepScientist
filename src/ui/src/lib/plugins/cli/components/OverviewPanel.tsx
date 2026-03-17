@@ -98,14 +98,12 @@ export function OverviewPanel({
   server,
   connectionStatus,
   accessLabel,
-  isShareView,
   canUnbind,
 }: {
   projectId: string
   server: CliServer
   connectionStatus?: ConnectionStatus
   accessLabel?: string
-  isShareView?: boolean
   canUnbind?: boolean
 }) {
   const statusClass = statusClasses[server.status] || statusClasses.offline
@@ -257,7 +255,6 @@ export function OverviewPanel({
               <div className="mt-1">Latency: {latencyLabel}</div>
               <div className="mt-1">Buffered queue: {connectionStatus?.bufferedMessages ?? 0}</div>
               <div className="mt-1">Access: {accessLabel || 'n/a'}</div>
-              {isShareView ? <div className="mt-1">Share view</div> : null}
             </div>
           </div>
         </SpotlightCard>

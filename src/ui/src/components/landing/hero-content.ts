@@ -73,8 +73,7 @@ export const HERO_STAGES: HeroStage[] = [
 
 export const HERO_COPY = {
   headline: 'Automated scientific discovery, driven by autonomous AI research',
-  subhead:
-    'From local optima to global insight, DeepScientist lets AI survey literature, run experiments, and draft publishable outputs in one continuous loop.',
+  subhead: '',
   tagline: 'Survey / Experiment / Publish',
   primaryCta: 'Start Research',
   secondaryCta: 'List Quest',
