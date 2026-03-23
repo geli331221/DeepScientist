@@ -218,14 +218,16 @@ export function QuestCopilotDockPanel({
 
   React.useEffect(() => {
     dockCallbacks?.onHeaderExtraChange(
-      <SegmentedControl
-        value={mode}
-        onValueChange={setMode}
-        items={tabItems}
-        size="sm"
-        ariaLabel={t('copilot_mode_tabs')}
-        className="quest-copilot-mode-tabs border-black/[0.08] bg-white/[0.62] backdrop-blur-sm dark:border-white/[0.10] dark:bg-white/[0.06]"
-      />
+      <div data-onboarding-id="quest-copilot-mode-tabs">
+        <SegmentedControl
+          value={mode}
+          onValueChange={setMode}
+          items={tabItems}
+          size="sm"
+          ariaLabel={t('copilot_mode_tabs')}
+          className="quest-copilot-mode-tabs border-black/[0.08] bg-white/[0.62] backdrop-blur-sm dark:border-white/[0.10] dark:bg-white/[0.06]"
+        />
+      </div>
     )
     return () => {
       dockCallbacks?.onHeaderExtraChange(null)
@@ -233,7 +235,7 @@ export function QuestCopilotDockPanel({
   }, [dockCallbacks, mode, t, tabItems])
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col" data-onboarding-id="workspace-copilot-panel">
       {mode === 'chat' ? (
         <QuestConnectorChatView
           feed={workspace.feed}

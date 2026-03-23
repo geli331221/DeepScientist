@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { shouldRecommendStartResearchConnectorBinding } from '../startResearch'
+import {
+  resolveStartResearchConnectorBindings,
+  shouldRecommendStartResearchConnectorBinding,
+} from '../startResearch'
 
 describe('shouldRecommendStartResearchConnectorBinding', () => {
   it('does not recommend before the first connector fetch completes', () => {
@@ -63,5 +66,102 @@ describe('shouldRecommendStartResearchConnectorBinding', () => {
         },
       })
     ).toBe(true)
+  })
+})
+
+describe('resolveStartResearchConnectorBindings', () => {
+  it('defaults to the first available connector target only', () => {
+    expect(
+      resolveStartResearchConnectorBindings([
+        {
+          name: 'qq',
+          targets: [
+            { conversationId: 'qq:direct:qq-a::user-a' },
+            { conversationId: 'qq:direct:qq-b::user-b' },
+          ],
+        },
+        {
+          name: 'telegram',
+          targets: [{ conversationId: 'telegram:direct:tg-1' }],
+        },
+      ])
+    ).toEqual({
+      qq: 'qq:direct:qq-a::user-a',
+      telegram: null,
+    })
+  })
+
+  it('preserves one valid existing selection and clears the rest', () => {
+    expect(
+      resolveStartResearchConnectorBindings(
+        [
+          {
+            name: 'qq',
+            targets: [
+              { conversationId: 'qq:direct:qq-a::user-a' },
+              { conversationId: 'qq:direct:qq-b::user-b' },
+            ],
+          },
+          {
+            name: 'telegram',
+            targets: [{ conversationId: 'telegram:direct:tg-2' }],
+          },
+        ],
+        {
+          qq: 'qq:direct:qq-b::user-b',
+          telegram: 'telegram:direct:tg-2',
+        }
+      )
+    ).toEqual({
+      qq: 'qq:direct:qq-b::user-b',
+      telegram: null,
+    })
+  })
+
+  it('falls back to the next available connector when the current one becomes invalid', () => {
+    expect(
+      resolveStartResearchConnectorBindings(
+        [
+          {
+            name: 'qq',
+            targets: [],
+          },
+          {
+            name: 'telegram',
+            targets: [{ conversationId: 'telegram:direct:tg-2' }],
+          },
+        ],
+        {
+          qq: 'qq:direct:qq-b::user-b',
+        }
+      )
+    ).toEqual({
+      qq: null,
+      telegram: 'telegram:direct:tg-2',
+    })
+  })
+
+  it('preserves an explicit local-only choice', () => {
+    expect(
+      resolveStartResearchConnectorBindings(
+        [
+          {
+            name: 'qq',
+            targets: [{ conversationId: 'qq:direct:qq-a::user-a' }],
+          },
+          {
+            name: 'telegram',
+            targets: [{ conversationId: 'telegram:direct:tg-2' }],
+          },
+        ],
+        {
+          qq: null,
+          telegram: null,
+        }
+      )
+    ).toEqual({
+      qq: null,
+      telegram: null,
+    })
   })
 })

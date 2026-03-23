@@ -37,12 +37,13 @@ def test_init_creates_required_files(temp_home: Path) -> None:
     assert config["bootstrap"]["locale_initialized_at"] is None
     assert config["bootstrap"]["locale_initialized_browser_locale"] is None
     assert config["connectors"]["system_enabled"]["qq"] is True
+    assert config["connectors"]["system_enabled"]["weixin"] is True
     assert config["connectors"]["system_enabled"]["telegram"] is False
     assert config["connectors"]["system_enabled"]["discord"] is False
     assert config["connectors"]["system_enabled"]["slack"] is False
     assert config["connectors"]["system_enabled"]["feishu"] is False
     assert config["connectors"]["system_enabled"]["whatsapp"] is False
-    assert config["connectors"]["system_enabled"]["lingzhu"] is False
+    assert config["connectors"]["system_enabled"]["lingzhu"] is True
     assert runners["codex"]["model"] == "gpt-5.4"
     assert runners["codex"]["model_reasoning_effort"] == "xhigh"
     assert runners["codex"]["retry_initial_backoff_sec"] == 10.0

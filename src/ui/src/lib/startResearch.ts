@@ -45,6 +45,13 @@ export type StartResearchContractFields = {
   git_strategy: GitStrategy
 }
 
+export type StartResearchConnectorChoice = {
+  name: string
+  targets: Array<{
+    conversationId: string
+  }>
+}
+
 export type StartResearchTemplateEntry = StartResearchTemplate & {
   id: string
   updated_at: string
@@ -160,6 +167,56 @@ export function shouldRecommendStartResearchConnectorBinding(input: {
   if (input.availabilityError) return false
   if (input.connectorRecommendationHandled) return false
   return Boolean(input.availability?.should_recommend_binding)
+}
+
+export function resolveStartResearchConnectorBindings(
+  items: StartResearchConnectorChoice[],
+  current: Record<string, string | null> = {}
+) {
+  const next: Record<string, string | null> = {}
+  const hasExplicitState = items.some((item) => Object.prototype.hasOwnProperty.call(current, item.name))
+  const hasExplicitSelection = items.some((item) => Boolean(String(current[item.name] || '').trim()))
+  const explicitLocalOnly = hasExplicitState && !hasExplicitSelection
+  let selectedConnectorName: string | null = null
+
+  for (const item of items) {
+    const currentValue = String(current[item.name] || '').trim() || null
+    const normalizedTargets = item.targets
+      .map((target) => String(target.conversationId || '').trim())
+      .filter(Boolean)
+    if (currentValue && normalizedTargets.includes(currentValue)) {
+      next[item.name] = currentValue
+      if (!selectedConnectorName) {
+        selectedConnectorName = item.name
+      }
+      continue
+    }
+    next[item.name] = normalizedTargets[0] || null
+  }
+
+  if (explicitLocalOnly) {
+    for (const item of items) {
+      next[item.name] = null
+    }
+    return next
+  }
+
+  if (!selectedConnectorName) {
+    selectedConnectorName =
+      items.find((item) => String(next[item.name] || '').trim())?.name || null
+  }
+
+  if (!selectedConnectorName) {
+    return next
+  }
+
+  for (const item of items) {
+    if (item.name !== selectedConnectorName) {
+      next[item.name] = null
+    }
+  }
+
+  return next
 }
 
 export function listReferenceStartResearchTemplates(): StartResearchTemplateEntry[] {

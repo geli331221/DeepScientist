@@ -155,12 +155,6 @@ const BUILTIN_PLUGIN_IMPORTS: Record<string, ComponentImportFn> = {
     import("@/lib/plugins/marketplace/MarketplacePlugin").then((m) => ({
       default: m.default,
     })),
-
-  // AutoFigure Plugin - AI-powered scientific figure generation
-  "@ds/plugin-autofigure": () =>
-    import("@/lib/plugins/autofigure/AutoFigurePlugin").then((m) => ({
-      default: m.default,
-    })),
 };
 
 /**

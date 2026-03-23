@@ -668,7 +668,6 @@ export const BUILTIN_PLUGINS = {
   MARKDOWN_VIEWER: "@ds/plugin-markdown-viewer",
   SETTINGS: "@ds/plugin-settings",
   SEARCH: "@ds/plugin-search",
-  AUTOFIGURE: "@ds/plugin-autofigure",
   CLI: "@ds/plugin-cli",
 } as const;
 

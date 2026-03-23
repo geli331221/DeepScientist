@@ -10,6 +10,7 @@ jest.mock('@/lib/api/lab', () => {
     listLabAgents: jest.fn().mockResolvedValue({ items: [] }),
     listLabMemory: jest.fn().mockResolvedValue({ items: [] }),
     listLabPapers: jest.fn().mockResolvedValue({ items: [] }),
+    updateLabQuestLayout: jest.fn().mockResolvedValue({ layout_json: {}, updated_at: '2026-03-21T00:00:00Z' }),
   }
 })
 
@@ -114,6 +115,66 @@ describe('LabQuestGraphCanvas', () => {
     expect(screen.getByTestId('reactflow')).toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('Show Branches'))
     expect(screen.getByText(/Current view/i)).toBeInTheDocument()
+  })
+
+  it('skips hidden panel queries when the canvas is branch-only', async () => {
+    const labApi = await import('@/lib/api/lab')
+    ;(labApi.listLabAgents as jest.Mock).mockClear()
+    ;(labApi.listLabMemory as jest.Mock).mockClear()
+    ;(labApi.listLabPapers as jest.Mock).mockClear()
+
+    const fetchGraph = jest.fn().mockResolvedValue({
+      view: 'branch',
+      nodes: [
+        {
+          node_id: 'branch-1',
+          branch_name: 'main',
+          created_at: '2025-01-01T00:00:00Z',
+        },
+      ],
+      edges: [],
+      head_branch: 'main',
+      layout_json: {},
+    })
+    const fetchEvents = jest.fn().mockResolvedValue({ items: [], next_cursor: null })
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LabQuestGraphCanvas
+          projectId="project-1"
+          questId="quest-1"
+          preferredViewMode="branch"
+          showFloatingPanels={false}
+          fetchGraph={fetchGraph}
+          fetchEvents={fetchEvents}
+        />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(fetchGraph).toHaveBeenCalledTimes(1)
+    })
+
+    await waitFor(() => {
+      expect(fetchEvents).toHaveBeenCalledTimes(1)
+    })
+
+    expect(fetchEvents).toHaveBeenCalledWith(
+      'project-1',
+      'quest-1',
+      expect.objectContaining({
+        eventTypes: expect.arrayContaining(['artifact.recorded', 'runner.tool_result']),
+        limit: 800,
+        includePayload: true,
+      })
+    )
+    expect(labApi.listLabAgents).toHaveBeenCalledTimes(1)
+    expect(labApi.listLabMemory).toHaveBeenCalledTimes(1)
+    expect(labApi.listLabPapers).not.toHaveBeenCalled()
   })
 
   it('renders replay-aware memory hints on branch nodes', async () => {
@@ -290,5 +351,108 @@ describe('LabQuestGraphCanvas', () => {
 
     expect(onBranchSelect).toHaveBeenCalledWith('main')
     expect(onStageOpen).not.toHaveBeenCalled()
+  })
+
+  it('restores current-path filtering from persisted layout and saves filter changes', async () => {
+    jest.useFakeTimers()
+    const labApi = await import('@/lib/api/lab')
+    ;(labApi.updateLabQuestLayout as jest.Mock).mockClear()
+    const fetchGraph = jest.fn().mockResolvedValue({
+      view: 'branch',
+      nodes: [
+        {
+          node_id: 'baseline-root',
+          branch_name: 'baseline',
+          node_kind: 'baseline_root',
+          target_label: 'Baseline',
+          created_at: '2025-01-01T00:00:00Z',
+        },
+        {
+          node_id: 'main',
+          branch_name: 'main',
+          idea_title: 'Main Route',
+          created_at: '2025-01-01T00:00:00Z',
+        },
+        {
+          node_id: 'run/current',
+          branch_name: 'run/current',
+          parent_branch: 'main',
+          idea_title: 'Current Route',
+          created_at: '2025-01-02T00:00:00Z',
+          workflow_state: {
+            analysis_state: 'active',
+            writing_state: 'blocked_by_analysis',
+            status_reason: 'Analysis 1/2 done · next: slice-b',
+          },
+        },
+        {
+          node_id: 'run/other',
+          branch_name: 'run/other',
+          parent_branch: 'main',
+          idea_title: 'Sibling Route',
+          created_at: '2025-01-03T00:00:00Z',
+          workflow_state: {
+            analysis_state: 'none',
+            writing_state: 'ready',
+            status_reason: 'Main experiment recorded. Ready for writing.',
+          },
+        },
+      ],
+      edges: [
+        { source: 'main', target: 'run/current' },
+        { source: 'main', target: 'run/other' },
+      ],
+      head_branch: 'run/current',
+      layout_json: {
+        preferences: {
+          pathFilterMode: 'current',
+          showAnalysis: true,
+        },
+      },
+    })
+    const fetchEvents = jest.fn().mockResolvedValue({ items: [], next_cursor: null })
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LabQuestGraphCanvas
+          projectId="project-1"
+          questId="quest-1"
+          fetchGraph={fetchGraph}
+          fetchEvents={fetchEvents}
+        />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(fetchGraph).toHaveBeenCalled()
+    })
+
+    fireEvent.click(screen.getByLabelText('Show Branches'))
+    expect(screen.getByText('Current Route')).toBeInTheDocument()
+    expect(screen.queryByText('Sibling Route')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Sibling Route')).toBeInTheDocument()
+    })
+
+    jest.advanceTimersByTime(900)
+
+    await waitFor(() => {
+      expect(labApi.updateLabQuestLayout).toHaveBeenCalledWith(
+        'project-1',
+        'quest-1',
+        expect.objectContaining({
+          preferences: expect.objectContaining({
+            pathFilterMode: 'all',
+          }),
+        })
+      )
+    })
+    jest.useRealTimers()
   })
 })

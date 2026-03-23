@@ -22,6 +22,7 @@ import { useTabsStore } from '@/lib/stores/tabs'
 import { BUILTIN_PLUGINS } from '@/lib/types/plugin'
 import { useArxivStore } from '@/lib/stores/arxiv-store'
 import type { ArxivPaper } from '@/lib/types/arxiv'
+import { buildArxivSummaryMarkdown } from '@/lib/arxiv-summary'
 import { copyToClipboard } from '@/lib/clipboard'
 import { generateBibTeX } from '@/lib/utils/bibtex'
 import { useToast } from '@/components/ui/toast'
@@ -98,6 +99,8 @@ export default function PdfMarkdownPlugin({
   }, [arxivFromContext, arxivItems, fileId])
 
   const arxivError = arxivPaper ? arxivErrors[arxivPaper.arxivId] : undefined
+  const isArxivPdf = Boolean(arxivPaper)
+  const arxivSummaryMarkdown = useMemo(() => buildArxivSummaryMarkdown(arxivPaper), [arxivPaper])
 
   const handleCopyBibtex = useCallback(async () => {
     if (!arxivPaper) return
@@ -117,8 +120,8 @@ export default function PdfMarkdownPlugin({
   }, [arxivPaper])
 
   useEffect(() => {
-    setTitle(fileName)
-  }, [fileName, setTitle])
+    setTitle(isArxivPdf ? `${fileName} Summary` : fileName)
+  }, [fileName, isArxivPdf, setTitle])
 
   useEffect(() => {
     parseRequestedRef.current = false
@@ -182,9 +185,15 @@ export default function PdfMarkdownPlugin({
   }, [fileId, isRetrying, loadMarkdown, triggerParse])
 
   useEffect(() => {
+    if (isArxivPdf) {
+      setState('idle')
+      setMarkdown('')
+      setError(null)
+      return
+    }
     if (!fileId) return
     void loadMarkdown()
-  }, [fileId, loadMarkdown])
+  }, [fileId, isArxivPdf, loadMarkdown])
 
   useEffect(() => {
     updateWorkspaceTabState(tabId, {
@@ -250,6 +259,71 @@ export default function PdfMarkdownPlugin({
             Markdown view to see MinerU output.
           </p>
         </div>
+      </div>
+    )
+  }
+
+  if (isArxivPdf) {
+    return (
+      <div className="flex flex-col h-full bg-background">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/30">
+          <div className="flex items-center gap-3">
+            <FileText className="w-4 h-4 text-muted-foreground" />
+            <span className="text-sm text-foreground">{fileName}</span>
+            <span className="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground uppercase">
+              Summary
+            </span>
+            <button
+              type="button"
+              onClick={() => setInfoOpen(true)}
+              className={cn(
+                'flex h-7 w-7 items-center justify-center rounded-full',
+                'text-muted-foreground transition-colors',
+                'hover:bg-muted hover:text-foreground'
+              )}
+              title="Paper info"
+              aria-label="Paper info"
+            >
+              <InfoTriangleIcon className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleBackToPdf}
+              className={cn(
+                'flex items-center gap-2 px-3 py-1.5 rounded-full border transition-colors text-sm',
+                'bg-background hover:bg-muted/60 border-border'
+              )}
+              title="Back to PDF view"
+            >
+              <FileText className="w-4 h-4" />
+              PDF
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-hidden flex justify-center px-4 py-4 bg-muted/10">
+          <div className="relative h-full w-[min(62.5vw,100%)] max-w-[70rem]">
+            <div className="notebook-editor-container relative h-full overflow-hidden rounded-2xl border border-border bg-background shadow-soft-card">
+              <div className="notebook-doc-editor relative h-full w-full overflow-y-auto p-8">
+                <MarkdownRenderer
+                  content={arxivSummaryMarkdown}
+                  className="prose prose-lg dark:prose-invert max-w-full"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <ArxivInfoModal
+          open={infoOpen}
+          onClose={() => setInfoOpen(false)}
+          paper={arxivPaper}
+          errorCode={arxivError}
+          onCopyBibtex={arxivPaper ? handleCopyBibtex : undefined}
+          onOpenArxiv={arxivPaper ? handleOpenArxiv : undefined}
+        />
       </div>
     )
   }

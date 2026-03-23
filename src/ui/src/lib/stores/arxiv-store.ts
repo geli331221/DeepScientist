@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import * as arxivApi from "@/lib/api/arxiv";
+import { buildQuestFileIdFromDocument } from "@/lib/api/quest-files";
 import type {
   ArxivItemResponse,
   ArxivBatchImportResponse,
@@ -25,33 +26,53 @@ interface ArxivStoreState {
   processingSince: Record<string, number>;
   batchProgress: ArxivBatchProgress | null;
   selectedPaperKey: string | null;
+  pendingOpenArxivId: string | null;
 }
 
 interface ArxivStoreActions {
   load: (projectId: string) => Promise<void>;
   refresh: () => Promise<void>;
-  importArxiv: (arxivId: string) => Promise<void>;
+  importArxiv: (arxivId: string) => Promise<{ ok: boolean; arxivId: string; status?: string; title?: string; message?: string; metadataPending?: boolean; absUrl?: string }>;
   batchImport: (arxivIds: string[]) => Promise<void>;
   markImported: (arxivId: string) => void;
   markFailed: (arxivId: string, error: string) => void;
   removeArxiv: (arxivId: string, fileId?: string | null) => void;
   setBatchProgress: (progress: ArxivBatchProgress | null) => void;
   setSelectedPaperKey: (key: string | null) => void;
+  setPendingOpenArxivId: (arxivId: string | null) => void;
 }
 
-function toPaper(item: ArxivItemResponse): ArxivPaper {
+function toPaper(projectId: string, item: ArxivItemResponse): ArxivPaper {
+  const documentId = typeof item.document_id === "string" && item.document_id.trim() ? item.document_id.trim() : null;
+  const path = typeof item.path === "string" && item.path.trim() ? item.path.trim() : null;
+  const fileId =
+    documentId && path ? buildQuestFileIdFromDocument(projectId, documentId, path) : String(item.file_id || "");
   return {
-    fileId: item.file_id,
+    fileId,
+    documentId,
+    path,
     arxivId: item.arxiv_id,
+    metadataStatus: item.metadata_status ?? null,
     title: item.title,
     authors: item.authors ?? [],
     abstract: item.abstract ?? "",
+    overview: item.overview ?? "",
+    overviewMarkdown: item.overview_markdown ?? "",
+    summarySource: item.summary_source ?? null,
+    overviewSource: item.overview_source ?? null,
+    metadataSource: item.metadata_source ?? null,
     categories: item.categories ?? [],
     tags: item.tags ?? [],
     publishedAt: item.published_at ?? "",
+    primaryClass: item.primary_class ?? null,
+    bibtex: item.bibtex ?? null,
+    absUrl: item.abs_url ?? null,
+    pdfUrl: item.pdf_url ?? null,
     displayName: item.display_name ?? item.arxiv_id,
     createdAt: item.created_at,
+    updatedAt: item.updated_at,
     status: item.status ?? "ready",
+    error: item.error ?? null,
     version: item.version,
   };
 }
@@ -77,6 +98,7 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
   processingSince: {},
   batchProgress: null,
   selectedPaperKey: null,
+  pendingOpenArxivId: null,
 
   load: async (projectId: string) => {
     set({
@@ -89,11 +111,12 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
       processingSince: {},
       batchProgress: null,
       selectedPaperKey: null,
+      pendingOpenArxivId: null,
     });
     try {
       const response = await arxivApi.listArxiv(projectId);
       console.log("[ArxivStore] Loaded items from API:", response.items);
-      const papers = response.items.map(toPaper);
+      const papers = response.items.map((item) => toPaper(projectId, item));
       console.log("[ArxivStore] Converted papers:", papers);
       const now = Date.now();
       const processingSince: Record<string, number> = {};
@@ -116,7 +139,7 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
     try {
       const response = await arxivApi.listArxiv(projectId);
       const now = Date.now();
-      const papers = response.items.map(toPaper);
+      const papers = response.items.map((item) => toPaper(projectId, item));
       set((state) => {
         const nextImporting = new Set(state.importingIds);
         const nextErrors = { ...state.errors };
@@ -174,7 +197,7 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
     const projectId = get().projectId;
     if (!projectId) {
       set({ error: "missing_project" });
-      return;
+      return { ok: false, arxivId, message: "missing_project" };
     }
 
     set((state) => {
@@ -186,7 +209,12 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
       if (!nextProcessing[arxivId]) {
         nextProcessing[arxivId] = Date.now();
       }
-      return { importingIds: next, errors: nextErrors, processingSince: nextProcessing };
+      return {
+        importingIds: next,
+        errors: nextErrors,
+        processingSince: nextProcessing,
+        pendingOpenArxivId: arxivId,
+      };
     });
 
     try {
@@ -202,9 +230,22 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
         if (response.arxiv_id && !nextProcessing[response.arxiv_id]) {
           nextProcessing[response.arxiv_id] = Date.now();
         }
-        return { importingIds: next, processingSince: nextProcessing };
+        return {
+          importingIds: next,
+          processingSince: nextProcessing,
+          pendingOpenArxivId: response.arxiv_id || arxivId,
+        };
       });
       await get().refresh();
+      return {
+        ok: true,
+        arxivId: response.arxiv_id || arxivId,
+        status: response.status,
+        title: response.title,
+        message: response.message,
+        metadataPending: Boolean(response.metadata_pending),
+        absUrl: response.abs_url,
+      };
     } catch (error) {
       const code = parseErrorCode(error);
       set((state) => {
@@ -216,8 +257,10 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
           importingIds: next,
           errors: { ...state.errors, [arxivId]: code },
           processingSince: nextProcessing,
+          pendingOpenArxivId: state.pendingOpenArxivId === arxivId ? null : state.pendingOpenArxivId,
         };
       });
+      return { ok: false, arxivId, message: code };
     }
   },
 
@@ -310,6 +353,7 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
         importingIds: next,
         errors: { ...state.errors, [arxivId]: error },
         processingSince: nextProcessing,
+        pendingOpenArxivId: state.pendingOpenArxivId === arxivId ? null : state.pendingOpenArxivId,
       };
     });
   },
@@ -345,6 +389,8 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
         errors: nextErrors,
         processingSince: nextProcessing,
         selectedPaperKey: shouldClear ? null : selected,
+        pendingOpenArxivId:
+          arxivId && state.pendingOpenArxivId === arxivId ? null : state.pendingOpenArxivId,
       };
     });
   },
@@ -354,5 +400,8 @@ export const useArxivStore = create<ArxivStoreState & ArxivStoreActions>((set, g
   },
   setSelectedPaperKey: (key) => {
     set({ selectedPaperKey: key });
+  },
+  setPendingOpenArxivId: (arxivId) => {
+    set({ pendingOpenArxivId: arxivId });
   },
 }));

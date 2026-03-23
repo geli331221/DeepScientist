@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import socket
@@ -19,13 +20,14 @@ from websockets.sync.client import connect as websocket_connect
 
 from deepscientist.artifact import ArtifactService
 from deepscientist.config import ConfigManager
-from deepscientist.connector_profiles import list_connector_profiles
+from deepscientist.connector.connector_profiles import list_connector_profiles
 from deepscientist.connector_runtime import format_conversation_id
 from deepscientist.daemon.api.router import match_route
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
+from deepscientist.connector.lingzhu_support import generate_lingzhu_auth_ak, lingzhu_passive_conversation_id
 from deepscientist.mcp.context import McpContext
-from deepscientist.qq_profiles import list_qq_profiles
+from deepscientist.connector.qq_profiles import list_qq_profiles
 from deepscientist.runners import RunResult
 from deepscientist.shared import append_jsonl, ensure_dir, generate_id, read_jsonl, read_yaml, utc_now, write_yaml
 
@@ -39,6 +41,105 @@ def _pick_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+class _FakeSseHandler:
+    def __init__(self) -> None:
+        self.status_code: int | None = None
+        self.headers: dict[str, str] = {}
+        self.wfile = io.BytesIO()
+        self.close_connection = False
+
+    def send_response(self, code: int) -> None:
+        self.status_code = code
+
+    def send_header(self, key: str, value: str) -> None:
+        self.headers[key] = value
+
+    def end_headers(self) -> None:
+        return
+
+
+def _parse_sse_events(raw: bytes) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for block in raw.decode("utf-8").split("\n\n"):
+        lines = [line for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if lines[0].startswith(":"):
+            continue
+        event_name = ""
+        data_lines: list[str] = []
+        for line in lines:
+            if line.startswith("event: "):
+                event_name = line[len("event: ") :].strip()
+            elif line.startswith("data: "):
+                data_lines.append(line[len("data: ") :])
+        if not event_name or not data_lines:
+            continue
+        events.append(
+            {
+                "event": event_name,
+                "data": json.loads("".join(data_lines)),
+            }
+        )
+    return events
+
+
+class _FakeHeaders:
+    def __init__(self, charset: str = "utf-8") -> None:
+        self._charset = charset
+
+    def get_content_charset(self) -> str:
+        return self._charset
+
+
+class _FakeUrlopenResponse:
+    def __init__(self, body: str, *, charset: str = "utf-8") -> None:
+        self._body = body.encode(charset)
+        self.headers = _FakeHeaders(charset)
+
+    def __enter__(self) -> "_FakeUrlopenResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_handlers_quest_layout_roundtrip(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("layout roundtrip quest")
+    quest_id = quest["quest_id"]
+
+    initial = app.handlers.quest_layout(quest_id)
+    assert initial["layout_json"]["branch"] == {}
+    assert initial["layout_json"]["preferences"] == {}
+
+    updated = app.handlers.quest_layout_update(
+        quest_id,
+        {
+            "layout_json": {
+                "branch": {"main": {"x": 120, "y": 80}},
+                "preferences": {
+                    "curveMode": "full",
+                    "nodeDisplayMode": "metric",
+                    "showAnalysis": True,
+                    "pathFilterMode": "current",
+                },
+            }
+        },
+    )
+    assert updated["layout_json"]["branch"]["main"] == {"x": 120, "y": 80}
+    assert updated["layout_json"]["preferences"]["pathFilterMode"] == "current"
+
+    refreshed = app.handlers.quest_layout(quest_id)
+    assert refreshed["layout_json"]["branch"]["main"] == {"x": 120, "y": 80}
+    assert refreshed["layout_json"]["preferences"]["curveMode"] == "full"
 
 
 def _wait_for_json(url: str, *, timeout: float = 10.0) -> dict | list:
@@ -188,6 +289,196 @@ def test_daemon_update_request_starts_background_worker_with_restart(
     assert "--restart-daemon" in captured["command"]
     assert "0.0.0.0" in captured["command"]
     assert "20999" in captured["command"]
+
+
+def test_weixin_qr_login_handlers_persist_connector_config(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
+    connectors = manager.load_named("connectors")
+    connectors["telegram"]["profiles"] = [
+        {
+            "profile_id": "telegram-deepscientist",
+            "enabled": False,
+            "transport": "polling",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+        }
+    ]
+    connectors["discord"]["profiles"] = [
+        {
+            "profile_id": "discord-deepscientist",
+            "enabled": False,
+            "transport": "gateway",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "DISCORD_BOT_TOKEN",
+            "application_id": None,
+        }
+    ]
+    connectors["slack"]["profiles"] = [
+        {
+            "profile_id": "slack-deepscientist",
+            "enabled": False,
+            "transport": "socket_mode",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "SLACK_BOT_TOKEN",
+            "bot_user_id": None,
+            "app_token": None,
+            "app_token_env": "SLACK_APP_TOKEN",
+        }
+    ]
+    connectors["feishu"]["profiles"] = [
+        {
+            "profile_id": "feishu-deepscientist",
+            "enabled": False,
+            "transport": "long_connection",
+            "bot_name": "DeepScientist",
+            "app_id": None,
+            "app_secret": None,
+            "app_secret_env": "FEISHU_APP_SECRET",
+            "api_base_url": "https://open.feishu.cn",
+        }
+    ]
+    connectors["whatsapp"]["profiles"] = [
+        {
+            "profile_id": "whatsapp-deepscientist",
+            "enabled": False,
+            "transport": "local_session",
+            "bot_name": "DeepScientist",
+            "auth_method": "qr_browser",
+            "session_dir": "~/.deepscientist/connectors/whatsapp",
+        }
+    ]
+    write_yaml(manager.path_for("connectors"), connectors)
+    app = DaemonApp(temp_home)
+
+    monkeypatch.setattr(
+        "deepscientist.daemon.app.fetch_weixin_qrcode",
+        lambda **kwargs: {
+            "qrcode": "wx-qr-1",
+            "qrcode_img_content": "https://example.com/wx-qr-1.png",
+        },
+    )
+    monkeypatch.setattr(
+        "deepscientist.daemon.app.poll_weixin_qrcode_status",
+        lambda **kwargs: {
+            "status": "confirmed",
+            "bot_token": "wx-bot-token",
+            "ilink_bot_id": "wx-bot-1@im.bot",
+            "baseurl": "https://ilinkai.weixin.qq.com",
+            "ilink_user_id": "wx-owner@im.wechat",
+        },
+    )
+
+    start_payload = app.handlers.weixin_login_qr_start({})
+    assert start_payload["ok"] is True
+    assert start_payload["qrcode_content"] == "https://example.com/wx-qr-1.png"
+    assert start_payload["qrcode_url"] == "https://example.com/wx-qr-1.png"
+
+    wait_payload = app.handlers.weixin_login_qr_wait({"session_key": start_payload["session_key"], "timeout_ms": 500})
+    assert wait_payload["ok"] is True
+    assert wait_payload["connected"] is True
+    assert wait_payload["account_id"] == "wx-bot-1@im.bot"
+
+    saved = manager.load_named("connectors")
+    assert saved["weixin"]["enabled"] is True
+    assert saved["weixin"]["bot_token"] == "wx-bot-token"
+    assert saved["weixin"]["account_id"] == "wx-bot-1@im.bot"
+    assert saved["weixin"]["login_user_id"] == "wx-owner@im.wechat"
+
+
+def test_daemon_http_weixin_qr_wait_accepts_json_body(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app._start_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._stop_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._start_terminal_attach_server = lambda host, port: None  # type: ignore[method-assign]
+    app._stop_terminal_attach_server = lambda: None  # type: ignore[method-assign]
+
+    captured: dict[str, object] = {}
+
+    def _fake_wait(*, session_key: str, timeout_ms: int = 1_500) -> dict[str, object]:
+        captured["session_key"] = session_key
+        captured["timeout_ms"] = timeout_ms
+        return {
+            "ok": True,
+            "connected": False,
+            "session_key": session_key,
+            "timeout_ms": timeout_ms,
+        }
+
+    monkeypatch.setattr(app, "wait_weixin_login_qr", _fake_wait)
+
+    port = _pick_free_port()
+    server_thread = threading.Thread(target=app.serve, args=("127.0.0.1", port), daemon=True)
+    server_thread.start()
+    try:
+        _wait_for_json(f"http://127.0.0.1:{port}/api/health")
+        request = Request(
+            f"http://127.0.0.1:{port}/api/connectors/weixin/login/qr/wait",
+            data=json.dumps({"session_key": "wxqr-http-1", "timeout_ms": 3210}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload["ok"] is True
+        assert payload["session_key"] == "wxqr-http-1"
+        assert payload["timeout_ms"] == 3210
+        assert captured == {
+            "session_key": "wxqr-http-1",
+            "timeout_ms": 3210,
+        }
+    finally:
+        app.request_shutdown(source="test-daemon-http-weixin")
+        server_thread.join(timeout=10)
+        assert not server_thread.is_alive()
+
+
+def test_weixin_qr_wait_treats_poll_timeout_as_pending(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    app = DaemonApp(temp_home)
+
+    monkeypatch.setattr(
+        "deepscientist.daemon.app.fetch_weixin_qrcode",
+        lambda **kwargs: {
+            "qrcode": "wx-qr-timeout",
+            "qrcode_img_content": "https://example.com/wx-qr-timeout.png",
+        },
+    )
+    monkeypatch.setattr(
+        "deepscientist.daemon.app.poll_weixin_qrcode_status",
+        lambda **kwargs: (_ for _ in ()).throw(TimeoutError("The read operation timed out")),
+    )
+
+    start_payload = app.handlers.weixin_login_qr_start({})
+    wait_payload = app.handlers.weixin_login_qr_wait({"session_key": start_payload["session_key"], "timeout_ms": 500})
+
+    assert wait_payload["ok"] is True
+    assert wait_payload["connected"] is False
+    assert wait_payload["status"] == "wait"
+    assert wait_payload["session_key"] == start_payload["session_key"]
+    assert wait_payload["qrcode_url"] == "https://example.com/wx-qr-timeout.png"
 
 
 def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, pythonpath_env) -> None:
@@ -452,6 +743,560 @@ def test_daemon_serves_health_and_ui(temp_home: Path, project_root: Path, python
         server.wait(timeout=10)
 
 
+def test_daemon_serves_lingzhu_metis_routes(temp_home: Path, project_root: Path, pythonpath_env) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named_normalized("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["local_host"] = "127.0.0.1"
+    connectors["lingzhu"]["gateway_port"] = 20902
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20902"
+    save_result = manager.save_named_payload("connectors", connectors)
+    assert save_result["ok"] is True
+
+    app = DaemonApp(temp_home)
+    snapshot = app.quest_service.create("lingzhu metis route quest")
+    app.update_quest_binding(snapshot["quest_id"], "lingzhu:direct:glass-1", force=True)
+
+    server = subprocess.Popen(
+        [
+            "python3",
+            "-m",
+            "deepscientist.cli",
+            "--home",
+            str(temp_home),
+            "daemon",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "20902",
+        ],
+        cwd=project_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        health = _wait_for_json("http://127.0.0.1:20902/metis/agent/api/health")
+        assert health["status"] == "ok"
+        assert health["endpoint"] == "/metis/agent/api/sse"
+        assert health["agentId"] == "main"
+
+        sse_request = Request(
+            "http://127.0.0.1:20902/metis/agent/api/sse",
+            data=json.dumps(
+                {
+                    "message_id": "lingzhu-test-001",
+                    "agent_id": "main",
+                    "user_id": "glass-1",
+                    "message": [{"role": "user", "type": "text", "text": "/status"}],
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {auth_ak}",
+            },
+            method="POST",
+        )
+        with urlopen(sse_request) as response:  # noqa: S310
+            content_type = str(response.headers.get("Content-Type") or "")
+            body = response.read().decode("utf-8")
+        assert "text/event-stream" in content_type
+        assert "event: message" in body
+        data_lines = [line[len("data: "):] for line in body.splitlines() if line.startswith("data: ")]
+        assert data_lines
+        payload = json.loads("".join(data_lines))
+        assert payload["message_id"] == "lingzhu-test-001"
+        assert payload["agent_id"] == "main"
+        assert payload["is_finish"] is True
+        assert snapshot["quest_id"] in payload["answer_stream"]
+
+        unauthorized_request = Request(
+            "http://127.0.0.1:20902/metis/agent/api/sse",
+            data=json.dumps(
+                {
+                    "message_id": "lingzhu-test-unauthorized",
+                    "agent_id": "main",
+                    "message": [{"role": "user", "type": "text", "text": "hello"}],
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer wrong-token",
+            },
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(unauthorized_request)  # noqa: S310
+        assert exc_info.value.code == 401
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+def test_lingzhu_sse_submits_only_prefixed_task_text(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu prefix gate quest")
+    quest_id = quest["quest_id"]
+    app.update_quest_binding(quest_id, "lingzhu:direct:glass-1", force=True)
+    monkeypatch.setattr(
+        app,
+        "schedule_turn",
+        lambda quest_id, reason="user_message": {
+            "scheduled": True,
+            "started": False,
+            "queued": False,
+            "reason": reason,
+        },
+    )
+
+    first_handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        first_handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-prefix-001",
+                "agent_id": "main",
+                "user_id": "glass-1",
+                "message": [{"role": "user", "type": "text", "text": "我现在的任务是 复现 baseline"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    assert first_handler.status_code == 200
+    first_events = _parse_sse_events(first_handler.wfile.getvalue())
+    assert first_events
+    assert first_events[-1]["data"]["answer_stream"] == "进行中"
+
+    history = app.quest_service.history(quest_id)
+    assert history
+    assert history[-1]["role"] == "user"
+    assert history[-1]["content"] == "复现 baseline"
+
+    channel = app._channel_with_bindings("lingzhu")
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-1",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "阶段一完成",
+        }
+    )
+
+    second_handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        second_handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-prefix-002",
+                "agent_id": "main",
+                "user_id": "glass-1",
+                "message": [{"role": "user", "type": "text", "text": "汇报"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    second_events = _parse_sse_events(second_handler.wfile.getvalue())
+    assert second_events
+    assert second_events[-1]["data"]["answer_stream"] == "阶段一完成"
+
+    history_after_poll = app.quest_service.history(quest_id)
+    user_messages = [item for item in history_after_poll if str(item.get("role") or "") == "user"]
+    assert len(user_messages) == 1
+    assert user_messages[-1]["content"] == "复现 baseline"
+
+
+def test_lingzhu_sse_accepts_messages_alias_and_missing_ids(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["agent_id"] = "DeepScientist"
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "user_id": "glass-alias",
+                "messages": [{"role": "user", "type": "text", "text": "汇报"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    assert handler.status_code == 200
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert events
+    payload = events[-1]["data"]
+    assert payload["agent_id"] == "DeepScientist"
+    assert str(payload["message_id"]).startswith("lingzhu-")
+
+
+def test_lingzhu_short_bind_command_binds_target_quest(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu bind target quest")
+    quest_id = quest["quest_id"]
+
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-bind-001",
+                "agent_id": "DeepScientist",
+                "user_id": "glass-bind",
+                "message": [{"role": "user", "type": "text", "text": f"绑定{quest_id}"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    assert handler.status_code == 200
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert events
+    assert quest_id in str(events[-1]["data"]["answer_stream"])
+    channel = app._channel_with_bindings("lingzhu")
+    assert channel.resolve_bound_quest(lingzhu_passive_conversation_id(connectors["lingzhu"])) == quest_id
+
+
+def test_lingzhu_unbound_help_mentions_chinese_shortcuts(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-help-001",
+                "agent_id": "DeepScientist",
+                "user_id": "glass-help",
+                "message": [{"role": "user", "type": "text", "text": "我现在的任务是 复现 baseline"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    assert handler.status_code == 200
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert events
+    answer_text = str(events[-1]["data"]["answer_stream"])
+    assert "绑定" in answer_text
+    assert "帮助" in answer_text
+    assert "新建" in answer_text
+
+
+def test_lingzhu_sse_replays_buffered_outbox_messages_only_once(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu replay quest")
+    quest_id = quest["quest_id"]
+    app.update_quest_binding(quest_id, "lingzhu:direct:glass-2", force=True)
+    channel = app._channel_with_bindings("lingzhu")
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-2",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "第一条",
+        }
+    )
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-2",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "第二条",
+        }
+    )
+
+    first_handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        first_handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-replay-001",
+                "agent_id": "main",
+                "user_id": "glass-2",
+                "message": [{"role": "user", "type": "text", "text": "继续"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    first_events = _parse_sse_events(first_handler.wfile.getvalue())
+    assert [event["data"]["answer_stream"] for event in first_events] == ["第一条", "第二条"]
+
+    second_handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        second_handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-replay-002",
+                "agent_id": "main",
+                "user_id": "glass-2",
+                "message": [{"role": "user", "type": "text", "text": "继续"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    second_events = _parse_sse_events(second_handler.wfile.getvalue())
+    assert second_events
+    assert [event["data"]["answer_stream"] for event in second_events] == ["进行中"]
+
+
+def test_lingzhu_sse_replays_surface_actions_as_tool_calls(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu surface action replay quest")
+    quest_id = quest["quest_id"]
+    app.update_quest_binding(quest_id, "lingzhu:direct:glass-3", force=True)
+    channel = app._channel_with_bindings("lingzhu")
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-3",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "准备拍照",
+            "surface_actions": [{"type": "take_photo"}],
+        }
+    )
+
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-surface-001",
+                "agent_id": "main",
+                "user_id": "glass-3",
+                "message": [{"role": "user", "type": "text", "text": "继续"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert len(events) == 2
+    assert events[0]["data"]["type"] == "answer"
+    assert events[0]["data"]["answer_stream"] == "准备拍照"
+    assert events[1]["data"]["type"] == "tool_call"
+    assert events[1]["data"]["tool_call"]["command"] == "take_photo"
+    assert events[1]["data"]["tool_call"]["handling_required"] is True
+
+
+def test_lingzhu_sse_detects_tool_call_from_marker_text(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu marker fallback quest")
+    quest_id = quest["quest_id"]
+    app.update_quest_binding(quest_id, "lingzhu:direct:glass-4", force=True)
+    channel = app._channel_with_bindings("lingzhu")
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-4",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "<LINGZHU_TOOL_CALL:take_photo:{}>",
+        }
+    )
+
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-marker-001",
+                "agent_id": "main",
+                "user_id": "glass-4",
+                "message": [{"role": "user", "type": "text", "text": "继续"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert len(events) == 1
+    assert events[0]["data"]["type"] == "tool_call"
+    assert events[0]["data"]["tool_call"]["command"] == "take_photo"
+
+
+def test_lingzhu_sse_detects_tool_call_from_plain_text_instruction(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu plain text fallback quest")
+    quest_id = quest["quest_id"]
+    app.update_quest_binding(quest_id, "lingzhu:direct:glass-plain", force=True)
+    channel = app._channel_with_bindings("lingzhu")
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-plain",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "请拍照记录当前白板",
+        }
+    )
+
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-plain-001",
+                "agent_id": "main",
+                "user_id": "glass-plain",
+                "message": [{"role": "user", "type": "text", "text": "继续"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert len(events) == 2
+    assert events[0]["data"]["type"] == "answer"
+    assert events[0]["data"]["answer_stream"] == "请拍照记录当前白板"
+    assert events[1]["data"]["type"] == "tool_call"
+    assert events[1]["data"]["tool_call"]["command"] == "take_photo"
+
+
+def test_lingzhu_sse_normalizes_surface_action_aliases(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = auth_ak
+    connectors["lingzhu"]["enable_experimental_native_actions"] = True
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu alias normalization quest")
+    quest_id = quest["quest_id"]
+    app.update_quest_binding(quest_id, "lingzhu:direct:glass-5", force=True)
+    channel = app._channel_with_bindings("lingzhu")
+    channel.send(
+        {
+            "conversation_id": "lingzhu:direct:glass-5",
+            "quest_id": quest_id,
+            "kind": "progress",
+            "message": "发送通知",
+            "surface_actions": [{"type": "notification", "title": "阶段完成", "body": "可以继续"}],
+        }
+    )
+
+    handler = _FakeSseHandler()
+    app.stream_lingzhu_sse(
+        handler,
+        raw_body=json.dumps(
+            {
+                "message_id": "lingzhu-alias-001",
+                "agent_id": "main",
+                "user_id": "glass-5",
+                "message": [{"role": "user", "type": "text", "text": "继续"}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {auth_ak}"},
+    )
+
+    events = _parse_sse_events(handler.wfile.getvalue())
+    assert len(events) == 2
+    assert events[0]["data"]["type"] == "answer"
+    assert events[1]["data"]["type"] == "tool_call"
+    assert events[1]["data"]["tool_call"]["command"] == "send_notification"
+    assert events[1]["data"]["tool_call"]["content"] == "阶段完成\n可以继续"
+
+
 def test_daemon_serves_docs_assets(temp_home: Path, project_root: Path, pythonpath_env) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -488,6 +1333,331 @@ def test_daemon_serves_docs_assets(temp_home: Path, project_root: Path, pythonpa
     finally:
         server.terminate()
         server.wait(timeout=10)
+
+
+def test_handlers_arxiv_import_and_list_roundtrip(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("arxiv api quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    def fake_urlopen(request, timeout=8):  # noqa: ANN001
+        url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            return _FakeUrlopenResponse(
+                """
+                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+                  <entry>
+                    <id>http://arxiv.org/abs/2010.11929</id>
+                    <published>2020-10-23T17:54:00Z</published>
+                    <title>Vision Transformers</title>
+                    <summary>Vision Transformers apply pure transformer layers directly to image patches.</summary>
+                    <author><name>Dosovitskiy, Alexey</name></author>
+                    <arxiv:primary_category term="cs.CV" />
+                    <category term="cs.CV" />
+                  </entry>
+                </feed>
+                """
+            )
+        if url.endswith("/overview/2010.11929.md"):
+            return _FakeUrlopenResponse("# Vision Transformers\n\nA concise AlphaXiv summary.")
+        if url.endswith("/pdf/2010.11929.pdf"):
+            return _FakeUrlopenResponse("%PDF-1.7\nfake pdf body")
+        if url.endswith("/abs/2010.11929"):
+            return _FakeUrlopenResponse(
+                """
+                <html>
+                  <head>
+                    <meta name="citation_title" content="Vision Transformers" />
+                    <meta name="citation_author" content="Dosovitskiy, Alexey" />
+                  </head>
+                  <body>
+                    <blockquote class="abstract mathjax">
+                      <span class="descriptor">Abstract:</span>
+                      Vision Transformers apply pure transformer layers directly to image patches.
+                    </blockquote>
+                  </body>
+                </html>
+                """
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr("deepscientist.artifact.arxiv.urlopen", fake_urlopen)
+    monkeypatch.setattr("deepscientist.arxiv_library.urlopen", fake_urlopen)
+
+    imported = app.handlers.arxiv_import({"project_id": quest_id, "arxiv_id": "2010.11929"})
+    assert imported["arxiv_id"] == "2010.11929"
+    assert imported["status"] in {"processing", "ready"}
+
+    pdf_path = quest_root / "literature" / "arxiv" / "pdfs" / "2010.11929.pdf"
+    for _ in range(40):
+        if pdf_path.exists():
+            break
+        time.sleep(0.05)
+    assert pdf_path.exists()
+
+    listed = app.handlers.arxiv_list(f"/api/v1/arxiv/list?project_id={quest_id}")
+    assert listed["ok"] is True
+    assert listed["count"] == 1
+    assert listed["items"][0]["arxiv_id"] == "2010.11929"
+    assert listed["items"][0]["overview_markdown"].startswith("# Vision Transformers")
+    assert listed["items"][0]["document_id"] == "questpath::literature/arxiv/pdfs/2010.11929.pdf"
+
+
+def test_daemon_http_arxiv_list_route_passes_request_path(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app._start_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._stop_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._start_terminal_attach_server = lambda host, port: None  # type: ignore[method-assign]
+    app._stop_terminal_attach_server = lambda: None  # type: ignore[method-assign]
+
+    quest = app.quest_service.create("arxiv http api quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    pdf_path = quest_root / "literature" / "arxiv" / "pdfs" / "2010.11929.pdf"
+    ensure_dir(pdf_path.parent)
+    pdf_path.write_bytes(b"%PDF-1.7\nhttp arxiv route test")
+    app.artifact_service.arxiv_library.upsert_item(
+        quest_root,
+        {
+            "arxiv_id": "2010.11929",
+            "title": "Vision Transformers",
+            "display_name": "2010.11929",
+            "abstract": "A saved abstract.",
+            "status": "ready",
+            "pdf_rel_path": "literature/arxiv/pdfs/2010.11929.pdf",
+        },
+    )
+
+    port = _pick_free_port()
+    server_thread = threading.Thread(target=app.serve, args=("127.0.0.1", port), daemon=True)
+    server_thread.start()
+    try:
+        _wait_for_json(f"http://127.0.0.1:{port}/api/health")
+        payload = _get_json(f"http://127.0.0.1:{port}/api/v1/arxiv/list?project_id={quest_id}")
+        assert payload["ok"] is True
+        assert payload["count"] == 1
+        assert payload["items"][0]["arxiv_id"] == "2010.11929"
+        assert payload["items"][0]["document_id"] == "questpath::literature/arxiv/pdfs/2010.11929.pdf"
+    finally:
+        app.request_shutdown(source="test-daemon-http-arxiv-list")
+        server_thread.join(timeout=10)
+        assert not server_thread.is_alive()
+
+
+def test_daemon_http_arxiv_import_route_passes_json_body(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app._start_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._stop_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._start_terminal_attach_server = lambda host, port: None  # type: ignore[method-assign]
+    app._stop_terminal_attach_server = lambda: None  # type: ignore[method-assign]
+
+    quest = app.quest_service.create("arxiv http import quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    def fake_urlopen(request, timeout=8):  # noqa: ANN001
+        url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            return _FakeUrlopenResponse(
+                """
+                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+                  <entry>
+                    <id>http://arxiv.org/abs/2010.11929</id>
+                    <published>2020-10-23T17:54:00Z</published>
+                    <title>Vision Transformers</title>
+                    <summary>Vision Transformers apply pure transformer layers directly to image patches.</summary>
+                    <author><name>Dosovitskiy, Alexey</name></author>
+                    <arxiv:primary_category term="cs.CV" />
+                    <category term="cs.CV" />
+                  </entry>
+                </feed>
+                """
+            )
+        if url.endswith("/pdf/2010.11929.pdf"):
+            return _FakeUrlopenResponse("%PDF-1.7\nfake pdf body")
+        if url.endswith("/abs/2010.11929"):
+            return _FakeUrlopenResponse(
+                """
+                <html>
+                  <head>
+                    <meta name="citation_title" content="Vision Transformers" />
+                    <meta name="citation_author" content="Dosovitskiy, Alexey" />
+                  </head>
+                  <body>
+                    <blockquote class="abstract mathjax">
+                      <span class="descriptor">Abstract:</span>
+                      Vision Transformers apply pure transformer layers directly to image patches.
+                    </blockquote>
+                  </body>
+                </html>
+                """
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr("deepscientist.artifact.arxiv.urlopen", fake_urlopen)
+    monkeypatch.setattr("deepscientist.arxiv_library.urlopen", fake_urlopen)
+
+    port = _pick_free_port()
+    server_thread = threading.Thread(target=app.serve, args=("127.0.0.1", port), daemon=True)
+    server_thread.start()
+    try:
+        _wait_for_json(f"http://127.0.0.1:{port}/api/health")
+        request = Request(
+            f"http://127.0.0.1:{port}/api/v1/arxiv/import",
+            data=json.dumps({"project_id": quest_id, "arxiv_id": "2010.11929"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload["arxiv_id"] == "2010.11929"
+        assert payload["status"] in {"processing", "ready"}
+        pdf_path = quest_root / "literature" / "arxiv" / "pdfs" / "2010.11929.pdf"
+        for _ in range(40):
+            if pdf_path.exists():
+                break
+            time.sleep(0.05)
+        assert pdf_path.exists()
+    finally:
+        app.request_shutdown(source="test-daemon-http-arxiv-import")
+        server_thread.join(timeout=10)
+        assert not server_thread.is_alive()
+
+
+def test_handlers_annotations_roundtrip_for_quest_file(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("annotation roundtrip quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    pdf_path = quest_root / "docs" / "annotated.pdf"
+    ensure_dir(pdf_path.parent)
+    pdf_path.write_bytes(b"%PDF-1.7\nannotation test")
+
+    document_id = "questpath::docs/annotated.pdf"
+    file_id = f"quest-file::{quest_id}::{quote(document_id, safe='')}::{quote('docs/annotated.pdf', safe='')}"
+    created = app.handlers.annotation_create(
+        {
+            "file_id": file_id,
+            "position": {
+                "pageNumber": 1,
+                "boundingRect": {"x1": 10, "y1": 12, "x2": 34, "y2": 18, "width": 100, "height": 100},
+                "rects": [{"x1": 10, "y1": 12, "x2": 34, "y2": 18, "width": 100, "height": 100}],
+            },
+            "content": {"text": "Vision Transformer"},
+            "comment": "Key citation",
+            "kind": "note",
+            "tags": ["arxiv", "important"],
+        }
+    )
+    assert created["file_id"] == file_id
+    assert created["project_id"] == quest_id
+    assert created["comment"] == "Key citation"
+
+    listed = app.handlers.annotations_file(file_id)
+    assert listed["total"] == 1
+    assert listed["items"][0]["id"] == created["id"]
+
+    updated = app.handlers.annotation_update(created["id"], {"comment": "Updated note", "kind": "task"})
+    assert updated["comment"] == "Updated note"
+    assert updated["kind"] == "task"
+
+    fetched = app.handlers.annotation_detail(created["id"])
+    assert fetched["id"] == created["id"]
+    assert fetched["comment"] == "Updated note"
+
+    searched = app.handlers.annotations_project(quest_id, f"/api/v1/annotations/project/{quest_id}?q=updated")
+    assert searched["total"] == 1
+    assert searched["items"][0]["id"] == created["id"]
+
+    deleted = app.handlers.annotation_delete(created["id"])
+    assert deleted["ok"] is True
+
+    empty = app.handlers.annotations_file(file_id)
+    assert empty["total"] == 0
+
+
+def test_daemon_http_annotations_routes_support_quest_file_ids(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app._start_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._stop_background_connectors = lambda: None  # type: ignore[method-assign]
+    app._start_terminal_attach_server = lambda host, port: None  # type: ignore[method-assign]
+    app._stop_terminal_attach_server = lambda: None  # type: ignore[method-assign]
+
+    quest = app.quest_service.create("annotation http quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    pdf_path = quest_root / "docs" / "annotated.pdf"
+    ensure_dir(pdf_path.parent)
+    pdf_path.write_bytes(b"%PDF-1.7\nannotation http test")
+    document_id = "questpath::docs/annotated.pdf"
+    file_id = f"quest-file::{quest_id}::{quote(document_id, safe='')}::{quote('docs/annotated.pdf', safe='')}"
+
+    port = _pick_free_port()
+    server_thread = threading.Thread(target=app.serve, args=("127.0.0.1", port), daemon=True)
+    server_thread.start()
+    try:
+        _wait_for_json(f"http://127.0.0.1:{port}/api/health")
+        create_request = Request(
+            f"http://127.0.0.1:{port}/api/v1/annotations/",
+            data=json.dumps(
+                {
+                    "file_id": file_id,
+                    "position": {
+                        "pageNumber": 1,
+                        "boundingRect": {"x1": 1, "y1": 2, "x2": 20, "y2": 8, "width": 100, "height": 100},
+                        "rects": [{"x1": 1, "y1": 2, "x2": 20, "y2": 8, "width": 100, "height": 100}],
+                    },
+                    "content": {"text": "HTTP annotation"},
+                    "comment": "from http",
+                    "kind": "question",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(create_request) as response:  # noqa: S310
+            created = json.loads(response.read().decode("utf-8"))
+
+        list_url = f"http://127.0.0.1:{port}/api/v1/annotations/file/{file_id}"
+        listed = _get_json(list_url)
+        assert listed["total"] == 1
+        assert listed["items"][0]["id"] == created["id"]
+
+        patch_request = Request(
+            f"http://127.0.0.1:{port}/api/v1/annotations/{created['id']}",
+            data=json.dumps({"comment": "patched"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="PATCH",
+        )
+        with urlopen(patch_request) as response:  # noqa: S310
+            patched = json.loads(response.read().decode("utf-8"))
+        assert patched["comment"] == "patched"
+
+        delete_request = Request(
+            f"http://127.0.0.1:{port}/api/v1/annotations/{created['id']}",
+            method="DELETE",
+        )
+        with urlopen(delete_request) as response:  # noqa: S310
+            deleted = json.loads(response.read().decode("utf-8"))
+        assert deleted["ok"] is True
+    finally:
+        app.request_shutdown(source="test-daemon-http-annotations")
+        server_thread.join(timeout=10)
+        assert not server_thread.is_alive()
 
 
 def test_ui_root_shows_build_instructions_when_bundle_missing(
@@ -602,6 +1772,62 @@ def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(
     history = app.quest_service.history(quest_id)
     assert history
     assert history[-1]["content"] == "daemon api connector bind quest"
+    assert history[-1]["source"] == "web"
+
+
+def test_quest_create_handler_can_disable_auto_binding_recent_connector(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
+    connectors = manager.load_named("connectors")
+    connectors["whatsapp"]["enabled"] = True
+    connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
+    write_yaml(manager.path_for("connectors"), connectors)
+    app = DaemonApp(temp_home)
+    monkeypatch.setattr(
+        app,
+        "schedule_turn",
+        lambda quest_id, reason="user_message": {
+            "scheduled": True,
+            "started": True,
+            "queued": False,
+            "reason": reason,
+        },
+    )
+
+    first = app.handle_connector_inbound(
+        "whatsapp",
+        {
+            "chat_type": "direct",
+            "sender_id": "+15550001112",
+            "sender_name": "Researcher",
+            "text": "Please summarize the latest result.",
+        },
+    )
+    assert first["accepted"] is True
+    assert app.list_connector_bindings("whatsapp") == []
+
+    payload = app.handlers.quest_create(
+        {
+            "goal": "daemon api quest without auto connector binding",
+            "source": "web",
+            "auto_start": True,
+            "auto_bind_latest_connectors": False,
+        }
+    )
+
+    assert payload["ok"] is True
+    quest_id = payload["snapshot"]["quest_id"]
+    assert app.list_connector_bindings("whatsapp") == []
+    history = app.quest_service.history(quest_id)
+    assert history
+    assert history[-1]["content"] == "daemon api quest without auto connector binding"
     assert history[-1]["source"] == "web"
 
 
@@ -797,7 +2023,80 @@ def test_update_quest_binding_keeps_only_one_external_connector_per_quest(temp_h
     assert any(item["conversation_id"] == "telegram:direct:tg-single" for item in app.list_connector_bindings("telegram"))
 
 
-def test_update_quest_bindings_supports_per_connector_batch_selection(temp_home: Path) -> None:
+def test_quest_bindings_handler_announces_switch_to_old_and_new_connectors(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    write_yaml(manager.path_for("config"), config)
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["telegram"]["enabled"] = True
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("binding switch notifications")
+    quest_id = quest["quest_id"]
+    first = app.update_quest_binding(quest_id, "qq:direct:OPENID_SWITCH", force=True)
+    assert isinstance(first, dict) and first["ok"] is True
+
+    payload = app.handlers.quest_bindings(
+        quest_id,
+        {
+            "connector": "telegram",
+            "conversation_id": "telegram:direct:tg-switch",
+            "force": True,
+        },
+    )
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    assert payload["binding_transition"]["mode"] == "switch"
+    qq_outbox = read_jsonl(temp_home / "logs" / "connectors" / "qq" / "outbox.jsonl")
+    telegram_outbox = read_jsonl(temp_home / "logs" / "connectors" / "telegram" / "outbox.jsonl")
+    assert any("当前已退出 Quest" in str(item.get("text") or "") for item in qq_outbox)
+    assert any("当前已绑定 Quest" in str(item.get("text") or "") for item in telegram_outbox)
+
+
+def test_auto_bind_does_not_override_existing_external_connector_without_explicit_switch(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
+    connectors = manager.load_named("connectors")
+    connectors["whatsapp"]["enabled"] = True
+    connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
+    connectors["telegram"]["enabled"] = True
+    connectors["telegram"]["auto_bind_dm_to_active_quest"] = True
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("no silent connector override")
+    quest_id = quest["quest_id"]
+    bound = app.update_quest_binding(quest_id, "whatsapp:direct:+15550001111", force=True)
+    assert isinstance(bound, dict) and bound["ok"] is True
+
+    response = app.handle_connector_inbound(
+        "telegram",
+        {
+            "chat_type": "direct",
+            "sender_id": "tg-user-1",
+            "sender_name": "Telegram User",
+            "text": "Please continue the current quest.",
+        },
+    )
+
+    assert response["accepted"] is True
+    assert app.quest_service.binding_sources(quest_id) == ["local:default", "whatsapp:direct:+15550001111"]
+    assert app.list_connector_bindings("telegram") == []
+    assert "/use" in str(response["reply"]["payload"]["text"] or "")
+
+
+def test_update_quest_bindings_rejects_multiple_external_targets(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
@@ -808,7 +2107,7 @@ def test_update_quest_bindings_supports_per_connector_batch_selection(temp_home:
     quest = app.quest_service.create("batch connector binding quest")
     quest_id = quest["quest_id"]
 
-    first = app.update_quest_bindings(
+    result = app.update_quest_bindings(
         quest_id,
         [
             {"connector": "qq", "conversation_id": "qq:direct:OPENID_BATCH"},
@@ -816,26 +2115,12 @@ def test_update_quest_bindings_supports_per_connector_batch_selection(temp_home:
         ],
         force=True,
     )
-    assert isinstance(first, dict)
-    assert first["ok"] is True
-    sources = app.quest_service.binding_sources(quest_id)
-    assert "qq:direct:OPENID_BATCH" in sources
-    assert "telegram:direct:tg-batch" in sources
-
-    second = app.update_quest_bindings(
-        quest_id,
-        [
-            {"connector": "qq", "conversation_id": "qq:direct:OPENID_BATCH_2"},
-            {"connector": "telegram", "conversation_id": "telegram:direct:tg-batch"},
-        ],
-        force=True,
-    )
-    assert isinstance(second, dict)
-    assert second["ok"] is True
-    sources = app.quest_service.binding_sources(quest_id)
-    assert "qq:direct:OPENID_BATCH" not in sources
-    assert "qq:direct:OPENID_BATCH_2" in sources
-    assert "telegram:direct:tg-batch" in sources
+    assert isinstance(result, tuple)
+    status, payload = result
+    assert status == 400
+    assert payload["ok"] is False
+    assert payload["message"] == "A quest may bind at most one external connector target."
+    assert app.quest_service.binding_sources(quest_id) == ["local:default"]
 
 
 def test_bash_exec_handlers_expose_sessions_logs_and_stop(temp_home: Path) -> None:
@@ -1456,6 +2741,82 @@ def test_quest_create_fails_fast_when_requested_baseline_cannot_materialize(temp
     assert body["ok"] is False
     assert "requested baseline `missing-baseline`" in str(body["message"])
     assert not (temp_home / "quests" / "quest-should-fail-baseline-bootstrap").exists()
+
+
+def test_baseline_delete_handler_clears_registry_and_bound_quests(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    source = app.quest_service.create("source baseline quest")
+    source_root = Path(source["quest_root"])
+    baseline_root = source_root / "baselines" / "local" / "demo-baseline"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Demo baseline\n", encoding="utf-8")
+
+    ArtifactService(temp_home).confirm_baseline(
+        source_root,
+        baseline_path=str(baseline_root),
+        baseline_id="demo-baseline",
+        summary="Source baseline confirmed",
+        metrics_summary={"acc": 0.91},
+        primary_metric={"name": "acc", "value": 0.91},
+    )
+
+    created = app.handlers.quest_create(
+        {
+            "goal": "Reuse the confirmed baseline and continue from there.",
+            "title": "Baseline reuse quest",
+            "quest_id": "quest-with-bound-baseline",
+            "requested_baseline_ref": {
+                "baseline_id": "demo-baseline",
+            },
+        }
+    )
+    assert isinstance(created, dict)
+    target_root = Path(created["snapshot"]["quest_root"])
+    assert baseline_root.exists()
+    assert (target_root / "baselines" / "imported" / "demo-baseline").exists()
+
+    deleted = app.handlers.baseline_delete("demo-baseline")
+
+    assert isinstance(deleted, dict)
+    assert deleted["ok"] is True
+    assert deleted["baseline_id"] == "demo-baseline"
+    assert sorted(deleted["affected_quest_ids"]) == sorted([source["quest_id"], "quest-with-bound-baseline"])
+    assert deleted["cleared_requested_refs"] == 1
+    assert deleted["cleared_confirmed_refs"] == 2
+    assert app.handlers.baselines() == []
+    assert not baseline_root.exists()
+    assert not (target_root / "baselines" / "imported" / "demo-baseline").exists()
+
+    source_snapshot = app.quest_service.snapshot(source["quest_id"])
+    assert source_snapshot["baseline_gate"] == "pending"
+    assert source_snapshot["confirmed_baseline_ref"] is None
+    assert source_snapshot["active_baseline_id"] is None
+
+    target_snapshot = app.quest_service.snapshot("quest-with-bound-baseline")
+    assert target_snapshot["baseline_gate"] == "pending"
+    assert target_snapshot["requested_baseline_ref"] is None
+    assert target_snapshot["confirmed_baseline_ref"] is None
+    assert target_snapshot["active_baseline_id"] is None
+
+    payload = app.handlers.quest_create(
+        {
+            "goal": "Try to reuse a deleted baseline.",
+            "title": "Should fail after deletion",
+            "quest_id": "quest-after-baseline-delete",
+            "requested_baseline_ref": {
+                "baseline_id": "demo-baseline",
+            },
+        }
+    )
+
+    assert isinstance(payload, tuple)
+    status, body = payload
+    assert status == 409
+    assert body["ok"] is False
+    assert "requested baseline `demo-baseline`" in str(body["message"])
+    assert not (temp_home / "quests" / "quest-after-baseline-delete").exists()
 
 
 def test_chat_endpoint_relays_assistant_reply_to_bound_connector(temp_home: Path) -> None:

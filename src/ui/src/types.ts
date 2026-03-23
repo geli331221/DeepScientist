@@ -208,6 +208,28 @@ export interface ConnectorAvailabilitySnapshot {
   }>
 }
 
+export interface WeixinQrLoginStartPayload {
+  ok: boolean
+  session_key?: string | null
+  qrcode_content?: string | null
+  qrcode_url?: string | null
+  message?: string | null
+}
+
+export interface WeixinQrLoginWaitPayload {
+  ok: boolean
+  connected: boolean
+  status?: string | null
+  session_key?: string | null
+  qrcode_content?: string | null
+  qrcode_url?: string | null
+  account_id?: string | null
+  login_user_id?: string | null
+  base_url?: string | null
+  snapshot?: ConnectorSnapshot | null
+  message?: string | null
+}
+
 export interface ConnectorRecentConversation {
   conversation_id: string
   connector?: string
@@ -610,6 +632,17 @@ export interface GitBranchNode {
   idea_draft_path?: string | null
   latest_main_experiment?: Record<string, unknown> | null
   experiment_count?: number | null
+  workflow_state?: {
+    analysis_state?: 'none' | 'pending' | 'active' | 'completed' | string | null
+    writing_state?: 'not_ready' | 'blocked_by_analysis' | 'ready' | 'active' | 'completed' | string | null
+    analysis_campaign_id?: string | null
+    total_slices?: number | null
+    completed_slices?: number | null
+    next_pending_slice_id?: string | null
+    paper_parent_branch?: string | null
+    paper_parent_run_id?: string | null
+    status_reason?: string | null
+  } | null
 }
 
 export interface GitBranchEdge {

@@ -39,6 +39,7 @@ import {
   Braces,
   Terminal,
   X,
+  GraduationCap,
 } from 'lucide-react'
 import { useFileTreeStore } from '@/lib/stores/file-tree'
 import { useTabsStore, useActiveTab } from '@/lib/stores/tabs'
@@ -52,6 +53,8 @@ import { client as questClient } from '@/lib/api'
 import { flattenQuestExplorerPayload } from '@/lib/api/quest-files'
 import { listLabAgents, listLabQuests, listLabTemplates } from '@/lib/api/lab'
 import { useCliStore } from '@/lib/plugins/cli/stores/cli-store'
+import { supportsArxiv } from '@/lib/runtime/quest-runtime'
+import { useArxivStore } from '@/lib/stores/arxiv-store'
 import { CreateFileDialog, CreateLatexProjectDialog, FileIcon, FileTree } from '@/components/file-tree'
 import { PluginRenderer } from '@/components/plugin'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -83,12 +86,17 @@ import { SearchIcon, SettingsIcon, SparklesIcon, LayoutIcon } from '@/components
 import { CopilotDockOverlay } from '@/components/workspace/CopilotDockOverlay'
 import { COPILOT_DOCK_DEFAULTS, useCopilotDockState } from '@/hooks/useCopilotDockState'
 import { useI18n } from '@/lib/i18n/useI18n'
+import { useOnboardingStore } from '@/lib/stores/onboarding'
+import { tutorialDemoScenarios } from '@/demo/scenarios/quickstart'
+import { resetDemoRuntime } from '@/demo/runtime'
+import { useDemoQuestWorkspace } from '@/demo/useDemoQuestWorkspace'
 import { WorkspaceTooltipLayer } from '@/components/workspace/WorkspaceTooltipLayer'
 import { WelcomeStage } from '@/components/workspace/WelcomeStage'
 import { QuestCopilotDockPanel } from '@/components/workspace/QuestCopilotDockPanel'
 import { QuestWorkspaceSurface } from '@/components/workspace/QuestWorkspaceSurface'
 import { NotificationBell } from '@/components/ui/notification-bell'
 import { MobileQuestWorkspaceShell } from '@/components/workspace/MobileQuestWorkspaceShell'
+import { ArxivPanel } from '@/components/arxiv'
 import {
   EXPLORER_REFRESH_EVENT,
   type ExplorerRefreshDetail,
@@ -128,6 +136,7 @@ interface WorkspaceLayoutProps {
   projectId: string
   projectName?: string
   projectSource?: string | null
+  demoScenarioId?: string | null
   readOnly?: boolean
 }
 
@@ -941,6 +950,9 @@ function Navbar({
   const { t } = useI18n('workspace')
   const router = useRouter()
   const openTab = useTabsStore((state) => state.openTab)
+  const tutorialLanguage = useOnboardingStore((state) => state.language)
+  const restartTutorial = useOnboardingStore((state) => state.restartTutorial)
+  const openTutorialChooser = useOnboardingStore((state) => state.openChooser)
   const readOnlyMode = Boolean(readOnly)
   const { addToast } = useToast()
   const updateProject = useUpdateProject()
@@ -1053,9 +1065,21 @@ function Navbar({
     router.push('/')
   }, [onExitHome, router])
 
+  const handleReplayTutorial = React.useCallback(() => {
+    const tutorialPath = `/projects/${projectId}`
+    if (projectId.startsWith('demo-')) {
+      resetDemoRuntime(projectId)
+    }
+    if (tutorialLanguage === 'zh' || tutorialLanguage === 'en') {
+      restartTutorial(tutorialPath, tutorialLanguage)
+      return
+    }
+    openTutorialChooser('manual')
+  }, [openTutorialChooser, projectId, restartTutorial, tutorialLanguage])
+
   return (
     <>
-      <nav className={cn('navbar', collapsed && 'is-collapsed')}>
+      <nav className={cn('navbar', collapsed && 'is-collapsed')} data-onboarding-id="workspace-navbar">
         {showCompactNavbar ? (
           <div className="navbar-roll">
             <button
@@ -1075,6 +1099,15 @@ function Navbar({
               data-tooltip={leftVisible ? t('navbar_hide_explorer') : t('navbar_show_explorer')}
             >
               <LayoutIcon className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={handleReplayTutorial}
+              className="ghost-btn navbar-roll-btn hidden sm:inline-flex"
+              aria-label={tutorialLanguage === 'zh' ? '教程' : 'Tutorial'}
+              data-tooltip={tutorialLanguage === 'zh' ? '教程' : 'Tutorial'}
+            >
+              <GraduationCap className="h-4 w-4" />
             </button>
             {!readOnlyMode && (
               <button
@@ -1237,6 +1270,15 @@ function Navbar({
                 size="sm"
                 enabled={!readOnlyMode}
               />
+              <button
+                type="button"
+                className="ghost-btn hidden sm:inline-flex"
+                onClick={handleReplayTutorial}
+                aria-label={tutorialLanguage === 'zh' ? '教程' : 'Tutorial'}
+                data-tooltip={tutorialLanguage === 'zh' ? '教程' : 'Tutorial'}
+              >
+                <GraduationCap className="h-4 w-4" />
+              </button>
               <button
                 className="ghost-btn"
                 onClick={handleOpenCli}
@@ -1583,6 +1625,7 @@ function LeftPanel({
   onEnterLab,
   onExitHome,
   localQuestMode = false,
+  demoMode = false,
 }: {
   width: number
   projectId: string
@@ -1592,6 +1635,7 @@ function LeftPanel({
   onEnterLab?: () => void
   onExitHome?: () => void
   localQuestMode?: boolean
+  demoMode?: boolean
 }) {
   const { t } = useI18n('workspace')
   const { t: tCommon } = useI18n('common')
@@ -1600,10 +1644,11 @@ function LeftPanel({
   const openTab = useTabsStore((state) => state.openTab)
   const graphSelection = useLabGraphSelectionStore((state) => state.selection)
   const { createFolder, upload, refresh, isLoading } = useFileTreeStore()
+  const refreshArxivLibrary = useArxivStore((state) => state.refresh)
   const { openFileInTab, downloadFile, openNotebook } = useOpenFile()
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const explorerBodyRef = React.useRef<HTMLDivElement | null>(null)
-  const [activeExplorer, setActiveExplorer] = React.useState<'files' | 'scope'>('files')
+  const [activeExplorer, setActiveExplorer] = React.useState<'arxiv' | 'files' | 'scope'>('files')
   const [hideDotfiles, setHideDotfiles] = React.useState(true)
   const [createFileOpen, setCreateFileOpen] = React.useState(false)
   const [isMenuOpen, setIsMenuOpen] = React.useState(true)
@@ -1681,7 +1726,7 @@ function LeftPanel({
       setDiffCompareBase(null)
       setDiffCompareHead(null)
       setScopedExplorerLoading(false)
-      setActiveExplorer('files')
+      setActiveExplorer((current) => (current === 'scope' ? 'files' : current))
       return
     }
 
@@ -1692,7 +1737,7 @@ function LeftPanel({
       setDiffFiles([])
       setDiffCompareBase(null)
       setDiffCompareHead(null)
-      setActiveExplorer('files')
+      setActiveExplorer((current) => (current === 'scope' ? 'files' : current))
       return
     }
 
@@ -2061,42 +2106,27 @@ function LeftPanel({
     }
   }, [addToast, refresh, t, tCommon])
 
+  const isArxivView = activeExplorer === 'arxiv'
   const isFilesView = activeExplorer === 'files'
   const isScopeView = activeExplorer === 'scope'
+  const showArxivExplorerPanel = Boolean(projectId) && (demoMode || supportsArxiv())
   const hasScopedExplorer = scopedExplorerNodes.length > 0
   const hasDiffExplorer = diffFiles.length > 0
   const disableExplorerActions = readOnlyMode
   const disableExplorerMutations = readOnlyMode || localQuestMode
   const hideDotfilesEffective = isScopeView ? true : hideDotfiles
-  const explorerModeLabel = isScopeView ? t('explorer_snapshot') : t('explorer_files')
-  const explorerSelectionLabel =
-    explorerLocation.selectionLabel || (isFilesView ? t('explorer_live_workspace') : null)
-  const explorerScopeLabel =
-    explorerLocation.appliedScopes.length > 0
-      ? explorerLocation.appliedScopes.join(', ')
-      : t('explorer_full_tree')
-  const explorerPrimaryLine = [
-    explorerLocation.branchNo ? `Branch #${explorerLocation.branchNo}` : null,
-    explorerLocation.branchName || null,
-    explorerLocation.ideaTitle || null,
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  const explorerSecondaryLine = [
-    explorerLocation.foundationLabel ? `Foundation ${explorerLocation.foundationLabel}` : null,
-    explorerLocation.sourceMode === 'snapshot'
-      ? t('explorer_branch_snapshot')
-      : t('explorer_live_workspace'),
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  const hasExplorerSecondaryMeta = Boolean(
-    explorerLocation.parentBranch ||
-      explorerLocation.revision ||
-      (explorerLocation.compareBase && explorerLocation.compareHead) ||
-      explorerLocation.appliedScopes.length > 0 ||
-      explorerLocation.fallbackToFullTree
-  )
+  const explorerResetKey = [
+    explorerLocation.selectionLabel || '',
+    scopedExplorerLabel || '',
+    explorerLocation.appliedScopes.join(','),
+  ].join('::')
+
+  React.useEffect(() => {
+    if (showArxivExplorerPanel || activeExplorer !== 'arxiv') {
+      return
+    }
+    setActiveExplorer(hasScopedExplorer ? 'scope' : 'files')
+  }, [activeExplorer, hasScopedExplorer, showArxivExplorerPanel])
 
   const handleExplorerNewFile = React.useCallback(() => {
     if (disableExplorerMutations) return
@@ -2115,12 +2145,16 @@ function LeftPanel({
 
   const handleExplorerRefresh = React.useCallback(() => {
     if (disableExplorerActions) return
+    if (isArxivView) {
+      void refreshArxivLibrary()
+      return
+    }
     if (isFilesView) {
       void handleRefresh()
       return
     }
     setScopedExplorerReloadKey((value) => value + 1)
-  }, [disableExplorerActions, handleRefresh, isFilesView])
+  }, [disableExplorerActions, handleRefresh, isArxivView, isFilesView, refreshArxivLibrary])
 
   React.useEffect(() => {
     const root = explorerBodyRef.current
@@ -2130,10 +2164,10 @@ function LeftPanel({
     if (tree) {
       tree.scrollTop = 0
     }
-  }, [activeExplorer, explorerScopeLabel, explorerSelectionLabel, scopedExplorerLabel])
+  }, [activeExplorer, explorerResetKey])
 
   return (
-    <div className="panel left-panel" style={{ width, minWidth: width }}>
+    <div className="panel left-panel" style={{ width, minWidth: width }} data-onboarding-id="workspace-explorer">
       {/* Header */}
       <div className="panel-header flex flex-nowrap items-center">
         <div className="flex items-center gap-2">
@@ -2158,6 +2192,26 @@ function LeftPanel({
             role="tablist"
             aria-label={t('explorer_views')}
           >
+            {showArxivExplorerPanel ? (
+              <button
+                type="button"
+                className={cn(
+                  'inline-flex h-8 items-center justify-center border-b-2 border-transparent px-2.5 text-[11px] font-semibold tracking-[0.08em] transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9b8352]/40',
+                  isArxivView
+                    ? 'border-[#d0b08a] text-[var(--text-on-dark)]'
+                    : 'text-[var(--text-muted-on-dark)] hover:text-[var(--text-on-dark)]'
+                )}
+                onClick={() => setActiveExplorer('arxiv')}
+                role="tab"
+                aria-selected={isArxivView}
+                aria-label={t('explorer_arxiv')}
+                title={t('explorer_arxiv')}
+                data-onboarding-id="quest-explorer-arxiv-tab"
+              >
+                {t('explorer_arxiv').toUpperCase()}
+              </button>
+            ) : null}
             <button
               type="button"
               className={cn(
@@ -2172,6 +2226,7 @@ function LeftPanel({
               aria-selected={isFilesView}
               aria-label={t('explorer_files')}
               title={t('explorer_files')}
+              data-onboarding-id="quest-explorer-files-tab"
             >
               {t('explorer_files').toUpperCase()}
             </button>
@@ -2196,191 +2251,146 @@ function LeftPanel({
             ) : null}
           </div>
         </div>
+
       </div>
 
       {/* File Tree Section */}
       <div className="flex-1 min-h-0 flex flex-col">
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-[var(--border-dark)]">
-          <div className="ml-auto flex items-center gap-0.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={handleExplorerNewFile}
-              disabled={disableExplorerMutations}
-              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
-              title={
-                disableExplorerMutations
-                  ? readOnlyMode
-                    ? t('leftpanel_view_only')
-                    : localQuestMode
-                      ? 'Create files from the document editor in local project mode.'
-                    : t('leftpanel_view_only')
-                  : t('explorer_new_file')
-              }
-              aria-label={t('explorer_new_file')}
-            >
-              <FilePlus className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={handleExplorerNewFolder}
-              disabled={disableExplorerMutations}
-              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
-              title={
-                disableExplorerMutations
-                  ? readOnlyMode
-                    ? t('leftpanel_view_only')
-                    : localQuestMode
-                      ? 'Folder creation is not exposed in local project mode.'
-                    : t('leftpanel_view_only')
-                  : t('explorer_new_folder')
-              }
-              aria-label={t('explorer_new_folder')}
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={handleExplorerUpload}
-              disabled={disableExplorerMutations}
-              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
-              title={
-                disableExplorerMutations
-                  ? readOnlyMode
-                    ? t('leftpanel_view_only')
-                    : localQuestMode
-                      ? 'Upload is disabled in local project mode.'
-                    : t('leftpanel_view_only')
-                  : t('explorer_upload_files')
-              }
-              aria-label={t('explorer_upload_files')}
-            >
-              <Upload className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={() => {
-                if (isScopeView) return
-                setHideDotfiles((prev) => !prev)
-              }}
-              disabled={isScopeView}
-              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={
-                isScopeView
-                  ? 'Snapshot explorer always hides dotfiles.'
-                  : hideDotfiles
-                    ? t('explorer_show_dotfiles')
-                    : t('explorer_hide_dotfiles')
-              }
-              aria-label={
-                isScopeView
-                  ? 'Snapshot explorer always hides dotfiles.'
-                  : hideDotfiles
-                    ? t('explorer_show_dotfiles')
-                    : t('explorer_hide_dotfiles')
-              }
-            >
-              <DotfilesToggleIcon hidden={hideDotfilesEffective} className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={handleExplorerRefresh}
-              disabled={
-                disableExplorerActions ||
-                (isFilesView ? isLoading : false) ||
-                (!isFilesView && scopedExplorerLoading)
-              }
-              className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)] disabled:opacity-50"
-              title={
-                disableExplorerActions
-                  ? readOnlyMode
-                    ? t('leftpanel_view_only')
-                    : t('leftpanel_view_only')
-                  : t('explorer_refresh')
-              }
-              aria-label={t('explorer_refresh')}
-            >
-              <RefreshCw
-                className={cn('h-3.5 w-3.5 text-white', isFilesView && isLoading && 'animate-spin')}
-              />
-            </Button>
-          </div>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={handleFileSelect}
-          />
-        </div>
-
-        <div className="border-b border-[var(--border-dark)] px-4 py-3">
-          <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-muted-on-dark)]">
-            <span>{explorerModeLabel}</span>
-            {explorerSelectionLabel ? <span className="text-[var(--text-on-dark)]">{explorerSelectionLabel}</span> : null}
-          </div>
-          <div className="mt-2 space-y-2 text-[11px] leading-5 text-[var(--text-muted-on-dark)]">
-            <div className="truncate text-[13px] font-semibold text-[var(--text-on-dark)]">
-              {explorerPrimaryLine || explorerSelectionLabel || t('explorer_live_workspace')}
+        {!isArxivView ? (
+          <div className="flex items-center gap-3 border-b border-[var(--border-dark)] px-4 py-2">
+            <div className="ml-auto flex items-center gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={handleExplorerNewFile}
+                disabled={disableExplorerMutations}
+                className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
+                title={
+                  disableExplorerMutations
+                    ? readOnlyMode
+                      ? t('leftpanel_view_only')
+                      : localQuestMode
+                        ? 'Create files from the document editor in local project mode.'
+                        : t('leftpanel_view_only')
+                    : t('explorer_new_file')
+                }
+                aria-label={t('explorer_new_file')}
+              >
+                <FilePlus className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={handleExplorerNewFolder}
+                disabled={disableExplorerMutations}
+                className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
+                title={
+                  disableExplorerMutations
+                    ? readOnlyMode
+                      ? t('leftpanel_view_only')
+                      : localQuestMode
+                        ? 'Folder creation is not exposed in local project mode.'
+                        : t('leftpanel_view_only')
+                    : t('explorer_new_folder')
+                }
+                aria-label={t('explorer_new_folder')}
+              >
+                <FolderPlus className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={handleExplorerUpload}
+                disabled={disableExplorerMutations}
+                className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)]"
+                title={
+                  disableExplorerMutations
+                    ? readOnlyMode
+                      ? t('leftpanel_view_only')
+                      : localQuestMode
+                        ? 'Upload is disabled in local project mode.'
+                        : t('leftpanel_view_only')
+                    : t('explorer_upload_files')
+                }
+                aria-label={t('explorer_upload_files')}
+              >
+                <Upload className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  if (isScopeView) return
+                  setHideDotfiles((prev) => !prev)
+                }}
+                disabled={isScopeView}
+                className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)] disabled:cursor-not-allowed disabled:opacity-40"
+                title={
+                  isScopeView
+                    ? 'Snapshot explorer always hides dotfiles.'
+                    : hideDotfiles
+                      ? t('explorer_show_dotfiles')
+                      : t('explorer_hide_dotfiles')
+                }
+                aria-label={
+                  isScopeView
+                    ? 'Snapshot explorer always hides dotfiles.'
+                    : hideDotfiles
+                      ? t('explorer_show_dotfiles')
+                      : t('explorer_hide_dotfiles')
+                }
+              >
+                <DotfilesToggleIcon hidden={hideDotfilesEffective} className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={handleExplorerRefresh}
+                disabled={
+                  disableExplorerActions ||
+                  (isFilesView ? isLoading : false) ||
+                  (!isFilesView && scopedExplorerLoading)
+                }
+                className="h-7 w-7 rounded-md p-0 text-[var(--text-muted-on-dark)] hover:bg-white/[0.04] hover:text-[var(--text-on-dark)] disabled:opacity-50"
+                title={
+                  disableExplorerActions
+                    ? readOnlyMode
+                      ? t('leftpanel_view_only')
+                      : t('leftpanel_view_only')
+                    : t('explorer_refresh')
+                }
+                aria-label={t('explorer_refresh')}
+              >
+                <RefreshCw
+                  className={cn('h-3.5 w-3.5 text-white', isFilesView && isLoading && 'animate-spin')}
+                />
+              </Button>
             </div>
-            <div className="truncate">
-              {explorerSecondaryLine}
-            </div>
-            {hasDiffExplorer ? (
-              <div className="break-words text-[#d39b61]">
-                Diff-highlighted files open full patches in the center tab.
-              </div>
-            ) : null}
-            {hasExplorerSecondaryMeta ? (
-              <details className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                <summary className="cursor-pointer list-none text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--text-muted-on-dark)] [&::-webkit-details-marker]:hidden">
-                  More details
-                </summary>
-                <div className="mt-2 space-y-1 break-words text-[11px] leading-5 text-[var(--text-muted-on-dark)]">
-                  {explorerLocation.parentBranch ? (
-                    <div>
-                      <span className="mr-1 text-[var(--text-on-dark)]">Parent</span>
-                      {explorerLocation.parentBranch}
-                    </div>
-                  ) : null}
-                  {explorerLocation.revision ? (
-                    <div>
-                      <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_revision')}</span>
-                      {explorerLocation.revision}
-                    </div>
-                  ) : null}
-                  {explorerLocation.compareBase && explorerLocation.compareHead ? (
-                    <div>
-                      <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_compare')}</span>
-                      {explorerLocation.compareBase} {'->'} {explorerLocation.compareHead}
-                    </div>
-                  ) : null}
-                  <div>
-                    <span className="mr-1 text-[var(--text-on-dark)]">{t('explorer_scope')}</span>
-                    {explorerScopeLabel}
-                    {explorerLocation.fallbackToFullTree ? (
-                      <span className="ml-2 text-[10px] uppercase tracking-[0.12em] text-[#d39b61]">
-                        {t('explorer_scope_fallback')}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-              </details>
-            ) : null}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFileSelect}
+            />
           </div>
-        </div>
+        ) : null}
 
         <div ref={explorerBodyRef} className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          {isArxivView ? (
+            <ArxivPanel
+              projectId={projectId}
+              readOnly={readOnlyMode}
+              className="h-full min-h-0 border-t-0 px-4 py-3"
+              variant="full"
+            />
+          ) : null}
           <div
             className={cn(
               'flex-1 min-h-0 overflow-hidden',
@@ -2450,6 +2460,7 @@ function LeftPanel({
                 icon={<FolderOpen className="h-4 w-4" />}
                 label={t('quest_workspace_canvas')}
                 active={activeQuestWorkspaceView === 'canvas'}
+                dataOnboardingId="quest-workspace-tab-canvas"
                 onClick={() => {
                   openQuestWorkspaceTab('canvas')
                 }}
@@ -2458,6 +2469,7 @@ function LeftPanel({
                 icon={<FileText className="h-4 w-4" />}
                 label={t('quest_workspace_details')}
                 active={activeQuestWorkspaceView === 'details'}
+                dataOnboardingId="quest-workspace-tab-details"
                 onClick={() => {
                   openQuestWorkspaceTab('details')
                 }}
@@ -2466,6 +2478,7 @@ function LeftPanel({
                 icon={<BookOpen className="h-4 w-4" />}
                 label={t('quest_workspace_memory')}
                 active={activeQuestWorkspaceView === 'memory'}
+                dataOnboardingId="quest-workspace-tab-memory"
                 onClick={() => {
                   openQuestWorkspaceTab('memory')
                 }}
@@ -2474,6 +2487,7 @@ function LeftPanel({
                 icon={<Terminal className="h-4 w-4" />}
                 label={t('quest_workspace_terminal')}
                 active={activeQuestWorkspaceView === 'terminal'}
+                dataOnboardingId="quest-workspace-tab-terminal"
                 onClick={() => {
                   openQuestWorkspaceTab('terminal')
                 }}
@@ -2482,6 +2496,7 @@ function LeftPanel({
                 icon={<Settings className="h-4 w-4" />}
                 label={t('quest_workspace_settings')}
                 active={activeQuestWorkspaceView === 'settings'}
+                dataOnboardingId="quest-workspace-tab-settings"
                 onClick={() => {
                   openQuestWorkspaceTab('settings')
                 }}
@@ -2589,15 +2604,18 @@ function SidebarButton({
   label,
   onClick,
   active,
+  dataOnboardingId,
 }: {
   icon: React.ReactNode
   label: string
   onClick: () => void
   active?: boolean
+  dataOnboardingId?: string
 }) {
   return (
     <button
       onClick={onClick}
+      data-onboarding-id={dataOnboardingId}
       className={cn(
         'flex items-center gap-2 w-full px-2 py-1.5 rounded-lg',
         'text-[var(--text-muted-on-dark)] text-xs font-medium',
@@ -2828,7 +2846,17 @@ function CenterPanel({
                     tab.context.customData?.docKind
                   )
                 return (
-                  <div key={tab.id} className={cn(isActive ? 'contents' : 'hidden')}>
+                  <div
+                    key={tab.id}
+                    className={cn(isActive ? 'contents' : 'hidden')}
+                    data-onboarding-id={
+                      tab.pluginId === BUILTIN_PLUGINS.GIT_DIFF_VIEWER
+                        ? 'quest-diff-surface'
+                        : tab.context.type === 'file' || tab.context.type === 'notebook'
+                          ? 'quest-file-surface'
+                          : undefined
+                    }
+                  >
                     {shouldRedirectMarkdown ? (
                       <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
                         <div className="text-sm">{t('content_switching_markdown')}</div>
@@ -3096,14 +3124,22 @@ export function WorkspaceLayout({
   projectId,
   projectName,
   projectSource = null,
+  demoScenarioId = null,
   readOnly = false,
 }: WorkspaceLayoutProps) {
   const { t } = useI18n('workspace')
   const { t: tCommon } = useI18n('common')
   const router = useRouter()
   const readOnlyMode = Boolean(readOnly)
+  const isDemoProject = projectSource === 'demo'
   const isLocalQuestProject = projectSource === 'quest'
+  const isQuestLikeProject = isLocalQuestProject || isDemoProject
   const questWorkspace = useQuestWorkspace(isLocalQuestProject ? projectId : null)
+  const tutorialLanguage = useOnboardingStore((state) => state.language)
+  const demoLocale = tutorialLanguage === 'zh' ? 'zh' : 'en'
+  const demoScenario =
+    isDemoProject && demoScenarioId ? tutorialDemoScenarios[demoScenarioId as keyof typeof tutorialDemoScenarios] ?? null : null
+  const demoWorkspace = useDemoQuestWorkspace(projectId, demoScenario, demoLocale)
   const [isMobileQuestShell, setIsMobileQuestShell] = React.useState(false)
   const workspaceProjectTitle = projectName ?? (projectId ? `Project ${projectId}` : 'Project')
   const { addToast } = useToast()
@@ -3116,7 +3152,7 @@ export function WorkspaceLayout({
   const isLabContextActive = Boolean(activeLabContextSessionId)
   const copilotSurfaceStorageKey = `ds:project:${projectId}:copilot-surface`
   const defaultCopilotSurface: CopilotSurfaceMode =
-    isLocalQuestProject
+    isQuestLikeProject
       ? 'agent'
       : (activeTab?.pluginId === BUILTIN_PLUGINS.LAB && tabMatchesProject(activeTab, projectId)) ||
           isLabContextActive
@@ -3124,13 +3160,13 @@ export function WorkspaceLayout({
       : 'agent'
   const [copilotSurface, setCopilotSurface] = React.useState<CopilotSurfaceMode>(() => {
     if (typeof window === 'undefined') return defaultCopilotSurface
-    if (isLocalQuestProject) return 'agent'
+    if (isQuestLikeProject) return 'agent'
     const stored = window.localStorage.getItem(copilotSurfaceStorageKey)
     if (stored === 'lab' || stored === 'agent') return stored
     return defaultCopilotSurface
   })
   const isLabTab = copilotSurface === 'lab'
-  const labDataEnabled = Boolean(projectId && isLabTab && !isLocalQuestProject)
+  const labDataEnabled = Boolean(projectId && isLabTab && !isQuestLikeProject)
   const labStaleTime = 30000
   const cliServers = useCliStore((state) => state.servers)
   const storedCliServerId = useChatSessionStore((state) =>
@@ -3144,7 +3180,7 @@ export function WorkspaceLayout({
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
-    if (isLocalQuestProject) {
+    if (isQuestLikeProject) {
       setCopilotSurface('agent')
       return
     }
@@ -3154,13 +3190,13 @@ export function WorkspaceLayout({
       return
     }
     setCopilotSurface(defaultCopilotSurface)
-  }, [copilotSurfaceStorageKey, defaultCopilotSurface, isLocalQuestProject])
+  }, [copilotSurfaceStorageKey, defaultCopilotSurface, isQuestLikeProject])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
-    if (isLocalQuestProject) return
+    if (isQuestLikeProject) return
     window.localStorage.setItem(copilotSurfaceStorageKey, copilotSurface)
-  }, [copilotSurface, copilotSurfaceStorageKey, isLocalQuestProject])
+  }, [copilotSurface, copilotSurfaceStorageKey, isQuestLikeProject])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
@@ -3180,19 +3216,19 @@ export function WorkspaceLayout({
   const templatesQuery = useQuery({
     queryKey: ['lab-templates', projectId],
     queryFn: () => listLabTemplates(projectId),
-    enabled: labDataEnabled && !isLocalQuestProject,
+    enabled: labDataEnabled && !isQuestLikeProject,
     staleTime: labStaleTime,
   })
   const agentsQuery = useQuery({
     queryKey: ['lab-agents', projectId],
     queryFn: () => listLabAgents(projectId, { silent: true }),
-    enabled: labDataEnabled && !isLocalQuestProject,
+    enabled: labDataEnabled && !isQuestLikeProject,
     staleTime: labStaleTime,
   })
   const questsQuery = useQuery({
     queryKey: ['lab-quests', projectId],
     queryFn: () => listLabQuests(projectId, { silent: true }),
-    enabled: labDataEnabled && !isLocalQuestProject,
+    enabled: labDataEnabled && !isQuestLikeProject,
     staleTime: labStaleTime,
   })
 
@@ -3220,7 +3256,7 @@ export function WorkspaceLayout({
   const homeStorageKey = `ds:project:${projectId}:home-mode`
   const [homeMode, setHomeMode] = React.useState(() => {
     if (typeof window === 'undefined') return false
-    if (projectSource === 'quest') return false
+    if (isQuestLikeProject) return false
     return window.localStorage.getItem(homeStorageKey) === '1'
   })
   const [homeVisible, setHomeVisible] = React.useState(homeMode)
@@ -3369,7 +3405,7 @@ export function WorkspaceLayout({
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
-    if (isLocalQuestProject) {
+    if (isQuestLikeProject) {
       homeRestoreRef.current = false
       setHomeVisible(false)
       setHomeMode(false)
@@ -3382,7 +3418,7 @@ export function WorkspaceLayout({
     if (shouldShowHome) {
       setHomeVisible(true)
     }
-  }, [homeStorageKey, isLocalQuestProject])
+  }, [homeStorageKey, isQuestLikeProject])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
@@ -3837,26 +3873,7 @@ export function WorkspaceLayout({
         tabs = nextState.tabs
         hasProjectTabs = tabs.some((t) => tabMatchesProject(t, projectId))
       }
-      const tabsWithoutAutoFigure = tabs.filter(
-        (tab) => !(tab.pluginId === BUILTIN_PLUGINS.AUTOFIGURE && tabMatchesProject(tab, projectId))
-      )
-      if (tabsWithoutAutoFigure.length !== tabs.length) {
-        const currentActiveTabId = useTabsStore.getState().activeTabId
-        const nextActiveTabId = tabsWithoutAutoFigure.some((tab) => tab.id === currentActiveTabId)
-          ? currentActiveTabId
-          : tabsWithoutAutoFigure
-              .filter((tab) => tabMatchesProject(tab, projectId))
-              .sort((a, b) => (b.lastAccessedAt || 0) - (a.lastAccessedAt || 0))[0]?.id ??
-            tabsWithoutAutoFigure[tabsWithoutAutoFigure.length - 1]?.id ??
-            null
-        useTabsStore.setState({
-          tabs: tabsWithoutAutoFigure,
-          activeTabId: nextActiveTabId,
-        })
-        tabs = tabsWithoutAutoFigure
-        hasProjectTabs = tabs.some((t) => tabMatchesProject(t, projectId))
-      }
-      if (isLocalQuestProject) {
+      if (isQuestLikeProject) {
         const visibleQuestTabs = tabs.filter(
           (t) => tabMatchesProject(t, projectId) && isQuestFriendlyTab(t, projectId)
         )
@@ -3931,7 +3948,7 @@ export function WorkspaceLayout({
     }
 
     ensureDefaultWorkspace()
-  }, [isLocalQuestProject, openTab, projectId, readOnlyMode, resetTabs, t, tabsHydrated])
+  }, [isQuestLikeProject, openTab, projectId, readOnlyMode, resetTabs, t, tabsHydrated])
 
   const startResize = (direction: 'left') => (e: React.MouseEvent) => {
     e.preventDefault()
@@ -4135,7 +4152,7 @@ export function WorkspaceLayout({
           onToggleCollapse={toggleNavbarCollapsed}
           onExitHome={exitHome}
           onTabSelect={handleTabSelect}
-          localQuestMode={isLocalQuestProject}
+          localQuestMode={isQuestLikeProject}
         />
       </div>
 
@@ -4248,7 +4265,8 @@ export function WorkspaceLayout({
               onEnterHome={enterHome}
               onEnterLab={enterLab}
               onExitHome={exitHome}
-              localQuestMode={isLocalQuestProject}
+              localQuestMode={isQuestLikeProject}
+              demoMode={isDemoProject}
             />
             <div className="resizer" onMouseDown={startResize('left')} />
           </>
@@ -4265,8 +4283,8 @@ export function WorkspaceLayout({
             <CenterPanel
               projectId={projectId}
               readOnly={readOnlyMode}
-              localQuestMode={isLocalQuestProject}
-              workspace={questWorkspace}
+              localQuestMode={isQuestLikeProject}
+              workspace={isDemoProject ? (demoWorkspace as any) : questWorkspace}
               safePaddingLeft={
                 applyCopilotPadding && copilotDock.state.side === 'left'
                   ? copilotDock.state.width + COPILOT_DOCK_DEFAULTS.gap + COPILOT_DOCK_DEFAULTS.edgeInset
@@ -4308,7 +4326,7 @@ export function WorkspaceLayout({
               prefill={copilotPrefill}
               visible={showCopilotPanel}
               headerContent={
-                isLabTab && !isLocalQuestProject ? (
+                isLabTab && !isQuestLikeProject ? (
                   <LabCopilotHeader
                     disabled={readOnlyMode}
                     agents={agents}
@@ -4320,13 +4338,13 @@ export function WorkspaceLayout({
                 ) : undefined
               }
               bodyContent={
-                isLocalQuestProject ? (
+                isQuestLikeProject ? (
                   <QuestCopilotDockPanel
                     questId={projectId}
                     title={workspaceProjectTitle}
                     readOnly={readOnlyMode}
                     prefill={copilotPrefill}
-                    workspace={questWorkspace}
+                    workspace={isDemoProject ? (demoWorkspace as any) : questWorkspace}
                   />
                 ) : isLabTab ? (
                   <LabCopilotPanel
@@ -4343,9 +4361,9 @@ export function WorkspaceLayout({
                   />
                 ) : undefined
               }
-              hideNewChat={isLabTab || isLocalQuestProject}
-              hideHistory={isLabTab || isLocalQuestProject}
-              hideFixWithAi={isLocalQuestProject}
+              hideNewChat={isLabTab || isQuestLikeProject}
+              hideHistory={isLabTab || isQuestLikeProject}
+              hideFixWithAi={isQuestLikeProject}
               onActionsChange={(actions) => {
                 copilotActionsRef.current = actions
               }}

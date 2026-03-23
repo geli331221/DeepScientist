@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from ..arxiv_library import ArxivLibraryService
 from ..bridges import register_builtin_connector_bridges
 from ..channels import get_channel_factory, register_builtin_channels
 from ..config import ConfigManager
@@ -38,7 +39,7 @@ from ..shared import (
 )
 from ..quest import QuestService
 from ..memory.frontmatter import dump_markdown_document, load_markdown_document
-from .arxiv import read_arxiv_content
+from .arxiv import fetch_arxiv_metadata, read_arxiv_content
 from .guidance import build_guidance_for_record, guidance_summary
 from .metrics import (
     baseline_metric_lines,
@@ -48,6 +49,7 @@ from .metrics import (
     compute_progress_eval,
     MetricContractValidationError,
     normalize_metric_contract,
+    normalize_metric_direction,
     normalize_metric_rows,
     normalize_metrics_summary,
     selected_baseline_metrics,
@@ -95,6 +97,77 @@ class ArtifactService:
         self.home = home
         self.baselines = BaselineRegistry(home)
         self.quest_service = QuestService(home)
+        self.arxiv_library = ArxivLibraryService()
+
+    @staticmethod
+    def _notification_text(value: object) -> str | None:
+        text = str(value or "")
+        if not text.strip():
+            return None
+        normalized_lines: list[str] = []
+        for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            cleaned = re.sub(r"[ \t]+", " ", raw_line).strip()
+            if not cleaned:
+                if normalized_lines and normalized_lines[-1] != "":
+                    normalized_lines.append("")
+                continue
+            normalized_lines.append(cleaned)
+        while normalized_lines and normalized_lines[-1] == "":
+            normalized_lines.pop()
+        rendered = "\n".join(normalized_lines).strip()
+        return rendered or None
+
+    @classmethod
+    def _notification_block(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            lines: list[str] = []
+            for key, item in value.items():
+                label = cls._format_route_label(key) or str(key).strip()
+                block = cls._notification_block(item)
+                if not label or not block:
+                    continue
+                block_lines = block.splitlines()
+                if len(block_lines) == 1:
+                    lines.append(f"- {label}: {block_lines[0]}")
+                    continue
+                lines.append(f"- {label}:")
+                lines.extend(f"  {line}" if line else "" for line in block_lines)
+            return "\n".join(lines).strip() or None
+        if isinstance(value, (list, tuple, set)):
+            lines = []
+            for item in value:
+                block = cls._notification_block(item)
+                if not block:
+                    continue
+                block_lines = block.splitlines()
+                if not block_lines:
+                    continue
+                lines.append(f"- {block_lines[0]}")
+                lines.extend(f"  {line}" if line else "" for line in block_lines[1:])
+            return "\n".join(lines).strip() or None
+        return cls._notification_text(value)
+
+    @classmethod
+    def _append_notification_section(cls, lines: list[str], label: str, value: object) -> None:
+        block = cls._notification_block(value)
+        if not block:
+            return
+        lines.extend(["", f"{label}:", block])
+
+    @staticmethod
+    def _append_notification_file_section(lines: list[str], entries: list[tuple[str, str | None]]) -> None:
+        normalized = [
+            (label, str(path).strip())
+            for label, path in entries
+            if str(path or "").strip()
+        ]
+        if not normalized:
+            return
+        lines.extend(["", "Files:"])
+        for label, path in normalized:
+            lines.append(f"- {label}: `{path}`")
 
     def _normalize_evaluation_summary(self, payload: dict[str, Any] | None) -> dict[str, str] | None:
         if not isinstance(payload, dict):
@@ -131,6 +204,302 @@ class ArtifactService:
         lines = [f"- {label}: {normalized[key]}" for key, label in labels if normalized.get(key)]
         return lines or ["- Not recorded."]
 
+    @staticmethod
+    def _format_route_label(value: object) -> str | None:
+        normalized = str(value or "").strip().replace("_", " ").replace("-", " ")
+        if not normalized:
+            return None
+        return " ".join(part.capitalize() for part in normalized.split())
+
+    def _format_foundation_label(self, foundation_ref: dict[str, Any] | None, *, fallback: str | None = None) -> str:
+        payload = dict(foundation_ref or {})
+        label = self._notification_text(payload.get("label"))
+        if label:
+            return label
+        kind = self._notification_text(payload.get("kind"))
+        ref = self._notification_text(payload.get("ref"))
+        branch = self._notification_text(payload.get("branch"))
+        if kind and ref:
+            return f"{kind} {ref}"
+        if branch:
+            return branch
+        return fallback or "current head"
+
+    def _build_idea_interaction_message(
+        self,
+        *,
+        action: str,
+        idea_id: str,
+        title: str | None,
+        problem: str | None,
+        hypothesis: str | None,
+        mechanism: str | None,
+        foundation_label: str | None,
+        branch_name: str,
+        next_target: str | None,
+        idea_md_rel_path: str | None,
+        draft_md_rel_path: str | None,
+    ) -> str:
+        lead = "is now active" if action == "create" else "was revised"
+        lines = [f"Idea `{idea_id}` {lead} on branch `{branch_name}`."]
+        self._append_notification_section(lines, "Title", title)
+        self._append_notification_section(lines, "Problem", problem)
+        self._append_notification_section(lines, "Hypothesis", hypothesis)
+        self._append_notification_section(lines, "Mechanism", mechanism)
+        if foundation_label:
+            self._append_notification_section(lines, "Foundation", foundation_label)
+        if next_target:
+            self._append_notification_section(lines, "Next route", self._format_route_label(next_target) or next_target)
+        self._append_notification_file_section(
+            lines,
+            [
+                ("Idea doc", idea_md_rel_path),
+                ("Draft", draft_md_rel_path),
+            ],
+        )
+        return "\n".join(lines)
+
+    def _build_main_experiment_interaction_message(
+        self,
+        *,
+        run_id: str,
+        branch_name: str,
+        verdict: str,
+        primary_metric_id: str | None,
+        primary_value: object,
+        primary_baseline: object,
+        primary_delta: object,
+        decimals: int | None,
+        conclusion: str | None,
+        evaluation_summary: dict[str, str] | None,
+        breakthrough_level: str | None,
+        recommended_next_route: str | None,
+        run_md_rel_path: str | None,
+        result_json_rel_path: str | None,
+    ) -> str:
+        lines = [f"Main experiment `{run_id}` finished on branch `{branch_name}`."]
+        outcome_lines: list[str] = []
+        if primary_metric_id and primary_value is not None:
+            metric_text = f"{primary_metric_id}={self._format_metric_value(primary_value, decimals)}"
+            if primary_baseline is not None and primary_delta is not None:
+                metric_text += (
+                    f", baseline={self._format_metric_value(primary_baseline, decimals)}, "
+                    f"delta={self._format_metric_value(primary_delta, decimals)}"
+                )
+            outcome_lines.append(f"- Metric: {metric_text}")
+        outcome_lines.append(f"- Verdict: {self._format_route_label(verdict) or verdict}")
+        if self._notification_text(breakthrough_level):
+            outcome_lines.append(f"- Breakthrough level: {self._notification_text(breakthrough_level)}")
+        if recommended_next_route:
+            outcome_lines.append(
+                f"- Recommended next route: {self._format_route_label(recommended_next_route) or recommended_next_route}"
+            )
+        if outcome_lines:
+            lines.extend(["", "Outcome:", *outcome_lines])
+        self._append_notification_section(
+            lines,
+            "Conclusion",
+            self._notification_text(conclusion) or (evaluation_summary or {}).get("takeaway"),
+        )
+        normalized_evaluation_summary = self._normalize_evaluation_summary(evaluation_summary)
+        if normalized_evaluation_summary:
+            lines.extend(["", "Evaluation summary:", *self._evaluation_summary_markdown_lines(normalized_evaluation_summary)])
+        self._append_notification_file_section(
+            lines,
+            [
+                ("Run log", run_md_rel_path),
+                ("Result", result_json_rel_path),
+            ],
+        )
+        return "\n".join(lines)
+
+    def _build_outline_interaction_message(
+        self,
+        *,
+        action: str,
+        outline_id: str,
+        title: str | None,
+        selected_reason: str | None,
+        story: str | None,
+        research_questions: object,
+        experimental_designs: object,
+        selected_outline_rel_path: str | None,
+        outline_selection_rel_path: str | None,
+        revised_outline_rel_path: str | None = None,
+    ) -> str:
+        verb = "selected" if action == "select" else "revised"
+        lines = [f"Paper outline `{outline_id}` was {verb} and promoted into the writing stage."]
+        self._append_notification_section(lines, "Title", title)
+        self._append_notification_section(lines, "Reason", selected_reason)
+        self._append_notification_section(lines, "Story", story)
+        self._append_notification_section(lines, "Research questions", research_questions)
+        self._append_notification_section(lines, "Experimental designs", experimental_designs)
+        self._append_notification_section(
+            lines,
+            "Next route",
+            "Continue writing on the paper branch, or launch outline-bound analysis if evidence is still missing.",
+        )
+        self._append_notification_file_section(
+            lines,
+            [
+                ("Selected outline", selected_outline_rel_path),
+                ("Selection note", outline_selection_rel_path),
+                ("Revision record", revised_outline_rel_path),
+            ],
+        )
+        return "\n".join(lines)
+
+    def _build_analysis_campaign_interaction_message(
+        self,
+        *,
+        campaign_id: str,
+        goal: str | None,
+        parent_branch: str,
+        selected_outline_ref: str | None,
+        first_slice: dict[str, Any],
+        todo_manifest_rel_path: str | None,
+    ) -> str:
+        lines = [f"Analysis campaign `{campaign_id}` is ready from parent branch `{parent_branch}`."]
+        self._append_notification_section(lines, "Goal", goal)
+        if selected_outline_ref:
+            self._append_notification_section(lines, "Selected outline", f"`{selected_outline_ref}`")
+        next_slice_lines = [
+            f"- Slice: `{first_slice.get('slice_id')}`",
+            f"- Branch: `{first_slice.get('branch')}`",
+        ]
+        if self._notification_text(first_slice.get("title")):
+            next_slice_lines.append(f"- Focus: {self._notification_text(first_slice.get('title'))}")
+        lines.extend(["", "Next slice:", *next_slice_lines])
+        requirement = self._notification_text(first_slice.get("must_not_simplify") or first_slice.get("goal"))
+        if requirement:
+            self._append_notification_section(lines, "Core requirement", requirement)
+        self._append_notification_file_section(lines, [("Todo manifest", todo_manifest_rel_path)])
+        return "\n".join(lines)
+
+    def _build_analysis_slice_interaction_message(
+        self,
+        *,
+        campaign_id: str,
+        slice_id: str,
+        evaluation_summary: dict[str, str] | None,
+        claim_impact: str | None,
+        next_slice: dict[str, Any],
+        mirror_rel_path: str | None,
+    ) -> str:
+        lines = [f"Analysis slice `{slice_id}` from campaign `{campaign_id}` is complete."]
+        normalized_evaluation_summary = self._normalize_evaluation_summary(evaluation_summary)
+        if normalized_evaluation_summary:
+            lines.extend(["", "Evaluation summary:", *self._evaluation_summary_markdown_lines(normalized_evaluation_summary)])
+        self._append_notification_section(lines, "Claim impact", claim_impact)
+        lines.extend(
+            [
+                "",
+                "Next slice:",
+                f"- Slice: `{next_slice.get('slice_id')}`",
+                f"- Branch: `{next_slice.get('branch')}`",
+            ]
+        )
+        requirement = self._notification_text(next_slice.get("must_not_simplify") or next_slice.get("goal"))
+        if requirement:
+            self._append_notification_section(lines, "Core requirement", requirement)
+        self._append_notification_file_section(lines, [("Parent mirror", mirror_rel_path)])
+        return "\n".join(lines)
+
+    def _build_analysis_complete_interaction_message(
+        self,
+        *,
+        campaign_id: str,
+        completed_slices: list[dict[str, Any]],
+        summary_rel_path: str | None,
+        writing_branch: str | None,
+        writing_worktree_rel_path: str | None,
+    ) -> str:
+        lines = [f"Analysis campaign `{campaign_id}` is complete."]
+        overview_lines = [f"- Completed slices: {len(completed_slices)}"]
+        if writing_branch:
+            overview_lines.append(f"- Next route: writing is active on branch `{writing_branch}`")
+            if writing_worktree_rel_path:
+                overview_lines.append(f"- Writing workspace: `{writing_worktree_rel_path}`")
+        else:
+            overview_lines.append("- Next route: make the next durable decision from the merged analysis evidence.")
+        lines.extend(["", "Overview:", *overview_lines])
+        completed_slice_lines: list[str] = []
+        for item in completed_slices:
+            slice_id = str(item.get("slice_id") or "").strip() or "unknown"
+            title = self._notification_text(item.get("title"))
+            lead = f"- `{slice_id}`"
+            if title:
+                lead += f": {title}"
+            completed_slice_lines.append(lead)
+            takeaway = self._notification_text(
+                ((item.get("evaluation_summary") or {}) if isinstance(item.get("evaluation_summary"), dict) else {}).get(
+                    "takeaway"
+                )
+            )
+            if takeaway:
+                completed_slice_lines.append(f"  Takeaway: {takeaway}")
+            claim_impact = self._notification_text(item.get("claim_impact"))
+            if claim_impact:
+                completed_slice_lines.append(f"  Claim impact: {claim_impact}")
+        if completed_slice_lines:
+            lines.extend(["", "Completed slices:", *completed_slice_lines])
+        self._append_notification_file_section(lines, [("Summary", summary_rel_path)])
+        return "\n".join(lines)
+
+    def _build_paper_bundle_interaction_message(
+        self,
+        *,
+        title: str | None,
+        summary: str | None,
+        paper_branch: str | None,
+        source_branch: str | None,
+        source_run_id: str | None,
+        selected_outline_ref: str | None,
+        manifest_rel_path: str | None,
+        draft_rel_path: str | None,
+        writing_plan_rel_path: str | None,
+        references_rel_path: str | None,
+        claim_evidence_map_rel_path: str | None,
+        compile_report_rel_path: str | None,
+        pdf_rel_path: str | None,
+        latex_root_rel_path: str | None,
+        baseline_inventory_rel_path: str | None,
+        open_source_manifest_rel_path: str | None,
+    ) -> str:
+        bundle_label = self._notification_text(title) or "paper"
+        lines = [f"Paper bundle `{bundle_label}` is ready on branch `{paper_branch or 'paper'}`."]
+        overview_lines: list[str] = []
+        if source_branch:
+            overview_lines.append(f"- Source branch: `{source_branch}`")
+        if source_run_id:
+            overview_lines.append(f"- Source run: `{source_run_id}`")
+        if selected_outline_ref:
+            overview_lines.append(f"- Selected outline: `{selected_outline_ref}`")
+        if overview_lines:
+            lines.extend(["", "Overview:", *overview_lines])
+        self._append_notification_section(lines, "Summary", summary)
+        self._append_notification_file_section(
+            lines,
+            [
+                ("Bundle manifest", manifest_rel_path),
+                ("Draft", draft_rel_path),
+                ("Writing plan", writing_plan_rel_path),
+                ("References", references_rel_path),
+                ("Claim-evidence map", claim_evidence_map_rel_path),
+                ("Compile report", compile_report_rel_path),
+                ("PDF", pdf_rel_path),
+                ("LaTeX root", latex_root_rel_path),
+                ("Baseline inventory", baseline_inventory_rel_path),
+                ("Open-source manifest", open_source_manifest_rel_path),
+            ],
+        )
+        self._append_notification_section(
+            lines,
+            "Next route",
+            "Finalize the paper package, review the bundle artifacts, and publish or close the quest when ready.",
+        )
+        return "\n".join(lines)
+
     def _load_metric_contract_payload(self, quest_root: Path, metric_contract_json_rel_path: str | None) -> dict[str, Any] | None:
         rel_path = str(metric_contract_json_rel_path or "").strip()
         if not rel_path:
@@ -143,6 +512,173 @@ class ArtifactService:
             return None
         payload = read_json(resolved_path, {})
         return payload if isinstance(payload, dict) and payload else None
+
+    def _normalize_metric_directions(self, metric_directions: object) -> dict[str, str]:
+        if not isinstance(metric_directions, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for raw_metric_id, raw_direction in metric_directions.items():
+            metric_id = str(raw_metric_id or "").strip()
+            if not metric_id:
+                continue
+            normalized[metric_id] = normalize_metric_direction(raw_direction, metric_id=metric_id)
+        return normalized
+
+    def _apply_metric_directions_to_contract(
+        self,
+        *,
+        metric_contract: object,
+        metric_directions: object,
+        baseline_id: str | None = None,
+        metrics_summary: object = None,
+        metric_rows: object = None,
+        primary_metric: object = None,
+        baseline_variants: object = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        normalized_contract = normalize_metric_contract(
+            metric_contract,
+            baseline_id=baseline_id,
+            metrics_summary=metrics_summary,
+            metric_rows=metric_rows,
+            primary_metric=primary_metric,
+            baseline_variants=baseline_variants,
+        )
+        normalized_primary_metric = dict(primary_metric or {}) if isinstance(primary_metric, dict) else None
+        overrides = self._normalize_metric_directions(metric_directions)
+        if not overrides:
+            return normalized_contract, normalized_primary_metric
+
+        metrics_by_id: dict[str, dict[str, Any]] = {}
+        ordered_metric_ids: list[str] = []
+        for raw_metric in normalized_contract.get("metrics", []):
+            if not isinstance(raw_metric, dict):
+                continue
+            metric_id = str(raw_metric.get("metric_id") or "").strip()
+            if not metric_id:
+                continue
+            metrics_by_id[metric_id] = dict(raw_metric)
+            ordered_metric_ids.append(metric_id)
+        for metric_id, direction in overrides.items():
+            current = metrics_by_id.get(metric_id)
+            if current is None:
+                current = {
+                    "metric_id": metric_id,
+                    "label": metric_id,
+                    "direction": direction,
+                    "unit": None,
+                    "decimals": None,
+                    "chart_group": "default",
+                }
+                ordered_metric_ids.append(metric_id)
+            else:
+                current = {
+                    **current,
+                    "direction": direction,
+                }
+            metrics_by_id[metric_id] = current
+
+        primary_metric_id = str(
+            (normalized_primary_metric or {}).get("metric_id")
+            or (normalized_primary_metric or {}).get("name")
+            or (normalized_primary_metric or {}).get("id")
+            or normalized_contract.get("primary_metric_id")
+            or ""
+        ).strip()
+        if normalized_primary_metric and primary_metric_id in overrides:
+            normalized_primary_metric = {
+                **normalized_primary_metric,
+                "direction": overrides[primary_metric_id],
+            }
+
+        return {
+            **normalized_contract,
+            "metrics": [metrics_by_id[metric_id] for metric_id in ordered_metric_ids if metric_id in metrics_by_id],
+        }, normalized_primary_metric
+
+    def _merge_run_metric_contract(
+        self,
+        *,
+        baseline_metric_contract: object,
+        baseline_primary_metric: object,
+        baseline_variants: object,
+        run_metric_contract: object,
+        metrics_summary: object,
+        metric_rows: object,
+        baseline_id: str | None = None,
+    ) -> dict[str, Any]:
+        baseline_contract = normalize_metric_contract(
+            baseline_metric_contract,
+            baseline_id=baseline_id,
+            metrics_summary=metrics_summary,
+            metric_rows=metric_rows,
+            primary_metric=baseline_primary_metric,
+            baseline_variants=baseline_variants,
+        )
+        if not isinstance(run_metric_contract, dict) or not run_metric_contract:
+            return baseline_contract
+
+        overlay_contract = normalize_metric_contract(
+            run_metric_contract,
+            baseline_id=baseline_id,
+            metrics_summary=metrics_summary,
+            metric_rows=metric_rows,
+            primary_metric=baseline_contract.get("primary_metric_id"),
+        )
+        overlay_metrics: dict[str, dict[str, Any]] = {}
+        for raw_metric in overlay_contract.get("metrics", []):
+            if not isinstance(raw_metric, dict):
+                continue
+            metric_id = str(raw_metric.get("metric_id") or "").strip()
+            if metric_id:
+                overlay_metrics[metric_id] = raw_metric
+
+        merged_metrics: list[dict[str, Any]] = []
+        seen_metric_ids: set[str] = set()
+        for raw_metric in baseline_contract.get("metrics", []):
+            if not isinstance(raw_metric, dict):
+                continue
+            metric_id = str(raw_metric.get("metric_id") or "").strip()
+            if not metric_id:
+                continue
+            patch = overlay_metrics.get(metric_id) or {}
+            merged = dict(raw_metric)
+            for field in (
+                "label",
+                "unit",
+                "decimals",
+                "chart_group",
+                "description",
+                "derivation",
+                "source_ref",
+                "required",
+                "origin_path",
+            ):
+                value = patch.get(field)
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                merged[field] = value
+            merged_metrics.append(merged)
+            seen_metric_ids.add(metric_id)
+
+        for metric_id, raw_metric in overlay_metrics.items():
+            if metric_id in seen_metric_ids:
+                continue
+            merged_metrics.append(dict(raw_metric))
+
+        merged_contract = {
+            **baseline_contract,
+            "metrics": merged_metrics,
+        }
+        if not merged_contract.get("evaluation_protocol") and overlay_contract.get("evaluation_protocol") is not None:
+            merged_contract["evaluation_protocol"] = overlay_contract.get("evaluation_protocol")
+        for key, value in overlay_contract.items():
+            if key in {"contract_id", "primary_metric_id", "metrics", "evaluation_protocol"}:
+                continue
+            if key not in merged_contract and value is not None:
+                merged_contract[key] = value
+        return merged_contract
 
     def _workspace_root_for(self, quest_root: Path, workspace_root: Path | None = None) -> Path:
         if workspace_root is not None:
@@ -999,6 +1535,9 @@ class ArtifactService:
                     continue
                 seen_paths.add(key)
                 payload = read_yaml(path, {})
+                baseline_id = str(payload.get("source_baseline_id") or "").strip() if isinstance(payload, dict) else ""
+                if baseline_id and self.baselines.is_deleted(baseline_id):
+                    continue
                 if isinstance(payload, dict) and payload:
                     attachments.append(payload)
         if not attachments:
@@ -1010,6 +1549,48 @@ class ArtifactService:
                 str(item.get("source_baseline_id") or ""),
             ),
         )
+
+    def _baseline_workspace_roots(self, quest_root: Path) -> list[Path]:
+        roots: list[Path] = [quest_root]
+        research_state = read_json(quest_root / ".ds" / "research_state.json", {})
+        if isinstance(research_state, dict):
+            for key in (
+                "research_head_worktree_root",
+                "current_workspace_root",
+                "analysis_parent_worktree_root",
+                "paper_parent_worktree_root",
+            ):
+                raw = str(research_state.get(key) or "").strip()
+                if raw:
+                    roots.append(Path(raw))
+        worktrees_root = quest_root / ".ds" / "worktrees"
+        if worktrees_root.exists():
+            roots.extend(path for path in sorted(worktrees_root.iterdir()) if path.is_dir())
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = str(root.resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(root)
+        return deduped
+
+    @staticmethod
+    def _remove_baseline_materialization(root: Path, baseline_id: str) -> list[str]:
+        deleted_paths: list[str] = []
+        for candidate in (
+            root / "baselines" / "imported" / baseline_id,
+            root / "baselines" / "local" / baseline_id,
+        ):
+            if not candidate.exists():
+                continue
+            if candidate.is_dir():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+            deleted_paths.append(str(candidate))
+        return deleted_paths
 
     def _resolve_baseline_path(
         self,
@@ -1867,8 +2448,19 @@ class ArtifactService:
     ) -> tuple[str, Path, str | None]:
         current_root_raw = str(state.get("current_workspace_root") or "").strip()
         head_root_raw = str(state.get("research_head_worktree_root") or "").strip()
+        paper_parent_root_raw = str(state.get("paper_parent_worktree_root") or "").strip()
+        current_branch_raw = str(state.get("current_workspace_branch") or "").strip()
+        research_head_branch_raw = str(state.get("research_head_branch") or "").strip()
+        paper_parent_branch_raw = str(state.get("paper_parent_branch") or "").strip()
+        workspace_mode = str(state.get("workspace_mode") or "").strip().lower()
+        prefer_paper_parent = workspace_mode == "paper" or self._branch_kind_from_name(current_branch_raw) == "paper"
         parent_worktree_root: Path | None = None
-        for raw in (current_root_raw, head_root_raw):
+        root_candidates = (
+            (paper_parent_root_raw, head_root_raw, current_root_raw)
+            if prefer_paper_parent
+            else (current_root_raw, head_root_raw, paper_parent_root_raw)
+        )
+        for raw in root_candidates:
             if not raw:
                 continue
             candidate = Path(raw)
@@ -1879,10 +2471,21 @@ class ArtifactService:
             parent_worktree_root = self._workspace_root_for(quest_root)
 
         parent_branch = (
-            str(state.get("current_workspace_branch") or "").strip()
-            or str(state.get("research_head_branch") or "").strip()
-            or current_branch(parent_worktree_root)
-            or current_branch(self._workspace_root_for(quest_root))
+            (
+                paper_parent_branch_raw
+                or research_head_branch_raw
+                or current_branch_raw
+                or current_branch(parent_worktree_root)
+                or current_branch(self._workspace_root_for(quest_root))
+            )
+            if prefer_paper_parent
+            else (
+                current_branch_raw
+                or research_head_branch_raw
+                or paper_parent_branch_raw
+                or current_branch(parent_worktree_root)
+                or current_branch(self._workspace_root_for(quest_root))
+            )
         )
         parent_branch = str(parent_branch or "").strip()
         if not parent_branch:
@@ -2278,32 +2881,82 @@ class ArtifactService:
         }
 
     def list_paper_outlines(self, quest_root: Path) -> dict[str, Any]:
-        selected_outline = read_json(self._paper_selected_outline_path(quest_root), {})
+        selected_outline_path = self._paper_selected_outline_path(quest_root)
+        selected_outline = read_json(selected_outline_path, {})
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
-        outlines: list[dict[str, Any]] = []
-        for status, root in (
-            ("candidate", self._paper_outline_candidates_root(quest_root)),
-            ("revised", self._paper_outline_revisions_root(quest_root)),
-        ):
-            for path in sorted(root.glob("outline-*.json")):
-                record = read_json(path, {})
-                if not isinstance(record, dict) or not record:
+        if not selected_outline:
+            fallback_selected_outline_path = quest_root / "paper" / "selected_outline.json"
+            fallback_selected_outline = read_json(fallback_selected_outline_path, {})
+            if isinstance(fallback_selected_outline, dict) and fallback_selected_outline:
+                selected_outline = fallback_selected_outline
+                selected_outline_path = fallback_selected_outline_path
+
+        selected_outline_id = str(selected_outline.get("outline_id") or "").strip()
+        status_rank = {"candidate": 1, "revised": 2, "selected": 3}
+        outlines_by_id: dict[str, dict[str, Any]] = {}
+        seen_paper_roots: set[str] = set()
+        paper_roots: list[Path] = []
+        for root in (self._paper_root(quest_root), quest_root / "paper"):
+            try:
+                key = str(root.resolve())
+            except FileNotFoundError:
+                key = str(root)
+            if key in seen_paper_roots:
+                continue
+            seen_paper_roots.add(key)
+            paper_roots.append(root)
+
+        for paper_root in paper_roots:
+            for default_status, relative_parts in (
+                ("candidate", ("outlines", "candidates")),
+                ("revised", ("outlines", "revisions")),
+            ):
+                root = paper_root.joinpath(*relative_parts)
+                if not root.exists():
                     continue
-                outline_id = str(record.get("outline_id") or path.stem).strip() or path.stem
-                outlines.append(
-                    {
+                for path in sorted(root.glob("outline-*.json")):
+                    record = read_json(path, {})
+                    if not isinstance(record, dict) or not record:
+                        continue
+                    outline_id = str(record.get("outline_id") or path.stem).strip() or path.stem
+                    item = {
                         "outline_id": outline_id,
                         "title": str(record.get("title") or outline_id).strip() or outline_id,
-                        "status": str(record.get("status") or status).strip() or status,
+                        "status": str(record.get("status") or default_status).strip() or default_status,
                         "review_result": str(record.get("review_result") or "").strip() or None,
                         "path": str(path),
-                        "is_selected": outline_id == str(selected_outline.get("outline_id") or "").strip(),
+                        "is_selected": outline_id == selected_outline_id,
                     }
-                )
+                    current = outlines_by_id.get(outline_id)
+                    if current is None or status_rank.get(str(item.get("status") or ""), 0) >= status_rank.get(
+                        str(current.get("status") or ""),
+                        0,
+                    ):
+                        outlines_by_id[outline_id] = item
+
+        if selected_outline_id:
+            selected_item = {
+                "outline_id": selected_outline_id,
+                "title": str(selected_outline.get("title") or selected_outline_id).strip() or selected_outline_id,
+                "status": str(selected_outline.get("status") or "selected").strip() or "selected",
+                "review_result": str(selected_outline.get("review_result") or "").strip() or None,
+                "path": str(selected_outline_path),
+                "is_selected": True,
+            }
+            current = outlines_by_id.get(selected_outline_id)
+            if current is None or status_rank.get(str(selected_item.get("status") or ""), 0) >= status_rank.get(
+                str(current.get("status") or ""),
+                0,
+            ):
+                outlines_by_id[selected_outline_id] = selected_item
+            else:
+                current["is_selected"] = True
+
+        outlines = list(outlines_by_id.values())
         outlines.sort(key=lambda item: (str(item.get("outline_id") or ""), str(item.get("status") or "")))
         return {
             "ok": True,
-            "selected_outline_ref": str(selected_outline.get("outline_id") or "").strip() or None,
+            "selected_outline_ref": selected_outline_id or None,
             "selected_outline": selected_outline or None,
             "count": len(outlines),
             "outlines": outlines,
@@ -2366,8 +3019,296 @@ class ArtifactService:
             deduped.append(path)
         return deduped
 
-    def arxiv(self, paper_id: str, *, full_text: bool = False) -> dict[str, Any]:
-        return read_arxiv_content(paper_id, full_text=full_text)
+    @staticmethod
+    def _arxiv_content_from_item(item: dict[str, Any]) -> str:
+        title = str(item.get("title") or item.get("display_name") or item.get("arxiv_id") or "arXiv paper").strip()
+        authors = [str(author).strip() for author in (item.get("authors") or []) if str(author).strip()]
+        categories = [str(category).strip() for category in (item.get("categories") or []) if str(category).strip()]
+        abstract = str(item.get("abstract") or "").strip() or "Abstract unavailable."
+        overview = str(item.get("overview") or "").strip()
+        lines = [f"# {title}", "", f"- paper_id: {str(item.get('arxiv_id') or '').strip()}"]
+        if item.get("metadata_source"):
+            lines.append(f"- metadata_source: {item['metadata_source']}")
+        if item.get("summary_source"):
+            lines.append(f"- summary_source: {item['summary_source']}")
+        if authors:
+            lines.append(f"- authors: {', '.join(authors)}")
+        if categories:
+            lines.append(f"- categories: {', '.join(categories)}")
+        if item.get("published_at"):
+            lines.append(f"- published_at: {item['published_at']}")
+        if item.get("version") is not None:
+            lines.append(f"- version: v{item['version']}")
+        if overview:
+            lines.extend(["", "## Summary", "", overview])
+            if abstract and abstract != overview:
+                lines.extend(["", "## Abstract", "", abstract])
+        else:
+            lines.extend(["", "## Abstract", "", abstract])
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _arxiv_item_needs_refresh(item: dict[str, Any] | None) -> bool:
+        if not isinstance(item, dict):
+            return False
+        title = str(item.get("title") or "").strip()
+        lowered_title = title.lower()
+        authors = item.get("authors") or []
+        categories = item.get("categories") or []
+        published_at = str(item.get("published_at") or "").strip()
+        metadata_source = str(item.get("metadata_source") or "").strip()
+        bibtex = str(item.get("bibtex") or "").strip()
+        overview = str(item.get("overview") or "").strip()
+        overview_markdown = str(item.get("overview_markdown") or "").strip()
+        overview_source = str(item.get("overview_source") or "").strip()
+        return (
+            not title
+            or title.startswith("#")
+            or lowered_title.startswith("research paper analysis")
+            or lowered_title.startswith("## research paper analysis")
+            or not authors
+            or not categories
+            or not published_at
+            or not metadata_source
+            or not bibtex
+            or (not overview and not overview_markdown and not overview_source)
+        )
+
+    def _refresh_arxiv_item_metadata(self, quest_root: Path, item: dict[str, Any]) -> dict[str, Any]:
+        arxiv_id = str(item.get("arxiv_id") or "").strip()
+        if not arxiv_id:
+            return item
+        metadata = fetch_arxiv_metadata(arxiv_id)
+        if not metadata.get("ok"):
+            return item
+        summary = read_arxiv_content(arxiv_id, full_text=False)
+        summary_source = summary.get("summary_source") if summary.get("ok") else None
+        overview_source = summary.get("overview_source") if summary.get("ok") else None
+        return self.arxiv_library.upsert_item(
+            quest_root,
+            {
+                **item,
+                "arxiv_id": metadata.get("paper_id") or arxiv_id,
+                "title": metadata.get("title") or item.get("title") or arxiv_id,
+                "display_name": metadata.get("title") or item.get("display_name") or arxiv_id,
+                "authors": metadata.get("authors") or item.get("authors") or [],
+                "categories": metadata.get("categories") or item.get("categories") or [],
+                "abstract": metadata.get("abstract") or item.get("abstract") or "",
+                "published_at": metadata.get("published_at") or item.get("published_at") or "",
+                "version": metadata.get("version") if metadata.get("version") is not None else item.get("version"),
+                "primary_class": metadata.get("primary_class") or item.get("primary_class") or "",
+                "metadata_source": metadata.get("metadata_source") or item.get("metadata_source"),
+                "metadata_status": "ready",
+                "overview": summary.get("overview") or item.get("overview") or "",
+                "overview_markdown": summary.get("overview_markdown") or item.get("overview_markdown") or "",
+                "summary_source": summary_source or item.get("summary_source"),
+                "overview_source": overview_source or summary_source or item.get("overview_source"),
+                "bibtex": metadata.get("bibtex") or item.get("bibtex"),
+                "abs_url": metadata.get("abs_url") or item.get("abs_url"),
+                "pdf_url": metadata.get("pdf_url") or item.get("pdf_url"),
+            },
+        )
+
+    @staticmethod
+    def _arxiv_file_payload(quest_root: Path, item: dict[str, Any]) -> dict[str, Any]:
+        relative = str(item.get("path") or "").strip()
+        if not relative:
+            return {}
+        document_id = str(item.get("document_id") or f"questpath::{relative}").strip()
+        return {
+            "path": relative,
+            "document_id": document_id,
+            "pdf_rel_path": relative,
+            "pdf_url": f"/api/quests/{quest_root.name}/documents/asset?document_id={document_id}",
+        }
+
+    def arxiv(
+        self,
+        paper_id: str | None = None,
+        *,
+        full_text: bool = False,
+        mode: str = "read",
+        quest_root: Path | None = None,
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or "read").strip().lower() or "read"
+        if normalized_mode == "list":
+            if quest_root is None:
+                return {
+                    "ok": False,
+                    "mode": "list",
+                    "error": "`quest_root` is required for `artifact.arxiv(mode='list')`.",
+                }
+            items = self.arxiv_library.list_items(quest_root)
+            refreshed_any = False
+            for item in items[:]:
+                if not self._arxiv_item_needs_refresh(item):
+                    continue
+                refreshed = self._refresh_arxiv_item_metadata(quest_root, item)
+                if refreshed != item:
+                    refreshed_any = True
+            if refreshed_any:
+                items = self.arxiv_library.list_items(quest_root)
+            return {
+                "ok": True,
+                "mode": "list",
+                "items": items,
+                "count": len(items),
+            }
+
+        if paper_id is None:
+            return {
+                "ok": False,
+                "mode": normalized_mode,
+                "error": "`paper_id` is required for `artifact.arxiv(mode='read')`.",
+            }
+
+        if quest_root is None:
+            return {
+                **read_arxiv_content(paper_id, full_text=full_text),
+                "mode": normalized_mode,
+            }
+
+        entry = self.arxiv_library.mark_processing(quest_root, paper_id)
+        cached_entry = self.arxiv_library.get_item(quest_root, paper_id)
+        if cached_entry and self._arxiv_item_needs_refresh(cached_entry):
+            refreshed = self._refresh_arxiv_item_metadata(quest_root, cached_entry)
+            if refreshed:
+                cached_entry = refreshed
+        if (
+            cached_entry
+            and not full_text
+            and cached_entry.get("abstract")
+            and (cached_entry.get("summary_source") or cached_entry.get("metadata_status") == "pending")
+        ):
+            paper_ref = str(cached_entry.get("arxiv_id") or paper_id).strip()
+            self.arxiv_library.queue_pdf_download(quest_root, str(cached_entry.get("arxiv_id") or paper_id))
+            return {
+                "ok": True,
+                "mode": normalized_mode,
+                "paper_id": paper_ref,
+                "requested_full_text": full_text,
+                "content_mode": "abstract",
+                "source": "quest_arxiv_library",
+                "source_url": f"https://arxiv.org/abs/{paper_ref}",
+                "title": cached_entry.get("title"),
+                "authors": cached_entry.get("authors") or [],
+                "categories": cached_entry.get("categories") or [],
+                "abstract": cached_entry.get("abstract") or "",
+                "overview": cached_entry.get("overview") or "",
+                "overview_markdown": cached_entry.get("overview_markdown") or "",
+                "summary_source": cached_entry.get("summary_source"),
+                "overview_source": cached_entry.get("overview_source"),
+                "metadata_source": cached_entry.get("metadata_source"),
+                "published_at": cached_entry.get("published_at") or "",
+                "version": cached_entry.get("version"),
+                "primary_class": cached_entry.get("primary_class") or "",
+                "bibtex": cached_entry.get("bibtex") or "",
+                "status": cached_entry.get("status"),
+                "metadata_status": cached_entry.get("metadata_status"),
+                "abs_url": f"https://arxiv.org/abs/{paper_ref}",
+                "pdf_url": f"https://arxiv.org/pdf/{paper_ref}.pdf",
+                "content": self._arxiv_content_from_item(cached_entry),
+                "attempts": [],
+                **self._arxiv_file_payload(quest_root, cached_entry),
+            }
+
+        fetched = read_arxiv_content(str(entry.get("arxiv_id") or paper_id), full_text=full_text)
+        if not fetched.get("ok"):
+            normalized_id = str(entry.get("arxiv_id") or paper_id).strip()
+            placeholder = self.arxiv_library.upsert_item(
+                quest_root,
+                {
+                    **(cached_entry or {}),
+                    "arxiv_id": normalized_id,
+                    "title": str((cached_entry or {}).get("title") or normalized_id).strip(),
+                    "display_name": str((cached_entry or {}).get("display_name") or normalized_id).strip(),
+                    "status": str((cached_entry or {}).get("status") or "processing").strip() or "processing",
+                    "metadata_status": "pending",
+                    "error": None,
+                    "pdf_rel_path": self.arxiv_library.pdf_relative_path(normalized_id),
+                    "abs_url": str((cached_entry or {}).get("abs_url") or f"https://arxiv.org/abs/{normalized_id}"),
+                    "pdf_url": str((cached_entry or {}).get("pdf_url") or f"https://arxiv.org/pdf/{normalized_id}.pdf"),
+                },
+            )
+            self.arxiv_library.queue_pdf_download(
+                quest_root,
+                normalized_id,
+                pdf_url=str(placeholder.get("pdf_url") or "").strip() or None,
+            )
+            latest = self.arxiv_library.get_item(quest_root, normalized_id) or placeholder
+            return {
+                "ok": True,
+                "mode": normalized_mode,
+                "paper_id": normalized_id,
+                "requested_full_text": full_text,
+                "content_mode": "pending",
+                "source": "quest_arxiv_library_partial",
+                "source_url": latest.get("abs_url") or f"https://arxiv.org/abs/{normalized_id}",
+                "title": latest.get("title"),
+                "authors": latest.get("authors") or [],
+                "categories": latest.get("categories") or [],
+                "abstract": latest.get("abstract") or "",
+                "overview": latest.get("overview") or "",
+                "overview_markdown": latest.get("overview_markdown") or "",
+                "summary_source": latest.get("summary_source"),
+                "overview_source": latest.get("overview_source"),
+                "metadata_source": latest.get("metadata_source"),
+                "published_at": latest.get("published_at") or "",
+                "version": latest.get("version"),
+                "primary_class": latest.get("primary_class") or "",
+                "bibtex": latest.get("bibtex") or "",
+                "status": latest.get("status"),
+                "metadata_status": "pending",
+                "metadata_pending": True,
+                "message": "Metadata is temporarily unavailable. Open the arXiv link directly while DeepScientist retries later.",
+                "abs_url": latest.get("abs_url") or f"https://arxiv.org/abs/{normalized_id}",
+                "pdf_url": latest.get("pdf_url") or f"https://arxiv.org/pdf/{normalized_id}.pdf",
+                "content": self._arxiv_content_from_item(latest),
+                "attempts": fetched.get("attempts") or [],
+                "guidance": fetched.get("guidance"),
+                **self._arxiv_file_payload(quest_root, latest),
+            }
+
+        saved = self.arxiv_library.upsert_item(
+            quest_root,
+            {
+                **(cached_entry or {}),
+                "arxiv_id": fetched.get("paper_id") or str(entry.get("arxiv_id") or paper_id),
+                "title": fetched.get("title") or cached_entry.get("title") if cached_entry else fetched.get("title"),
+                "authors": fetched.get("authors") or (cached_entry.get("authors") if cached_entry else []),
+                "categories": fetched.get("categories") or (cached_entry.get("categories") if cached_entry else []),
+                "abstract": fetched.get("abstract") or (cached_entry.get("abstract") if cached_entry else ""),
+                "overview": fetched.get("overview") or (cached_entry.get("overview") if cached_entry else ""),
+                "overview_markdown": fetched.get("overview_markdown") or (cached_entry.get("overview_markdown") if cached_entry else ""),
+                "summary_source": fetched.get("summary_source") or (cached_entry.get("summary_source") if cached_entry else None),
+                "overview_source": fetched.get("overview_source") or (cached_entry.get("overview_source") if cached_entry else None),
+                "metadata_source": fetched.get("metadata_source") or (cached_entry.get("metadata_source") if cached_entry else None),
+                "published_at": fetched.get("published_at") or (cached_entry.get("published_at") if cached_entry else ""),
+                "version": fetched.get("version") if fetched.get("version") is not None else (cached_entry.get("version") if cached_entry else None),
+                "primary_class": fetched.get("primary_class") or (cached_entry.get("primary_class") if cached_entry else ""),
+                "bibtex": fetched.get("bibtex") or (cached_entry.get("bibtex") if cached_entry else None),
+                "abs_url": fetched.get("abs_url") or (cached_entry.get("abs_url") if cached_entry else None),
+                "pdf_url": fetched.get("pdf_url") or (cached_entry.get("pdf_url") if cached_entry else None),
+                "display_name": fetched.get("title") or fetched.get("paper_id") or str(entry.get("arxiv_id") or paper_id),
+                "pdf_rel_path": self.arxiv_library.pdf_relative_path(str(fetched.get("paper_id") or entry.get("arxiv_id") or paper_id)),
+                "status": "processing",
+                "metadata_status": "ready",
+                "error": None,
+            },
+        )
+        self.arxiv_library.queue_pdf_download(
+            quest_root,
+            str(saved.get("arxiv_id") or paper_id),
+            pdf_url=str(fetched.get("pdf_url") or "").strip() or None,
+        )
+        latest = self.arxiv_library.get_item(quest_root, str(saved.get("arxiv_id") or paper_id)) or saved
+        return {
+            **fetched,
+            "mode": normalized_mode,
+            "status": latest.get("status"),
+            "metadata_status": latest.get("metadata_status"),
+            **self._arxiv_file_payload(quest_root, latest),
+        }
 
     def record(
         self,
@@ -3139,19 +4080,26 @@ class ArtifactService:
                 worktree_root,
                 message=f"idea: create {resolved_idea_id}",
             )
+            idea_md_rel_path = self._workspace_relative(quest_root, idea_md_path)
+            idea_draft_rel_path = self._workspace_relative(quest_root, idea_draft_path)
             interaction = self.interact(
                 quest_root,
                 kind="milestone",
-                message=(
-                    f"Idea `{resolved_idea_id}` is now active.\n"
-                    f"- Branch no: `{branch_no}`\n"
-                    f"- Branch: `{branch_name}`\n"
-                    f"- Lineage: `{normalized_lineage_intent or 'manual'}`\n"
-                    f"- Foundation: `{foundation.get('label') or foundation.get('branch') or 'current head'}`\n"
-                    f"- Worktree: `{worktree_root}`\n"
-                    f"- Idea file: `{idea_md_path}`\n"
-                    f"- Draft file: `{idea_draft_path}`\n"
-                    f"- Next target: `{next_target}`"
+                message=self._build_idea_interaction_message(
+                    action="create",
+                    idea_id=resolved_idea_id,
+                    title=title,
+                    problem=problem,
+                    hypothesis=hypothesis,
+                    mechanism=mechanism,
+                    foundation_label=self._format_foundation_label(
+                        foundation,
+                        fallback=foundation.get("branch") or "current head",
+                    ),
+                    branch_name=branch_name,
+                    next_target=next_target,
+                    idea_md_rel_path=idea_md_rel_path,
+                    draft_md_rel_path=idea_draft_rel_path,
                 ),
                 deliver_to_bound_conversations=True,
                 include_recent_inbound_messages=False,
@@ -3338,17 +4286,26 @@ class ArtifactService:
             worktree_root,
             message=f"idea: revise {resolved_idea_id}",
         )
+        idea_md_rel_path = self._workspace_relative(quest_root, idea_md_path)
+        idea_draft_rel_path = self._workspace_relative(quest_root, idea_draft_path)
         interaction = self.interact(
             quest_root,
             kind="progress",
-            message=(
-                f"Idea `{resolved_idea_id}` was revised.\n"
-                f"- Branch: `{branch_name}`\n"
-                f"- Foundation: `{(existing_foundation_ref or {}).get('branch') or 'current head'}`\n"
-                f"- Worktree: `{worktree_root}`\n"
-                f"- Idea file: `{idea_md_path}`\n"
-                f"- Draft file: `{idea_draft_path}`\n"
-                f"- Next target: `{next_target}`"
+            message=self._build_idea_interaction_message(
+                action="revise",
+                idea_id=resolved_idea_id,
+                title=title,
+                problem=problem,
+                hypothesis=hypothesis,
+                mechanism=mechanism,
+                foundation_label=self._format_foundation_label(
+                    existing_foundation_ref,
+                    fallback=(existing_foundation_ref or {}).get("branch") or "current head",
+                ),
+                branch_name=branch_name,
+                next_target=next_target,
+                idea_md_rel_path=idea_md_rel_path,
+                draft_md_rel_path=idea_draft_rel_path,
             ),
             deliver_to_bound_conversations=True,
             include_recent_inbound_messages=False,
@@ -3551,15 +4508,36 @@ class ArtifactService:
                 for item in normalized_metric_rows
                 if str(item.get("metric_id") or "").strip()
             }
-        effective_metric_contract = normalize_metric_contract(
-            metric_contract or baseline_entry.get("metric_contract"),
-            baseline_id=resolved_baseline_id,
-            metrics_summary=normalized_metrics_summary,
-            metric_rows=normalized_metric_rows,
-            primary_metric=baseline_entry.get("primary_metric"),
-            baseline_variants=baseline_entry.get("baseline_variants"),
-        )
         baseline_contract_payload = self._load_metric_contract_payload(quest_root, metric_contract_json_rel_path)
+        baseline_metric_contract = baseline_entry.get("metric_contract")
+        baseline_primary_metric = baseline_entry.get("primary_metric")
+        if isinstance(baseline_contract_payload, dict) and baseline_contract_payload:
+            payload_metric_contract = baseline_contract_payload.get("metric_contract")
+            if isinstance(payload_metric_contract, dict) and payload_metric_contract:
+                baseline_metric_contract = payload_metric_contract
+            payload_primary_metric = baseline_contract_payload.get("primary_metric")
+            if isinstance(payload_primary_metric, dict) and payload_primary_metric:
+                baseline_primary_metric = payload_primary_metric
+        effective_metric_contract = (
+            self._merge_run_metric_contract(
+                baseline_metric_contract=baseline_metric_contract,
+                baseline_primary_metric=baseline_primary_metric,
+                baseline_variants=baseline_entry.get("baseline_variants"),
+                run_metric_contract=metric_contract,
+                metrics_summary=normalized_metrics_summary,
+                metric_rows=normalized_metric_rows,
+                baseline_id=resolved_baseline_id,
+            )
+            if isinstance(baseline_metric_contract, dict) and baseline_metric_contract
+            else normalize_metric_contract(
+                metric_contract or baseline_entry.get("metric_contract"),
+                baseline_id=resolved_baseline_id,
+                metrics_summary=normalized_metrics_summary,
+                metric_rows=normalized_metric_rows,
+                primary_metric=baseline_primary_metric,
+                baseline_variants=baseline_entry.get("baseline_variants"),
+            )
+        )
         metric_validation: dict[str, Any] | None = None
         if strict_metric_contract:
             metric_validation = validate_main_experiment_against_baseline_contract(
@@ -3830,14 +4808,21 @@ class ArtifactService:
         interaction = self.interact(
             quest_root,
             kind="milestone",
-            message=(
-                f"Main experiment `{run_identifier}` has been recorded.\n"
-                f"- Branch: `{branch_name}`\n"
-                f"- Run log: `{run_md_path}`\n"
-                f"- Result: `{result_json_path}`\n"
-                f"- Verdict: `{verdict}`\n"
-                f"- Breakthrough: `{progress_eval.get('breakthrough_level')}`\n"
-                f"- Recommended next route: `{delivery_policy.get('recommended_next_route')}`"
+            message=self._build_main_experiment_interaction_message(
+                run_id=run_identifier,
+                branch_name=branch_name,
+                verdict=verdict,
+                primary_metric_id=primary_metric_id,
+                primary_value=primary_value,
+                primary_baseline=primary_baseline,
+                primary_delta=primary_delta,
+                decimals=decimals if isinstance(decimals, int) else None,
+                conclusion=conclusion.strip() or progress_eval.get("reason"),
+                evaluation_summary=normalized_evaluation_summary,
+                breakthrough_level=str(progress_eval.get("breakthrough_level") or "").strip() or None,
+                recommended_next_route=str(delivery_policy.get("recommended_next_route") or "").strip() or None,
+                run_md_rel_path=self._workspace_relative(quest_root, run_md_path),
+                result_json_rel_path=self._workspace_relative(quest_root, result_json_path),
             ),
             deliver_to_bound_conversations=True,
             include_recent_inbound_messages=False,
@@ -3924,6 +4909,14 @@ class ArtifactService:
             quest_root,
             state=state,
         )
+        runtime_refs = self.resolve_runtime_refs(quest_root)
+        resolved_parent_run_id = (
+            str(parent_run_id or "").strip()
+            or str(state.get("paper_parent_run_id") or "").strip()
+            or str((self._latest_main_run_for_branch(quest_root, parent_branch) or {}).get("run_id") or "").strip()
+            or str(runtime_refs.get("latest_main_run_id") or "").strip()
+            or None
+        )
         active_idea_id = str(resolved_idea_id or "").strip()
         if not active_idea_id:
             raise ValueError("An active idea is required before starting an analysis campaign.")
@@ -3937,6 +4930,54 @@ class ArtifactService:
         normalized_research_questions = self._normalize_string_list(research_questions)
         normalized_experimental_designs = self._normalize_string_list(experimental_designs)
         normalized_todo_items = self._normalize_campaign_todo_items(todo_items)
+        quest_data = self.quest_service.read_quest_yaml(quest_root)
+        active_anchor = str(quest_data.get("active_anchor") or "").strip().lower()
+        campaign_origin_kind = (
+            str(normalized_campaign_origin.get("kind") or "").strip().lower()
+            if isinstance(normalized_campaign_origin, dict)
+            else ""
+        )
+        writing_facing = bool(
+            resolved_outline_ref
+            or normalized_research_questions
+            or normalized_experimental_designs
+            or normalized_todo_items
+            or str(state.get("workspace_mode") or "").strip().lower() == "paper"
+            or active_anchor == "write"
+            or campaign_origin_kind in {"write", "paper", "rebuttal", "revision"}
+        )
+        if writing_facing:
+            if not resolved_outline_ref:
+                raise ValueError(
+                    "Writing-facing analysis campaigns require `selected_outline_ref` before slices can be launched."
+                )
+            if not normalized_research_questions:
+                raise ValueError(
+                    "Writing-facing analysis campaigns require non-empty `research_questions`."
+                )
+            if not normalized_experimental_designs:
+                raise ValueError(
+                    "Writing-facing analysis campaigns require non-empty `experimental_designs`."
+                )
+            if not normalized_todo_items:
+                raise ValueError(
+                    "Writing-facing analysis campaigns require non-empty `todo_items`."
+                )
+            todo_slice_ids = {
+                str(item.get("slice_id") or "").strip()
+                for item in normalized_todo_items
+                if str(item.get("slice_id") or "").strip()
+            }
+            missing_slice_ids = [
+                str(raw.get("slice_id") or "").strip()
+                for raw in slices
+                if str(raw.get("slice_id") or "").strip() and str(raw.get("slice_id") or "").strip() not in todo_slice_ids
+            ]
+            if missing_slice_ids:
+                raise ValueError(
+                    "Writing-facing analysis campaigns require one todo item per slice. "
+                    f"Missing todo items for: {', '.join(missing_slice_ids)}."
+                )
         slice_contexts: list[dict[str, Any]] = []
         inventory_entries: list[dict[str, Any]] = []
         for index, raw in enumerate(slices, start=1):
@@ -4199,7 +5240,7 @@ class ArtifactService:
             {
                 "title": campaign_title,
                 "goal": campaign_goal,
-                "parent_run_id": parent_run_id,
+                "parent_run_id": resolved_parent_run_id,
                 "active_idea_id": active_idea_id,
                 "parent_branch": parent_branch,
                 "parent_worktree_root": str(parent_worktree_root),
@@ -4274,7 +5315,7 @@ class ArtifactService:
                 "details": {
                     "campaign_title": campaign_title,
                     "campaign_goal": campaign_goal,
-                    "parent_run_id": parent_run_id,
+                    "parent_run_id": resolved_parent_run_id,
                     "campaign_origin": normalized_campaign_origin,
                     "selected_outline_ref": resolved_outline_ref,
                     "todo_manifest_path": str(todo_manifest_path),
@@ -4326,14 +5367,13 @@ class ArtifactService:
         interaction = self.interact(
             quest_root,
             kind="milestone",
-            message=(
-                f"Analysis campaign `{campaign_id}` is ready.\n"
-                f"- Parent branch: `{parent_branch}`\n"
-                f"- Parent worktree: `{parent_worktree_root}`\n"
-                f"- Next slice: `{first_slice['slice_id']}`\n"
-                f"- Slice branch: `{first_slice['branch']}`\n"
-                f"- Slice worktree: `{first_slice['worktree_root']}`\n"
-                f"- Core requirement: {first_slice['must_not_simplify'] or 'Follow the full evaluation protocol.'}"
+            message=self._build_analysis_campaign_interaction_message(
+                campaign_id=campaign_id,
+                goal=campaign_goal,
+                parent_branch=parent_branch,
+                selected_outline_ref=resolved_outline_ref,
+                first_slice=first_slice,
+                todo_manifest_rel_path=self._workspace_relative(quest_root, todo_manifest_path),
             ),
             deliver_to_bound_conversations=True,
             include_recent_inbound_messages=False,
@@ -4418,6 +5458,7 @@ class ArtifactService:
         if normalized_mode == "candidate":
             resolved_outline_id = str(outline_id or self._next_paper_outline_id(quest_root)).strip()
             candidate_path = self._paper_outline_candidates_root(quest_root, workspace_root=workspace_root) / f"{resolved_outline_id}.json"
+            canonical_candidate_path = quest_root / "paper" / "outlines" / "candidates" / f"{resolved_outline_id}.json"
             existing = read_json(candidate_path, {})
             existing = existing if isinstance(existing, dict) else {}
             record = self._normalize_paper_outline_record(
@@ -4432,6 +5473,8 @@ class ArtifactService:
                 created_at=str(existing.get("created_at") or "") or None,
             )
             write_json(candidate_path, record)
+            if canonical_candidate_path.resolve() != candidate_path.resolve():
+                write_json(canonical_candidate_path, record)
             artifact = self.record(
                 quest_root,
                 {
@@ -4491,6 +5534,9 @@ class ArtifactService:
         )
 
         write_json(selected_outline_path, resolved_record)
+        canonical_selected_outline_path = quest_root / "paper" / "selected_outline.json"
+        if canonical_selected_outline_path.resolve() != selected_outline_path.resolve():
+            write_json(canonical_selected_outline_path, resolved_record)
         if source_candidate_path.exists():
             source_record["status"] = "selected" if normalized_mode == "select" else "revised"
             source_record["updated_at"] = utc_now()
@@ -4499,6 +5545,9 @@ class ArtifactService:
         if normalized_mode == "revise":
             revised_outline_path = ensure_dir(paper_root / "outlines" / "revisions") / f"{source_outline_id}.json"
             write_json(revised_outline_path, resolved_record)
+            canonical_revised_outline_path = quest_root / "paper" / "outlines" / "revisions" / f"{source_outline_id}.json"
+            if canonical_revised_outline_path.resolve() != revised_outline_path.resolve():
+                write_json(canonical_revised_outline_path, resolved_record)
 
         outline_selection_path = paper_root / "outline_selection.md"
         action_label = "selected" if normalized_mode == "select" else "revised"
@@ -4541,6 +5590,46 @@ class ArtifactService:
             checkpoint=False,
             workspace_root=workspace_root,
         )
+        selected_outline_rel_path = self._workspace_relative(quest_root, selected_outline_path)
+        outline_selection_rel_path = self._workspace_relative(quest_root, outline_selection_path)
+        revised_outline_rel_path = self._workspace_relative(quest_root, revised_outline_path) if revised_outline_path else None
+        interaction = self.interact(
+            quest_root,
+            kind="milestone" if normalized_mode == "select" else "progress",
+            message=self._build_outline_interaction_message(
+                action=normalized_mode,
+                outline_id=source_outline_id,
+                title=str(resolved_record.get("title") or "").strip() or source_outline_id,
+                selected_reason=selected_reason or note,
+                story=str(resolved_record.get("story") or "").strip() or None,
+                research_questions=(
+                    (resolved_record.get("detailed_outline") or {})
+                    if isinstance(resolved_record.get("detailed_outline"), dict)
+                    else {}
+                ).get("research_questions"),
+                experimental_designs=(
+                    (resolved_record.get("detailed_outline") or {})
+                    if isinstance(resolved_record.get("detailed_outline"), dict)
+                    else {}
+                ).get("experimental_designs"),
+                selected_outline_rel_path=selected_outline_rel_path,
+                outline_selection_rel_path=outline_selection_rel_path,
+                revised_outline_rel_path=revised_outline_rel_path,
+            ),
+            deliver_to_bound_conversations=True,
+            include_recent_inbound_messages=False,
+            attachments=[
+                {
+                    "kind": "paper_outline_selected" if normalized_mode == "select" else "paper_outline_revised",
+                    "outline_id": source_outline_id,
+                    "title": resolved_record.get("title"),
+                    "selected_reason": selected_reason,
+                    "selected_outline_path": str(selected_outline_path),
+                    "outline_selection_path": str(outline_selection_path),
+                    "revised_outline_path": str(revised_outline_path) if revised_outline_path else None,
+                }
+            ],
+        )
         return {
             "ok": True,
             "mode": normalized_mode,
@@ -4550,6 +5639,7 @@ class ArtifactService:
             "revised_outline_path": str(revised_outline_path) if revised_outline_path else None,
             "record": resolved_record,
             "artifact": artifact,
+            "interaction": interaction,
         }
 
     def submit_paper_bundle(
@@ -4673,6 +5763,50 @@ class ArtifactService:
             checkpoint=False,
             workspace_root=workspace_root,
         )
+        interaction = self.interact(
+            quest_root,
+            kind="milestone",
+            message=self._build_paper_bundle_interaction_message(
+                title=str(manifest.get("title") or "").strip() or None,
+                summary=str(manifest.get("summary") or "").strip() or None,
+                paper_branch=paper_branch,
+                source_branch=source_branch,
+                source_run_id=source_run_id,
+                selected_outline_ref=str(manifest.get("selected_outline_ref") or "").strip() or None,
+                manifest_rel_path=self._workspace_relative(quest_root, manifest_path),
+                draft_rel_path=str(manifest.get("draft_path") or "").strip() or None,
+                writing_plan_rel_path=str(manifest.get("writing_plan_path") or "").strip() or None,
+                references_rel_path=str(manifest.get("references_path") or "").strip() or None,
+                claim_evidence_map_rel_path=str(manifest.get("claim_evidence_map_path") or "").strip() or None,
+                compile_report_rel_path=str(manifest.get("compile_report_path") or "").strip() or None,
+                pdf_rel_path=str(manifest.get("pdf_path") or "").strip() or None,
+                latex_root_rel_path=str(manifest.get("latex_root_path") or "").strip() or None,
+                baseline_inventory_rel_path=paper_inventory_rel,
+                open_source_manifest_rel_path=str(manifest.get("open_source_manifest_path") or "").strip() or None,
+            ),
+            deliver_to_bound_conversations=True,
+            include_recent_inbound_messages=False,
+            attachments=[
+                {
+                    "kind": "paper_bundle",
+                    "title": manifest.get("title"),
+                    "paper_branch": paper_branch,
+                    "source_branch": source_branch,
+                    "source_run_id": source_run_id,
+                    "selected_outline_ref": manifest.get("selected_outline_ref"),
+                    "manifest_path": str(manifest_path),
+                    "draft_path": manifest.get("draft_path"),
+                    "writing_plan_path": manifest.get("writing_plan_path"),
+                    "references_path": manifest.get("references_path"),
+                    "claim_evidence_map_path": manifest.get("claim_evidence_map_path"),
+                    "compile_report_path": manifest.get("compile_report_path"),
+                    "pdf_path": manifest.get("pdf_path"),
+                    "latex_root_path": manifest.get("latex_root_path"),
+                    "baseline_inventory_path": str(baseline_inventory_path),
+                    "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
+                }
+            ],
+        )
         return {
             "ok": True,
             "manifest_path": str(manifest_path),
@@ -4680,6 +5814,7 @@ class ArtifactService:
             "baseline_inventory_path": str(baseline_inventory_path),
             "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
             "artifact": artifact,
+            "interaction": interaction,
         }
 
     def record_analysis_slice(
@@ -4716,7 +5851,17 @@ class ArtifactService:
 
         evidence_paths = [str(item).strip() for item in (evidence_paths or []) if str(item).strip()]
         deviations = [str(item).strip() for item in (deviations or []) if str(item).strip()]
-        metric_rows = [item for item in (metric_rows or []) if isinstance(item, dict)]
+        normalized_metric_rows = normalize_metric_rows(metric_rows or [])
+        normalized_metrics_summary = {
+            str(item.get("metric_id") or "").strip(): item.get("value")
+            for item in normalized_metric_rows
+            if str(item.get("metric_id") or "").strip()
+        }
+        normalized_metric_contract = normalize_metric_contract(
+            {},
+            metrics_summary=normalized_metrics_summary,
+            metric_rows=normalized_metric_rows,
+        )
         normalized_comparison_baselines = self._normalize_comparison_baselines(quest_root, comparison_baselines)
         normalized_claim_impact = str(claim_impact or "").strip() or None
         normalized_reviewer_resolution = str(reviewer_resolution or "").strip() or None
@@ -4784,9 +5929,9 @@ class ArtifactService:
             result_lines.extend([f"- `{item}`" for item in evidence_paths])
         else:
             result_lines.append("- None recorded.")
-        if metric_rows:
+        if normalized_metric_rows:
             result_lines.extend(["", "## Metric Rows", ""])
-            for row in metric_rows:
+            for row in normalized_metric_rows:
                 result_lines.append(f"- `{row}`")
         result_lines.extend(["", "## Comparison Baselines", ""])
         if normalized_comparison_baselines:
@@ -4806,16 +5951,6 @@ class ArtifactService:
             result_lines.extend(["", "## Subset Approval", "", f"`{subset_approval_ref}`"])
         write_text(result_path, "\n".join(result_lines).rstrip() + "\n")
 
-        metrics_summary: dict[str, Any] = {}
-        for row in metric_rows:
-            name = str(row.get("name") or row.get("metric") or "").strip()
-            if name:
-                metrics_summary[name] = row.get("value")
-                continue
-            keys = [key for key in row.keys() if key not in {"split", "seed", "note", "notes"}]
-            if len(keys) == 1:
-                metrics_summary[keys[0]] = row.get(keys[0])
-
         result_payload = {
             "schema_version": 1,
             "result_kind": "analysis_slice",
@@ -4827,8 +5962,9 @@ class ArtifactService:
             "run_kind": target.get("run_kind"),
             "required_baselines": target.get("required_baselines") or [],
             "comparison_baselines": normalized_comparison_baselines,
-            "metrics_summary": metrics_summary,
-            "metric_rows": metric_rows,
+            "metrics_summary": normalized_metrics_summary,
+            "metric_rows": normalized_metric_rows,
+            "metric_contract": normalized_metric_contract,
             "dataset_scope": normalized_scope,
             "subset_approval_ref": subset_approval_ref,
             "setup": setup.strip() or None,
@@ -4914,7 +6050,11 @@ class ArtifactService:
                 "parent_branch": parent_branch,
                 "worktree_root": str(slice_worktree_root),
                 "worktree_rel_path": self._workspace_relative(quest_root, slice_worktree_root),
-                "metrics_summary": metrics_summary,
+                "metrics_summary": normalized_metrics_summary,
+                "metric_rows": normalized_metric_rows,
+                "metric_contract": normalized_metric_contract,
+                "comparison_baselines": normalized_comparison_baselines,
+                "evidence_paths": evidence_paths,
                 "flow_type": "analysis_slice",
                 "protocol_step": "record",
                 "paths": {
@@ -4928,7 +6068,7 @@ class ArtifactService:
                     "must_not_simplify": target.get("must_not_simplify"),
                     "dataset_scope": normalized_scope,
                     "subset_approval_ref": subset_approval_ref,
-                    "metric_rows": metric_rows,
+                    "metric_rows": normalized_metric_rows,
                     "claim_impact": normalized_claim_impact,
                     "reviewer_resolution": normalized_reviewer_resolution,
                     "manuscript_update_hint": normalized_manuscript_update_hint,
@@ -4968,6 +6108,8 @@ class ArtifactService:
             updated["reviewer_resolution"] = normalized_reviewer_resolution
             updated["manuscript_update_hint"] = normalized_manuscript_update_hint
             updated["next_recommendation"] = normalized_next_recommendation
+            updated["metrics_summary"] = normalized_metrics_summary
+            updated["metric_rows"] = normalized_metric_rows
             updated["comparison_baselines"] = normalized_comparison_baselines
             updated["evaluation_summary"] = normalized_evaluation_summary
             updated_slices.append(updated)
@@ -5025,13 +6167,13 @@ class ArtifactService:
             interaction = self.interact(
                 quest_root,
                 kind="progress",
-                message=(
-                    f"Analysis slice `{slice_id}` is complete.\n"
-                    f"- Parent branch mirror updated: `{mirror_path}`\n"
-                    f"- Next slice: `{next_slice['slice_id']}`\n"
-                    f"- Next branch: `{next_slice['branch']}`\n"
-                    f"- Next worktree: `{next_slice['worktree_root']}`\n"
-                    f"- Core requirement: {next_slice.get('must_not_simplify') or 'Use the full intended evaluation protocol.'}"
+                message=self._build_analysis_slice_interaction_message(
+                    campaign_id=campaign_id,
+                    slice_id=slice_id,
+                    evaluation_summary=normalized_evaluation_summary,
+                    claim_impact=normalized_claim_impact,
+                    next_slice=next_slice,
+                    mirror_rel_path=self._workspace_relative(quest_root, mirror_path),
                 ),
                 deliver_to_bound_conversations=True,
                 include_recent_inbound_messages=False,
@@ -5156,20 +6298,16 @@ class ArtifactService:
         interaction = self.interact(
             quest_root,
             kind="milestone",
-            message=(
-                f"All analysis slices in `{campaign_id}` are complete.\n"
-                f"- Returned to parent branch: `{parent_branch}`\n"
-                f"- Parent worktree: `{parent_worktree_root}`\n"
-                f"- Analysis summary: `{summary_path}`\n"
-                + (
-                    (
-                        f"- Writing branch: `{writing_workspace.get('branch')}`\n"
-                        f"- Writing worktree: `{writing_workspace.get('worktree_root')}`\n"
-                        "Writing is now active on the dedicated paper branch."
-                    )
-                    if writing_workspace
-                    else "Use the completed analysis evidence to make the next durable route decision."
-                )
+            message=self._build_analysis_complete_interaction_message(
+                campaign_id=campaign_id,
+                completed_slices=updated_slices,
+                summary_rel_path=self._workspace_relative(quest_root, summary_path),
+                writing_branch=writing_workspace.get("branch") if writing_workspace else None,
+                writing_worktree_rel_path=(
+                    self._workspace_relative(quest_root, Path(str(writing_workspace.get("worktree_root"))))
+                    if writing_workspace and str(writing_workspace.get("worktree_root") or "").strip()
+                    else None
+                ),
             ),
             deliver_to_bound_conversations=True,
             include_recent_inbound_messages=False,
@@ -5259,6 +6397,81 @@ class ArtifactService:
             "guidance": "The selected baseline is now attached under baselines/imported. Reuse it before considering a fresh reproduction.",
         }
 
+    def delete_baseline(self, baseline_id: str) -> dict[str, Any]:
+        existing = self.baselines.get(baseline_id, include_deleted=True)
+        if existing is None:
+            raise FileNotFoundError(f"Unknown baseline: {baseline_id}")
+
+        normalized_baseline_id = str(existing.get("baseline_id") or existing.get("entry_id") or baseline_id).strip()
+        already_deleted = self.baselines.is_deleted(normalized_baseline_id)
+        deleted_entry = self.baselines.delete(normalized_baseline_id) if not already_deleted else dict(existing)
+
+        affected_quest_ids: list[str] = []
+        cleared_requested_refs = 0
+        cleared_confirmed_refs = 0
+        deleted_paths: list[str] = []
+        warnings: list[str] = []
+        quests_root = self.home / "quests"
+
+        for quest_yaml in sorted(quests_root.glob("*/quest.yaml")):
+            quest_root = quest_yaml.parent
+            quest_id = quest_root.name
+            quest_touched = False
+            quest_payload = self.quest_service.read_quest_yaml(quest_root)
+
+            requested_ref = (
+                dict(quest_payload.get("requested_baseline_ref") or {})
+                if isinstance(quest_payload.get("requested_baseline_ref"), dict)
+                else {}
+            )
+            if str(requested_ref.get("baseline_id") or "").strip() == normalized_baseline_id:
+                self.quest_service.update_startup_context(quest_root, requested_baseline_ref=None)
+                cleared_requested_refs += 1
+                quest_touched = True
+
+            confirmed_ref = (
+                dict(quest_payload.get("confirmed_baseline_ref") or {})
+                if isinstance(quest_payload.get("confirmed_baseline_ref"), dict)
+                else {}
+            )
+            if str(confirmed_ref.get("baseline_id") or "").strip() == normalized_baseline_id:
+                self.quest_service.update_baseline_state(
+                    quest_root,
+                    baseline_gate="pending",
+                    confirmed_baseline_ref=None,
+                    active_anchor="baseline",
+                )
+                cleared_confirmed_refs += 1
+                quest_touched = True
+
+            for root in self._baseline_workspace_roots(quest_root):
+                try:
+                    removed = self._remove_baseline_materialization(root, normalized_baseline_id)
+                except OSError as exc:
+                    warnings.append(
+                        f"Unable to remove baseline materialization under `{root}` for quest `{quest_id}`: {exc}"
+                    )
+                    continue
+                if removed:
+                    deleted_paths.extend(removed)
+                    quest_touched = True
+
+            if quest_touched:
+                affected_quest_ids.append(quest_id)
+
+        return {
+            "ok": True,
+            "baseline_id": normalized_baseline_id,
+            "deleted": not already_deleted,
+            "already_deleted": already_deleted,
+            "baseline_registry_entry": deleted_entry,
+            "affected_quest_ids": affected_quest_ids,
+            "cleared_requested_refs": cleared_requested_refs,
+            "cleared_confirmed_refs": cleared_confirmed_refs,
+            "deleted_paths": deleted_paths,
+            "warnings": warnings,
+        }
+
     def confirm_baseline(
         self,
         quest_root: Path,
@@ -5270,6 +6483,7 @@ class ArtifactService:
         summary: str | None = None,
         baseline_kind: str | None = None,
         metric_contract: dict[str, Any] | None = None,
+        metric_directions: dict[str, str] | None = None,
         metrics_summary: dict[str, Any] | None = None,
         primary_metric: dict[str, Any] | None = None,
         auto_advance: bool = True,
@@ -5370,6 +6584,19 @@ class ArtifactService:
             if isinstance(selected_variant, dict) and selected_variant.get("metrics_summary") is not None
             else entry.get("metrics_summary")
         )
+        entry_metric_contract, entry_primary_metric = self._apply_metric_directions_to_contract(
+            metric_contract=entry.get("metric_contract"),
+            metric_directions=metric_directions,
+            baseline_id=resolved_baseline_id,
+            metrics_summary=source_metrics_summary,
+            primary_metric=entry.get("primary_metric"),
+            baseline_variants=entry.get("baseline_variants"),
+        )
+        entry = {
+            **entry,
+            "metric_contract": entry_metric_contract,
+            "primary_metric": entry_primary_metric or entry.get("primary_metric"),
+        }
         canonical_baseline = (
             validate_baseline_metric_contract_submission(
                 metric_contract=entry.get("metric_contract"),
@@ -5534,6 +6761,8 @@ class ArtifactService:
             "snapshot": self.quest_service.snapshot(self._quest_id(quest_root)),
             "metric_details": canonical_baseline["metric_details"],
             "legacy_guidance": "Baseline gate confirmed. Idea selection is now the default next anchor.",
+            "metric_contract_json_path": str(metric_contract_json.get("path") or ""),
+            "metric_contract_json_rel_path": str(metric_contract_json.get("rel_path") or ""),
         }
 
     def waive_baseline(
@@ -6157,11 +7386,18 @@ class ArtifactService:
         return f"run/{run_id or generate_id('run')}"
 
     def _bound_conversations(self, quest_root: Path) -> list[str]:
-        state_path = quest_root / ".ds" / "bindings.json"
-        payload = read_json(state_path, {"sources": ["local:default"]})
-        sources = [self._normalize_conversation_id(str(item)) for item in (payload.get("sources") or ["local:default"])]
-        connector_sources = self._connector_bound_conversations(self._quest_id(quest_root))
-        return self._dedupe_targets([*connector_sources, *sources])
+        quest_id = self._quest_id(quest_root)
+        sources = [
+            self._normalize_conversation_id(str(item))
+            for item in self.quest_service.binding_sources(quest_id)
+        ]
+        authoritative_keys = {conversation_identity_key(item) for item in sources}
+        connector_sources = [
+            item
+            for item in self._connector_bound_conversations(quest_id)
+            if conversation_identity_key(item) in authoritative_keys
+        ]
+        return self._dedupe_targets([*sources, *connector_sources])
 
     def _connector_bound_conversations(self, quest_id: str) -> list[str]:
         root = self.home / "logs" / "connectors"

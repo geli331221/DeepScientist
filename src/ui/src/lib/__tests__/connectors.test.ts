@@ -106,4 +106,31 @@ describe('connectors', () => {
       warning: null,
     })
   })
+
+  it('keeps Lingzhu passive targets selectable for Start Research and settings cards', () => {
+    const targets = normalizeConnectorTargets({
+      name: 'lingzhu',
+      discovered_targets: [
+        {
+          conversation_id: 'lingzhu:passive:DeepScientist',
+          connector: 'lingzhu',
+          chat_type: 'passive',
+          chat_id: 'DeepScientist',
+          chat_id_raw: 'DeepScientist',
+          label: 'Passive binding',
+          source: 'passive_binding',
+          selectable: true,
+          is_passive: true,
+        },
+      ],
+    })
+
+    expect(targets).toHaveLength(1)
+    expect(targets[0]).toMatchObject({
+      conversation_id: 'lingzhu:passive:DeepScientist',
+      chat_type: 'passive',
+      chat_id: 'DeepScientist',
+      selectable: true,
+    })
+  })
 })

@@ -17,11 +17,14 @@ def test_backend_routes_cover_shared_web_and_tui_surface() -> None:
         ("GET", "/api/system/update", "system_update"),
         ("POST", "/api/system/update", "system_update_action"),
         ("GET", "/api/baselines", "baselines"),
+        ("DELETE", "/api/baselines/demo-baseline", "baseline_delete"),
         ("GET", "/api/quests", "quests"),
         ("GET", "/api/quest-id/next", "quest_next_id"),
         ("POST", "/api/quests", "quest_create"),
         ("GET", "/api/connectors", "connectors"),
         ("GET", "/api/connectors/availability", "connectors_availability"),
+        ("POST", "/api/connectors/weixin/login/qr/start", "weixin_login_qr_start"),
+        ("POST", "/api/connectors/weixin/login/qr/wait", "weixin_login_qr_wait"),
         ("DELETE", "/api/connectors/qq/profiles/qq-alpha", "connector_profile_delete"),
         ("POST", "/api/quests/q-001/baseline-binding", "quest_baseline_binding"),
         ("DELETE", "/api/quests/q-001/baseline-binding", "quest_baseline_unbind"),
@@ -43,6 +46,8 @@ def test_backend_routes_cover_shared_web_and_tui_surface() -> None:
         ("GET", "/api/quests/q-001/node-traces", "node_traces"),
         ("GET", "/api/quests/q-001/node-traces/stage%3Amain%3Aidea", "node_trace"),
         ("POST", "/api/quests/q-001/stage-view", "stage_view"),
+        ("GET", "/api/quests/q-001/layout", "quest_layout"),
+        ("POST", "/api/quests/q-001/layout", "quest_layout_update"),
         ("GET", "/api/quests/q-001/graph", "graph"),
         ("GET", "/api/quests/q-001/graph/svg", "graph_asset"),
         ("GET", "/api/quests/q-001/git/branches", "git_branches"),
@@ -64,6 +69,14 @@ def test_backend_routes_cover_shared_web_and_tui_surface() -> None:
         ("POST", "/api/quests/q-001/commands", "command"),
         ("POST", "/api/quests/q-001/control", "quest_control"),
         ("POST", "/api/quests/q-001/runs", "run_create"),
+        ("GET", "/api/v1/arxiv/list", "arxiv_list"),
+        ("POST", "/api/v1/arxiv/import", "arxiv_import"),
+        ("GET", "/api/v1/annotations/file/quest-file::q-001::path%3A%3Adocs%2Fpaper.pdf::docs%2Fpaper.pdf", "annotations_file"),
+        ("GET", "/api/v1/annotations/project/q-001", "annotations_project"),
+        ("POST", "/api/v1/annotations/", "annotation_create"),
+        ("GET", "/api/v1/annotations/ann-001", "annotation_detail"),
+        ("PATCH", "/api/v1/annotations/ann-001", "annotation_update"),
+        ("DELETE", "/api/v1/annotations/ann-001", "annotation_delete"),
         ("POST", "/api/v1/projects/q-001/latex/init", "latex_init"),
         ("POST", "/api/v1/projects/q-001/latex/quest-dir::q-001::paper%2Flatex/compile", "latex_compile"),
         ("GET", "/api/v1/projects/q-001/latex/quest-dir::q-001::paper%2Flatex/builds", "latex_builds"),
@@ -84,16 +97,21 @@ def test_backend_routes_cover_shared_web_and_tui_surface() -> None:
 def test_web_client_uses_acp_and_git_surface_expected_by_backend() -> None:
     source = _read("src/ui/src/lib/api.ts")
     bash_source = _read("src/ui/src/lib/api/bash.ts")
+    arxiv_source = _read("src/ui/src/lib/api/arxiv.ts")
     lab_source = _read("src/ui/src/lib/api/lab.ts")
     latex_source = _read("src/ui/src/lib/api/latex.ts")
     terminal_source = _read("src/ui/src/lib/api/terminal.ts")
+    annotations_source = _read("src/ui/src/lib/plugins/pdf-viewer/api/annotations.ts")
 
     expected_fragments = [
         "/api/baselines",
+        "/api/baselines/${encodeURIComponent(baselineId)}",
         "/api/system/update",
         "/api/quests/${questId}/session",
         "/api/quest-id/next",
         "/api/connectors/availability",
+        "/api/connectors/weixin/login/qr/start",
+        "/api/connectors/weixin/login/qr/wait",
         "/api/connectors/${encodeURIComponent(connectorName)}/profiles/${encodeURIComponent(profileId)}",
         "/api/quests/${questId}/settings",
         "/api/quests/${questId}/bindings",
@@ -102,6 +120,7 @@ def test_web_client_uses_acp_and_git_surface_expected_by_backend() -> None:
         "session_id=quest:${questId}",
         "stream=1",
         "/api/quests/${questId}/workflow",
+        "/api/quests/${questId}/layout",
         "/api/quests/${questId}/artifacts",
         "/api/quests/${questId}/node-traces",
         "/api/quests/${questId}/stage-view",
@@ -139,6 +158,20 @@ def test_web_client_uses_acp_and_git_surface_expected_by_backend() -> None:
         assert fragment in bash_source, f"Bash API client is missing contract fragment: {fragment}"
 
     assert "/api/quests/${projectId}/bash/transcript" not in bash_source
+
+    assert 'const ARXIV_BASE = "/api/v1/arxiv"' in arxiv_source
+    assert "`${ARXIV_BASE}/list`" in arxiv_source
+    assert "`${ARXIV_BASE}/import`" in arxiv_source
+
+    annotation_fragments = [
+        "/api/v1/annotations/file/${fileId}",
+        "/api/v1/annotations/",
+        "/api/v1/annotations/${id}",
+        "/api/v1/annotations/project/${projectId}",
+    ]
+
+    for fragment in annotation_fragments:
+        assert fragment in annotations_source, f"Annotation API client is missing contract fragment: {fragment}"
 
     lab_fragments = [
         "/baseline-binding",
@@ -194,11 +227,11 @@ def test_local_workspace_does_not_route_markdown_or_commands_through_dead_notebo
 
 def test_web_workspace_keeps_streaming_operational_views_and_tool_effect_surface() -> None:
     acp_source = _read("src/ui/src/lib/acp.ts")
-    feed_source = _read("src/ui/src/components/EventFeed.tsx")
     tool_ops_source = _read("src/ui/src/lib/toolOperations.ts")
-    workspace_source = _read("src/ui/src/components/WorkflowStudio.tsx")
     bash_tool_source = _read("src/ui/src/components/workspace/QuestBashExecOperation.tsx")
     workspace_surface_source = _read("src/ui/src/components/workspace/QuestWorkspaceSurface.tsx")
+    studio_timeline_source = _read("src/ui/src/components/workspace/QuestStudioDirectTimeline.tsx")
+    studio_trace_source = _read("src/ui/src/components/workspace/QuestStudioTraceView.tsx")
     lab_canvas_source = _read("src/ui/src/lib/plugins/lab/components/LabQuestGraphCanvas.tsx")
     lab_api_source = _read("src/ui/src/lib/api/lab.ts")
     workspace_i18n_source = _read("src/ui/src/lib/i18n/messages/workspace.ts")
@@ -208,6 +241,10 @@ def test_web_workspace_keeps_streaming_operational_views_and_tool_effect_surface
     assert "client.workflow(targetQuestId)" in acp_source
     assert "ensureViewData" in acp_source
     assert "view === 'details' || view === 'memory'" in acp_source
+    assert "insertHistoryItemChronologically" in acp_source
+    assert "previous_run_id" in acp_source
+    assert "collectSealedAssistantRunIds(initialUpdates)" in acp_source
+    assert "item.label === 'run_failed'" in acp_source
     assert "void ensureViewData(view)" in workspace_surface_source
     assert "onOpenStageSelection={onOpenStageSelection}" in workspace_surface_source
     assert "QuestMemorySurface" in workspace_surface_source
@@ -219,11 +256,11 @@ def test_web_workspace_keeps_streaming_operational_views_and_tool_effect_surface
     assert "const mainNode = operationalNodes.find((node) => node.branch_name === 'main')" in lab_api_source
     assert "const firstOperationalNode = resolveLocalBaselineAnchorNode(nodes, summary.branch || 'main')" in lab_api_source
     assert "quest_workspace_memory" in workspace_i18n_source
-    assert "function OperationBlock" in feed_source
-    assert "item.type === 'operation'" in feed_source
-    assert "ACP-compatible copilot events will appear here." in feed_source
+    assert "function StudioOperationBlock" in studio_timeline_source
+    assert "item.type === 'operation'" in tool_ops_source
+    assert "Assistant text, tool calls, and durable artifacts will appear here as a conversation timeline." in studio_timeline_source
     assert "buildToolEffectPreviews" in tool_ops_source
-    assert "<EventFeed questId={questId} items={feed} />" in workspace_source
+    assert "<QuestStudioDirectTimeline" in studio_trace_source
     assert "McpBashExecView" in bash_tool_source
 
 
@@ -337,14 +374,19 @@ def test_workspace_terminal_surface_uses_raw_pty_attach_flow() -> None:
 def test_workspace_surfaces_hide_autofigure_entry_points() -> None:
     marketplace_source = _read("src/ui/src/lib/plugins/marketplace/MarketplacePlugin.tsx")
     workspace_source = _read("src/ui/src/components/workspace/WorkspaceLayout.tsx")
+    builtin_loader_source = _read("src/ui/src/lib/plugin/builtin-loader.tsx")
+    plugin_types_source = _read("src/ui/src/lib/types/plugin.ts")
 
     assert 'title: "AutoFigure"' not in marketplace_source
-    assert "tab.pluginId === BUILTIN_PLUGINS.AUTOFIGURE" in workspace_source
+    assert "AUTOFIGURE" not in workspace_source
+    assert "plugin-autofigure" not in builtin_loader_source
+    assert "AUTOFIGURE" not in plugin_types_source
 
 
 def test_workspace_studio_uses_direct_timeline_surface() -> None:
     studio_view_source = _read("src/ui/src/components/workspace/QuestStudioTraceView.tsx")
     studio_timeline_source = _read("src/ui/src/components/workspace/QuestStudioDirectTimeline.tsx")
+    bash_tool_source = _read("src/ui/src/components/workspace/QuestBashExecOperation.tsx")
     studio_tool_cards_source = _read("src/ui/src/components/workspace/StudioToolCards.tsx")
     studio_turns_source = _read("src/ui/src/lib/studioTurns.ts")
     acp_bridge_source = _read("src/deepscientist/acp/bridge.py")
@@ -356,7 +398,9 @@ def test_workspace_studio_uses_direct_timeline_surface() -> None:
     assert "buildStudioTurns(feed)" in studio_timeline_source
     assert "findLatestRenderedOperationId" in studio_timeline_source
     assert "QuestBashExecOperation" in studio_timeline_source
+    assert "if (isBashExecOperation(block)) {" in studio_timeline_source
     assert "StudioToolCard" in studio_timeline_source
+    assert "preferBashTerminalRender" in bash_tool_source
     assert "buildArtifactModel" in studio_tool_cards_source
     assert "buildMemoryModel" in studio_tool_cards_source
     assert "buildBashModel" in studio_tool_cards_source

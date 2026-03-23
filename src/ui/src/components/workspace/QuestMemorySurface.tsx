@@ -35,10 +35,10 @@ const MEMORY_CATEGORY_META: Array<{
 
 function classifyMemoryCategory(item: MemoryCard): Exclude<MemoryCategory, 'all'> {
   const path = String(item.path || '').toLowerCase()
-  if (path.includes('/memory/decisions/')) return 'decisions'
-  if (path.includes('/memory/ideas/')) return 'ideas'
-  if (path.includes('/memory/knowledge/')) return 'knowledge'
-  if (path.includes('/memory/papers/')) return 'papers'
+  if (path.includes('memory/decisions/')) return 'decisions'
+  if (path.includes('memory/ideas/')) return 'ideas'
+  if (path.includes('memory/knowledge/')) return 'knowledge'
+  if (path.includes('memory/papers/')) return 'papers'
   return 'episodes'
 }
 
@@ -136,7 +136,10 @@ export function QuestMemorySurface({
   }, [questId, selectedEntry?.document_id])
 
   return (
-    <div className="feed-scrollbar h-full overflow-y-auto overflow-x-hidden">
+    <div
+      className="feed-scrollbar h-full overflow-y-auto overflow-x-hidden"
+      data-onboarding-id="quest-memory-surface"
+    >
       <div className="mx-auto flex min-h-full max-w-[1380px] flex-col px-5 pb-10 pt-5 sm:px-6 lg:px-8">
         <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">

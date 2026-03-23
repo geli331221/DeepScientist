@@ -7,7 +7,6 @@ type RuntimeFlags = {
     productApis?: boolean
     socketIo?: boolean
     notifications?: boolean
-    broadcasts?: boolean
     points?: boolean
     arxiv?: boolean
     cliFrontend?: boolean
@@ -76,14 +75,6 @@ export function supportsNotifications(): boolean {
   const injected = readInjectedRuntime()
   if (typeof injected?.supports?.notifications === 'boolean') {
     return injected.supports.notifications
-  }
-  return supportsProductApis()
-}
-
-export function supportsBroadcasts(): boolean {
-  const injected = readInjectedRuntime()
-  if (typeof injected?.supports?.broadcasts === 'boolean') {
-    return injected.supports.broadcasts
   }
   return supportsProductApis()
 }

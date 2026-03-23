@@ -245,7 +245,32 @@ def test_prompt_builder_loads_lingzhu_connector_contract_when_bound(temp_home: P
     assert "through `artifact.interact(...)`" in prompt
     assert "clear, concise, respectful, and high-information-density" in prompt
     assert "for each Lingzhu-facing `artifact.interact(...)` message" in prompt
+    assert "within about 20 Chinese characters" in prompt
     assert "only the synopsis and key facts" in prompt
+    assert "text explicitly starts with `我现在的任务是`" in prompt
+    assert "polling rather than giving a new task" in prompt
+
+
+def test_prompt_builder_loads_weixin_connector_contract_when_bound(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest_service.bind_source(snapshot["quest_id"], "weixin:direct:wx-user-1@im.wechat")
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="decision",
+        user_message="Continue the quest.",
+        model="gpt-5.4",
+    )
+
+    assert "## Connector Contract" in prompt
+    assert "connector_contract_id: weixin" in prompt
+    assert "loaded only when Weixin is the active or bound external connector" in prompt
+    assert "runtime-managed `context_token`" in prompt
+    assert "native image, video, and file delivery" in prompt
+    assert "connector_delivery={'weixin': {'media_kind': 'image'}}" in prompt
+    assert "userfiles/weixin/..." in prompt
+    assert "roughly 10 tool calls" in prompt
 
 
 @pytest.mark.parametrize(("skill_id",), [("decision",), ("baseline",), ("analysis-campaign",), ("write",)])
@@ -527,6 +552,9 @@ def test_prompt_builder_mentions_submit_idea_milestone_protocol(temp_home: Path)
     assert "artifact.submit_idea" in prompt
     assert "immediately after a successful accepted artifact.submit_idea(...)" in prompt
     assert "whether it currently looks valid, research-worthy, and insight-bearing" in prompt
+    assert "at least 5 and usually 5 to 10 related and usable papers" in prompt
+    assert "the final selected-idea draft should cite the survey-stage papers it actually uses" in prompt
+    assert "`References` or `Bibliography` section" in prompt
 
 
 def test_prompt_builder_mentions_analysis_and_paper_milestone_protocols(temp_home: Path) -> None:
@@ -737,6 +765,35 @@ def test_prompt_builder_includes_active_baseline_metric_contract_guidance(temp_h
 
     assert "active_baseline_metric_contract_json: baselines/local/baseline-001/json/metric_contract.json" in prompt
     assert "read this JSON file and treat it as the canonical baseline comparison contract" in prompt
+
+
+def test_prompt_builder_hides_deleted_reusable_baselines(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    builder.baseline_registry.publish(
+        {
+            "baseline_id": "baseline-keep",
+            "summary": "Still available",
+            "metrics_summary": {"acc": 0.92},
+        }
+    )
+    builder.baseline_registry.publish(
+        {
+            "baseline_id": "baseline-delete",
+            "summary": "Should disappear",
+            "metrics_summary": {"acc": 0.9},
+        }
+    )
+    builder.baseline_registry.delete("baseline-delete")
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="baseline",
+        user_message="Review reusable baselines before continuing.",
+        model="gpt-5.4",
+    )
+
+    assert "baseline-keep" in prompt
+    assert "baseline-delete" not in prompt
 
 
 def test_prompt_builder_includes_paper_bundle_and_claim_snapshot(temp_home: Path) -> None:

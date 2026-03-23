@@ -22,6 +22,8 @@ def infer_connector_transport(name: str, config: dict[str, Any] | None) -> str:
 
     if normalized == "qq":
         return "gateway_direct"
+    if normalized == "weixin":
+        return "ilink_long_poll"
     if normalized == "telegram":
         return "polling"
     if normalized == "discord":

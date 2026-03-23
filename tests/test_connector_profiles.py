@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from deepscientist.config import ConfigManager
 from deepscientist.config.models import default_connectors
-from deepscientist.connector_profiles import (
+from deepscientist.connector.connector_profiles import (
     connector_profile_label,
     list_connector_profiles,
     merge_connector_profile_config,
@@ -15,7 +17,7 @@ from deepscientist.channels.qq import QQRelayChannel
 from deepscientist.channels.relay import GenericRelayChannel
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
-from deepscientist.qq_profiles import normalize_qq_connector_config
+from deepscientist.connector.qq_profiles import normalize_qq_connector_config
 from deepscientist.shared import write_json, write_yaml
 
 
@@ -114,13 +116,16 @@ def test_normalize_connector_config_prefers_direct_secret_and_clears_env_placeho
     assert profile["app_token_env"] is None
 
 
-def test_normalize_connector_config_preserves_env_only_credentials() -> None:
+def test_normalize_connector_config_preserves_env_only_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     connectors = default_connectors()
     telegram = connectors["telegram"]
     telegram["enabled"] = True
     telegram["bot_name"] = "Research Bot"
     telegram["bot_token"] = None
     telegram["bot_token_env"] = "TELEGRAM_BOT_TOKEN"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-secret")
 
     normalized = normalize_connector_config("telegram", telegram)
     profile = normalized["profiles"][0]
@@ -131,11 +136,97 @@ def test_normalize_connector_config_preserves_env_only_credentials() -> None:
     assert profile["bot_token_env"] == "TELEGRAM_BOT_TOKEN"
 
 
+def test_normalize_connector_config_auto_enables_ready_env_only_profile_when_env_secret_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connectors = default_connectors()
+    slack = connectors["slack"]
+    slack["enabled"] = False
+    slack["bot_name"] = "Alpha Slack"
+    slack["bot_token_env"] = "SLACK_BOT_TOKEN"
+    slack["app_token_env"] = "SLACK_APP_TOKEN"
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-alpha")
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-alpha")
+
+    normalized = normalize_connector_config("slack", slack)
+
+    assert normalized["enabled"] is True
+    assert len(normalized["profiles"]) == 1
+    assert normalized["profiles"][0]["enabled"] is True
+
+
+def test_normalize_connector_config_drops_default_placeholder_profiles_without_resolved_runtime_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    connectors = default_connectors()
+    connectors["telegram"]["profiles"] = [
+        {
+            "profile_id": "telegram-deepscientist",
+            "enabled": False,
+            "transport": "polling",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+        }
+    ]
+    connectors["slack"]["profiles"] = [
+        {
+            "profile_id": "slack-deepscientist",
+            "enabled": False,
+            "transport": "socket_mode",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "SLACK_BOT_TOKEN",
+            "bot_user_id": None,
+            "app_token": None,
+            "app_token_env": "SLACK_APP_TOKEN",
+        }
+    ]
+    connectors["whatsapp"]["profiles"] = [
+        {
+            "profile_id": "whatsapp-deepscientist",
+            "enabled": False,
+            "transport": "local_session",
+            "bot_name": "DeepScientist",
+            "auth_method": "qr_browser",
+            "session_dir": "~/.deepscientist/connectors/whatsapp",
+        }
+    ]
+
+    telegram = normalize_connector_config("telegram", connectors["telegram"])
+    slack = normalize_connector_config("slack", connectors["slack"])
+    whatsapp = normalize_connector_config("whatsapp", connectors["whatsapp"])
+
+    assert telegram["enabled"] is False
+    assert telegram["profiles"] == []
+    assert slack["enabled"] is False
+    assert slack["profiles"] == []
+    assert whatsapp["enabled"] is False
+    assert whatsapp["profiles"] == []
+
+
 def test_default_connector_normalization_does_not_create_spurious_profiles() -> None:
     connectors = default_connectors()
 
     assert normalize_qq_connector_config(connectors["qq"])["profiles"] == []
     assert normalize_connector_config("telegram", connectors["telegram"])["profiles"] == []
+
+
+def test_normalize_qq_connector_config_auto_enables_ready_profile_even_when_enabled_is_false() -> None:
+    connectors = default_connectors()
+    qq = connectors["qq"]
+    qq["enabled"] = False
+    qq["app_id"] = "1903299925"
+    qq["app_secret_env"] = "QQ_APP_SECRET"
+
+    normalized = normalize_qq_connector_config(qq)
+
+    assert normalized["enabled"] is True
+    assert len(normalized["profiles"]) == 1
+    assert normalized["profiles"][0]["enabled"] is True
 
 
 def test_config_save_persists_direct_connector_secrets_without_env_placeholders(temp_home: Path) -> None:
@@ -177,6 +268,92 @@ def test_config_save_persists_direct_connector_secrets_without_env_placeholders(
     assert "QQ_APP_SECRET" not in saved
     assert "SLACK_BOT_TOKEN" not in saved
     assert "SLACK_APP_TOKEN" not in saved
+
+
+def test_config_save_accepts_disabled_placeholder_profiles_without_blocking_other_connector_changes(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["telegram"]["profiles"] = [
+        {
+            "profile_id": "telegram-deepscientist",
+            "enabled": False,
+            "transport": "polling",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+        }
+    ]
+    connectors["discord"]["profiles"] = [
+        {
+            "profile_id": "discord-deepscientist",
+            "enabled": False,
+            "transport": "gateway",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "DISCORD_BOT_TOKEN",
+            "application_id": None,
+        }
+    ]
+    connectors["slack"]["profiles"] = [
+        {
+            "profile_id": "slack-deepscientist",
+            "enabled": False,
+            "transport": "socket_mode",
+            "bot_name": "DeepScientist",
+            "bot_token": None,
+            "bot_token_env": "SLACK_BOT_TOKEN",
+            "bot_user_id": None,
+            "app_token": None,
+            "app_token_env": "SLACK_APP_TOKEN",
+        }
+    ]
+    connectors["feishu"]["profiles"] = [
+        {
+            "profile_id": "feishu-deepscientist",
+            "enabled": False,
+            "transport": "long_connection",
+            "bot_name": "DeepScientist",
+            "app_id": None,
+            "app_secret": None,
+            "app_secret_env": "FEISHU_APP_SECRET",
+            "api_base_url": "https://open.feishu.cn",
+        }
+    ]
+    connectors["whatsapp"]["profiles"] = [
+        {
+            "profile_id": "whatsapp-deepscientist",
+            "enabled": False,
+            "transport": "local_session",
+            "bot_name": "DeepScientist",
+            "auth_method": "qr_browser",
+            "session_dir": "~/.deepscientist/connectors/whatsapp",
+        }
+    ]
+    connectors["weixin"]["bot_token"] = "wx-bot-token"
+    connectors["weixin"]["account_id"] = "wx-bot-1@im.bot"
+    connectors["weixin"]["login_user_id"] = "wx-owner@im.wechat"
+
+    result = manager.save_named_payload("connectors", connectors)
+
+    assert result["ok"] is True
+    parsed = manager.load_named_normalized("connectors")
+    assert parsed["weixin"]["enabled"] is True
+    assert parsed["telegram"]["enabled"] is False
+    assert parsed["telegram"]["profiles"] == []
+    assert parsed["discord"]["profiles"] == []
+    assert parsed["slack"]["profiles"] == []
+    assert parsed["feishu"]["profiles"] == []
+    assert parsed["whatsapp"]["profiles"] == []
 
 
 def test_profile_aware_conversation_identity_round_trips_for_non_qq_connector() -> None:

@@ -19,9 +19,10 @@ except ImportError:  # pragma: no cover
 
 from ..artifact.metrics import build_metrics_timeline, extract_latest_metric
 from ..config import ConfigManager
-from ..connector_runtime import conversation_identity_key, normalize_conversation_id
+from ..connector_runtime import conversation_identity_key, normalize_conversation_id, parse_conversation_id
 from ..gitops import current_branch, export_git_graph, head_commit, init_repo
 from ..home import repo_root
+from ..registries import BaselineRegistry
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, read_text, read_yaml, resolve_within, run_command, sha256_text, slugify, utc_now, write_json, write_text, write_yaml
 from ..skills import SkillInstaller
 from ..web_search import extract_web_search_payload
@@ -48,6 +49,7 @@ class QuestService:
         self.home = home
         self.quests_root = home / "quests"
         self.skill_installer = skill_installer
+        self.baseline_registry = BaselineRegistry(home)
         self._file_cache_lock = threading.Lock()
         self._file_cache: dict[str, dict[str, Any]] = {}
         self._jsonl_cache_lock = threading.Lock()
@@ -61,6 +63,35 @@ class QuestService:
 
     def _quest_root(self, quest_id: str) -> Path:
         return self.quests_root / quest_id
+
+    def _normalized_binding_sources(self, sources: list[Any] | None) -> list[str]:
+        local_present = False
+        external_source: str | None = None
+        for raw in sources or []:
+            normalized = self._normalize_binding_source(raw)
+            if not normalized:
+                continue
+            if normalized == "local:default":
+                local_present = True
+                continue
+            parsed = parse_conversation_id(normalized)
+            connector = str((parsed or {}).get("connector") or "").strip().lower()
+            if connector == "local":
+                local_present = True
+                continue
+            external_source = normalized
+        if external_source:
+            return ["local:default", external_source]
+        if local_present:
+            return ["local:default"]
+        return ["local:default"]
+
+    def _binding_sources_payload(self, quest_root: Path) -> dict[str, list[str]]:
+        bindings_path = quest_root / ".ds" / "bindings.json"
+        payload = read_json(bindings_path, {"sources": ["local:default"]})
+        raw_sources = payload.get("sources") if isinstance(payload, dict) else ["local:default"]
+        sources = self._normalized_binding_sources(raw_sources if isinstance(raw_sources, list) else ["local:default"])
+        return {"sources": sources}
 
     def preferred_locale(self, quest_root: Path | None = None) -> str:
         if quest_root is not None:
@@ -116,6 +147,10 @@ class QuestService:
     def _research_state_path(quest_root: Path) -> Path:
         return quest_root / ".ds" / "research_state.json"
 
+    @staticmethod
+    def _lab_canvas_state_path(quest_root: Path) -> Path:
+        return quest_root / ".ds" / "lab_canvas_state.json"
+
     def _default_research_state(self, quest_root: Path) -> dict[str, Any]:
         return {
             "version": 1,
@@ -135,6 +170,18 @@ class QuestService:
             "next_pending_slice_id": None,
             "workspace_mode": "quest",
             "last_flow_type": None,
+            "updated_at": utc_now(),
+        }
+
+    def _default_lab_canvas_state(self, quest_root: Path) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "layout_json": {
+                "branch": {},
+                "event": {},
+                "stage": {},
+                "preferences": {},
+            },
             "updated_at": utc_now(),
         }
 
@@ -171,6 +218,39 @@ class QuestService:
                 continue
             current[key] = str(value) if isinstance(value, Path) else value
         return self.write_research_state(quest_root, current)
+
+    def read_lab_canvas_state(self, quest_root: Path) -> dict[str, Any]:
+        self._initialize_runtime_files(quest_root)
+        defaults = self._default_lab_canvas_state(quest_root)
+        payload = self._read_cached_json(self._lab_canvas_state_path(quest_root), defaults)
+        if not isinstance(payload, dict):
+            payload = defaults
+        merged = {**defaults, **payload}
+        layout_json = dict(merged.get("layout_json") or {}) if isinstance(merged.get("layout_json"), dict) else {}
+        for key in ("branch", "event", "stage", "preferences"):
+            if not isinstance(layout_json.get(key), dict):
+                layout_json[key] = {}
+        merged["layout_json"] = layout_json
+        return merged
+
+    def update_lab_canvas_state(
+        self,
+        quest_root: Path,
+        *,
+        layout_json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self.read_lab_canvas_state(quest_root)
+        normalized_layout = dict(layout_json or {}) if isinstance(layout_json, dict) else {}
+        for key in ("branch", "event", "stage", "preferences"):
+            if not isinstance(normalized_layout.get(key), dict):
+                normalized_layout[key] = {}
+        payload = {
+            **current,
+            "layout_json": normalized_layout,
+            "updated_at": utc_now(),
+        }
+        write_json(self._lab_canvas_state_path(quest_root), payload)
+        return payload
 
     def workspace_roots(self, quest_root: Path) -> list[Path]:
         roots: list[Path] = [quest_root]
@@ -305,6 +385,9 @@ class QuestService:
                     continue
                 seen_paths.add(key)
                 payload = self._read_cached_yaml(path, {})
+                baseline_id = str(payload.get("source_baseline_id") or "").strip() if isinstance(payload, dict) else ""
+                if baseline_id and self.baseline_registry.is_deleted(baseline_id):
+                    continue
                 if isinstance(payload, dict) and payload:
                     attachments.append(payload)
         if not attachments:
@@ -684,7 +767,7 @@ class QuestService:
             "last_artifact_interact_at": runtime_state.get("last_artifact_interact_at"),
             "last_delivered_batch_id": runtime_state.get("last_delivered_batch_id"),
             "last_delivered_at": runtime_state.get("last_delivered_at"),
-            "bound_conversations": (self._read_cached_json(quest_root / ".ds" / "bindings.json", {}).get("sources") or ["local:default"]),
+            "bound_conversations": self._binding_sources_payload(quest_root).get("sources") or ["local:default"],
             "created_at": quest_yaml.get("created_at"),
             "updated_at": quest_yaml.get("updated_at"),
             "branch": research_state.get("current_workspace_branch") or research_state.get("research_head_branch"),
@@ -1039,7 +1122,7 @@ class QuestService:
             "last_artifact_interact_at": runtime_state.get("last_artifact_interact_at"),
             "last_delivered_batch_id": runtime_state.get("last_delivered_batch_id"),
             "last_delivered_at": runtime_state.get("last_delivered_at"),
-            "bound_conversations": (self._read_cached_json(quest_root / ".ds" / "bindings.json", {}).get("sources") or ["local:default"]),
+            "bound_conversations": self._binding_sources_payload(quest_root).get("sources") or ["local:default"],
             "created_at": quest_yaml.get("created_at"),
             "updated_at": quest_yaml.get("updated_at"),
             "branch": current_branch(workspace_root),
@@ -1308,61 +1391,30 @@ class QuestService:
     def bind_source(self, quest_id: str, source: str) -> dict:
         quest_root = self._quest_root(quest_id)
         bindings_path = quest_root / ".ds" / "bindings.json"
-        bindings = read_json(bindings_path, {"sources": []})
+        bindings = self._binding_sources_payload(quest_root)
         normalized_source = self._normalize_binding_source(source)
-        normalized_key = conversation_identity_key(normalized_source)
-        changed = False
-        replaced = False
-        sources: list[str] = []
-        for item in list(bindings.get("sources") or []):
-            existing = self._normalize_binding_source(str(item))
-            if conversation_identity_key(existing) == normalized_key:
-                if not replaced:
-                    sources.append(normalized_source)
-                    replaced = True
-                    if existing != normalized_source:
-                        changed = True
-                else:
-                    changed = True
-                continue
-            sources.append(existing)
-            if existing != item:
-                changed = True
-        if not replaced:
-            sources.append(normalized_source)
-            changed = True
+        next_sources = self._normalized_binding_sources([*(bindings.get("sources") or []), normalized_source])
+        changed = list(bindings.get("sources") or []) != next_sources
         if changed:
-            bindings["sources"] = sources
+            bindings["sources"] = next_sources
             write_json(bindings_path, bindings)
         return bindings
 
     def binding_sources(self, quest_id: str) -> list[str]:
         quest_root = self._quest_root(quest_id)
-        bindings_path = quest_root / ".ds" / "bindings.json"
-        bindings = read_json(bindings_path, {"sources": ["local:default"]})
-        sources = [self._normalize_binding_source(item) for item in (bindings.get("sources") or [])]
-        return [item for item in sources if item]
+        return list(self._binding_sources_payload(quest_root).get("sources") or ["local:default"])
 
     def set_binding_sources(self, quest_id: str, sources: list[str]) -> dict:
         quest_root = self._quest_root(quest_id)
         bindings_path = quest_root / ".ds" / "bindings.json"
-        normalized_sources = [self._normalize_binding_source(item) for item in sources]
-        ordered: list[str] = []
-        seen: set[str] = set()
-        for item in normalized_sources:
-            key = conversation_identity_key(item)
-            if not item or key in seen:
-                continue
-            seen.add(key)
-            ordered.append(item)
-        payload = {"sources": ordered}
+        payload = {"sources": self._normalized_binding_sources(sources)}
         write_json(bindings_path, payload)
         return payload
 
     def unbind_source(self, quest_id: str, source: str) -> dict:
         quest_root = self._quest_root(quest_id)
         bindings_path = quest_root / ".ds" / "bindings.json"
-        bindings = read_json(bindings_path, {"sources": []})
+        bindings = self._binding_sources_payload(quest_root)
         normalized_source = self._normalize_binding_source(source)
         normalized_key = conversation_identity_key(normalized_source)
         changed = False
@@ -1375,8 +1427,11 @@ class QuestService:
             sources.append(existing)
             if existing != item:
                 changed = True
+        normalized_sources = self._normalized_binding_sources(sources)
+        if normalized_sources != list(bindings.get("sources") or []):
+            changed = True
         if changed:
-            bindings["sources"] = sources
+            bindings["sources"] = normalized_sources
             write_json(bindings_path, bindings)
         return bindings
 
@@ -1770,6 +1825,12 @@ class QuestService:
         resolved_selection = dict(selection or {})
         selection_ref = str(resolved_selection.get("selection_ref") or "").strip()
         selection_type = str(resolved_selection.get("selection_type") or "stage_node").strip() or None
+        if (
+            selection_type == "branch_node"
+            and selection_ref
+            and not str(resolved_selection.get("branch_name") or "").strip()
+        ):
+            resolved_selection["branch_name"] = selection_ref
         trace = None
         if selection_ref:
             try:
@@ -2026,7 +2087,18 @@ class QuestService:
             if document_id.startswith(("questpath::", "memory::"))
             else workspace_root
         )
-        path, writable, scope, source_kind = self._resolve_document(resolution_root, document_id)
+        try:
+            path, writable, scope, source_kind = self._resolve_document(resolution_root, document_id)
+        except FileNotFoundError:
+            legacy_relative = None
+            if document_id.startswith("path::"):
+                legacy_relative = document_id.split("::", 1)[1].lstrip("/")
+            if legacy_relative and legacy_relative.startswith("literature/arxiv/"):
+                path, writable, scope, source_kind = self._resolve_document(
+                    quest_root, f"questpath::{legacy_relative}"
+                )
+            else:
+                raise
         renderer_hint, mime_type = self._renderer_hint_for(path)
         is_text = self._is_text_document(path, mime_type, renderer_hint)
         content = read_text(path) if is_text else ""
@@ -2417,6 +2489,9 @@ class QuestService:
         research_state_path = self._research_state_path(quest_root)
         if not research_state_path.exists():
             write_json(research_state_path, self._default_research_state(quest_root))
+        lab_canvas_state_path = self._lab_canvas_state_path(quest_root)
+        if not lab_canvas_state_path.exists():
+            write_json(lab_canvas_state_path, self._default_lab_canvas_state(quest_root))
         agent_status_path = self._agent_status_path(quest_root)
         if not agent_status_path.exists():
             write_json(agent_status_path, self._default_agent_status(quest_root))
@@ -3492,7 +3567,35 @@ def _tool_name(event: dict, item: dict) -> str:
     return "tool"
 
 
+def _structured_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except TypeError:
+        return str(value)
+
+
+def _is_bash_exec_item(event: dict, item: dict) -> bool:
+    server = str(item.get("server") or event.get("server") or "").strip()
+    tool = str(item.get("tool") or event.get("tool") or "").strip()
+    return server == "bash_exec" and tool == "bash_exec"
+
+
 def _tool_args(event: dict, item: dict) -> str:
+    if _is_bash_exec_item(event, item):
+        for value in (
+            item.get("arguments"),
+            event.get("arguments"),
+            item.get("input"),
+            event.get("input"),
+        ):
+            text = _structured_text(value)
+            if text:
+                return text
+        return ""
     for value in (
         item.get("command"),
         item.get("query"),
@@ -3512,6 +3615,21 @@ def _tool_args(event: dict, item: dict) -> str:
 
 
 def _tool_output(event: dict, item: dict) -> str:
+    if _is_bash_exec_item(event, item):
+        for value in (
+            item.get("result"),
+            item.get("output"),
+            item.get("content"),
+            event.get("result"),
+            event.get("output"),
+            event.get("content"),
+            item.get("aggregated_output"),
+            event.get("aggregated_output"),
+        ):
+            text = _structured_text(value)
+            if text:
+                return text
+        return ""
     for value in (
         item.get("aggregated_output"),
         item.get("changes"),
@@ -3554,17 +3672,25 @@ def _mcp_tool_metadata(*, quest_id: str, run_id: str, server: str, tool: str, it
         for key in ("command", "workdir", "mode", "timeout_seconds", "comment"):
             if key in arguments:
                 metadata[key] = arguments.get(key)
+        if server == "bash_exec" and tool == "bash_exec" and isinstance(arguments.get("id"), str):
+            metadata["bash_id"] = arguments.get("id")
     result_payload = _mcp_result_payload(item)
     if server == "bash_exec" and tool == "bash_exec":
         for key in (
             "bash_id",
             "status",
+            "command",
+            "workdir",
+            "cwd",
+            "kind",
+            "comment",
             "started_at",
             "finished_at",
             "exit_code",
             "stop_reason",
             "last_progress",
             "log_path",
+            "watchdog_after_seconds",
         ):
             if key in result_payload:
                 metadata[key] = result_payload.get(key)

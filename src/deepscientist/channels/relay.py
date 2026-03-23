@@ -13,7 +13,7 @@ from ..connector_runtime import (
     merge_discovered_targets,
     parse_conversation_id,
 )
-from ..connector_profiles import (
+from ..connector.connector_profiles import (
     PROFILEABLE_CONNECTOR_NAMES,
     connector_profile_label,
     find_connector_profile,
@@ -627,6 +627,7 @@ class GenericRelayChannel(BaseChannel):
             "text": text,
             "attachments": attachments,
             "surface_actions": [dict(item) for item in (payload.get("surface_actions") or []) if isinstance(item, dict)],
+            "connector_hints": dict(payload.get("connector_hints")) if isinstance(payload.get("connector_hints"), dict) else {},
             "quest_id": payload.get("quest_id"),
             "quest_root": payload.get("quest_root"),
             "importance": payload.get("importance"),
@@ -980,6 +981,11 @@ class GenericRelayChannel(BaseChannel):
             return bool(
                 self._secret("access_token", "access_token_env", config=payload)
                 and str(payload.get("phone_number_id") or "").strip()
+            )
+        if self.name == "weixin":
+            return bool(
+                self._secret("bot_token", "bot_token_env", config=payload)
+                and str(payload.get("account_id") or "").strip()
             )
         return False
 

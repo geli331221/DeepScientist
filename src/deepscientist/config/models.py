@@ -6,7 +6,7 @@ from pathlib import Path
 CONFIG_NAMES = ("config", "runners", "connectors", "plugins", "mcp_servers")
 REQUIRED_CONFIG_NAMES = ("config", "runners", "connectors")
 OPTIONAL_CONFIG_NAMES = ("plugins", "mcp_servers")
-SYSTEM_CONNECTOR_NAMES = ("qq", "telegram", "discord", "slack", "feishu", "whatsapp", "lingzhu")
+SYSTEM_CONNECTOR_NAMES = ("qq", "weixin", "telegram", "discord", "slack", "feishu", "whatsapp", "lingzhu")
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ def config_filename(name: str) -> str:
 
 
 def default_system_enabled_connectors() -> dict[str, bool]:
-    return {name: name == "qq" for name in SYSTEM_CONNECTOR_NAMES}
+    return {name: name in {"qq", "weixin", "lingzhu"} for name in SYSTEM_CONNECTOR_NAMES}
 
 
 def default_config(home: Path) -> dict:
@@ -147,6 +147,26 @@ def default_connectors() -> dict:
             "auto_send_paper_pdf": True,
             "enable_markdown_send": False,
             "enable_file_upload_experimental": False,
+        },
+        "weixin": {
+            "enabled": False,
+            "transport": "ilink_long_poll",
+            "bot_name": "DeepScientist",
+            "command_prefix": "/",
+            "base_url": "https://ilinkai.weixin.qq.com",
+            "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+            "bot_type": "3",
+            "bot_token": None,
+            "bot_token_env": None,
+            "account_id": None,
+            "login_user_id": None,
+            "route_tag": None,
+            "dm_policy": "pairing",
+            "allow_from": [],
+            "group_policy": "disabled",
+            "group_allow_from": [],
+            "groups": [],
+            "auto_bind_dm_to_active_quest": True,
         },
         "telegram": {
             "enabled": False,

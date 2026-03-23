@@ -52,6 +52,8 @@ import { QuestStudioTraceView } from './QuestStudioTraceView'
 import type { QuestWorkspaceState } from './QuestWorkspaceSurface'
 import { QuestWorkspaceSurface } from './QuestWorkspaceSurface'
 import type { QuestStageSelection, QuestWorkspaceView } from './workspace-events'
+import { ArxivPanel } from '@/components/arxiv'
+import { supportsArxiv } from '@/lib/runtime/quest-runtime'
 
 const QUEST_WORKSPACE_PLUGIN_ID = '@ds/plugin-quest-workspace'
 
@@ -545,6 +547,8 @@ function MobileExplorerList({
 }
 
 function MobileExplorerPanel({
+  projectId,
+  readOnly,
   focusSelection,
   onOpenFile,
   onOpenStage,
@@ -555,6 +559,8 @@ function MobileExplorerPanel({
   sourceHint,
   activePath,
 }: {
+  projectId: string
+  readOnly?: boolean
   focusSelection: QuestStageSelection | null
   onOpenFile: (file: FileNode) => void | Promise<void>
   onOpenStage: () => void
@@ -565,6 +571,7 @@ function MobileExplorerPanel({
   sourceHint?: string | null
   activePath?: string | null
 }) {
+  const showArxivPanel = supportsArxiv() && Boolean(projectId)
   return (
     <MobileSurface className="overflow-hidden bg-transparent shadow-none dark:bg-transparent">
       <div className="shrink-0 px-5 pb-3 pt-2">
@@ -626,6 +633,13 @@ function MobileExplorerPanel({
           onOpenFile={onOpenFile}
         />
       </div>
+      {showArxivPanel ? (
+        <div className="mt-3 shrink-0">
+          <div className="overflow-hidden rounded-[24px] bg-[rgba(255,255,255,0.62)] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)] dark:bg-white/[0.03] dark:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]">
+            <ArxivPanel projectId={projectId} readOnly={readOnly} variant="compact" />
+          </div>
+        </div>
+      ) : null}
     </MobileSurface>
   )
 }
@@ -1038,6 +1052,8 @@ export function MobileQuestWorkspaceShell({
           </div>
         ) : primaryTab === 'explorer' ? (
           <MobileExplorerPanel
+            projectId={projectId}
+            readOnly={readOnly}
             focusSelection={stageSelection}
             onOpenFile={handleFileOpen}
             onOpenStage={() => setOverlay('stage')}

@@ -22,25 +22,48 @@ class BaselineRegistry:
         self.reconcile_confirmed_quests()
         entry_files = sorted(self.entries_root.glob("*.yaml"))
         if entry_files:
-            return sorted((self._load_entry_file(path) for path in entry_files), key=self._entry_sort_key)
+            return sorted(
+                (
+                    entry
+                    for path in entry_files
+                    for entry in [self._load_entry_file(path)]
+                    if not self._is_deleted_entry(entry)
+                ),
+                key=self._entry_sort_key,
+            )
 
         latest_by_id: dict[str, dict] = {}
         for item in self._history_entries():
             baseline_id = str(item.get("baseline_id") or item.get("entry_id") or "").strip()
             if baseline_id:
                 latest_by_id[baseline_id] = item
-        return sorted(latest_by_id.values(), key=self._entry_sort_key)
+        return sorted(
+            (item for item in latest_by_id.values() if not self._is_deleted_entry(item)),
+            key=self._entry_sort_key,
+        )
 
-    def get(self, baseline_id: str) -> dict | None:
+    def get(self, baseline_id: str, *, include_deleted: bool = False) -> dict | None:
         normalized_id = self._normalize_identifier(baseline_id, field_name="Baseline id")
         path = self._entry_path(normalized_id)
         if path.exists():
-            return self._load_entry_file(path)
+            entry = self._load_entry_file(path)
+            if self._is_deleted_entry(entry) and not include_deleted:
+                return None
+            return entry
         latest_match = None
         for item in self._history_entries():
             if item.get("baseline_id") == normalized_id or item.get("entry_id") == normalized_id:
                 latest_match = item
+        if self._is_deleted_entry(latest_match) and not include_deleted:
+            return None
         return latest_match
+
+    def is_deleted(self, baseline_id: str) -> bool:
+        try:
+            entry = self.get(baseline_id, include_deleted=True)
+        except ValueError:
+            return False
+        return self._is_deleted_entry(entry)
 
     def publish(self, entry: dict) -> dict:
         timestamp = utc_now()
@@ -201,6 +224,8 @@ class BaselineRegistry:
             }
 
             existing = self._existing_entry(baseline_id)
+            if self._is_deleted_entry(existing):
+                continue
             if self._entry_needs_publish(existing, entry):
                 synchronized.append(self.publish(entry))
             elif existing:
@@ -243,6 +268,27 @@ class BaselineRegistry:
         }
         write_yaml(attachment_root / "attachment.yaml", attachment)
         return attachment
+
+    def delete(self, baseline_id: str) -> dict:
+        normalized_id = self._normalize_identifier(baseline_id, field_name="Baseline id")
+        existing = self.get(normalized_id, include_deleted=True) or {}
+        timestamp = utc_now()
+        deleted_entry = {
+            **existing,
+            "registry_kind": "baseline",
+            "schema_version": 1,
+            "entry_id": normalized_id,
+            "baseline_id": normalized_id,
+            "status": "deleted",
+            "updated_at": timestamp,
+            "deleted_at": timestamp,
+            "summary": str(existing.get("summary") or "").strip(),
+        }
+        if not deleted_entry.get("created_at"):
+            deleted_entry["created_at"] = timestamp
+        write_yaml(self._entry_path(normalized_id), deleted_entry)
+        append_jsonl(self.index_path, deleted_entry)
+        return deleted_entry
 
     def _history_entries(self) -> list[dict]:
         return read_jsonl(self.index_path)
@@ -291,6 +337,12 @@ class BaselineRegistry:
             return None
         entry = self._load_entry_file(path)
         return entry if isinstance(entry, dict) and entry else None
+
+    @staticmethod
+    def _is_deleted_entry(entry: dict[str, Any] | None) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        return str(entry.get("status") or "").strip().lower() == "deleted"
 
     @staticmethod
     def _entry_needs_publish(existing: dict[str, Any] | None, candidate: dict[str, Any]) -> bool:

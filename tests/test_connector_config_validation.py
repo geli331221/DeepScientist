@@ -99,7 +99,8 @@ def test_connector_validation_rejects_qq_direct_without_credentials(temp_home: P
 
     result = manager.validate_named_text("connectors", yaml.safe_dump(connectors, sort_keys=False))
     assert result["ok"] is False
-    assert any("qq: requires at least one configured profile under `qq.profiles`." in item for item in result["errors"])
+    assert any("qq[" in item and "requires `app_id`" in item for item in result["errors"])
+    assert any("qq[" in item and "requires `app_secret` or `app_secret_env`" in item for item in result["errors"])
 
 
 def test_generic_connector_enforces_dm_allowlist(temp_home: Path) -> None:

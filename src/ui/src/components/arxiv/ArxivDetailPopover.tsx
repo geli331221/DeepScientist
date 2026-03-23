@@ -5,6 +5,8 @@ import { ExternalLink, ClipboardCopy } from "lucide-react";
 import { Dialog, DialogContent, DialogTrigger, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
 import type { ArxivPaper } from "@/lib/types/arxiv";
+import MarkdownRenderer from "@/lib/plugins/markdown-viewer/components/MarkdownRenderer";
+import { getArxivSummaryDisplayMarkdown, hasArxivOverview } from "@/lib/arxiv-summary";
 import { generateBibTeX } from "@/lib/utils/bibtex";
 import { copyToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
@@ -52,6 +54,8 @@ export function ArxivDetailPopover({ paper, trigger, disabled = false }: ArxivDe
   const publishedLine = [paper.publishedAt, paper.version ? `v${paper.version}` : null]
     .filter(Boolean)
     .join(" - ");
+  const summaryMarkdown = getArxivSummaryDisplayMarkdown(paper);
+  const showOverview = hasArxivOverview(paper);
 
   return (
     <Dialog>
@@ -68,9 +72,18 @@ export function ArxivDetailPopover({ paper, trigger, disabled = false }: ArxivDe
           </div>
 
           <div className="rounded-lg border border-[var(--soft-border)] bg-[var(--soft-bg-surface)]/60 p-3">
-            <div className="text-xs font-semibold text-[var(--soft-text-secondary)]">Abstract</div>
+            <div className="text-xs font-semibold text-[var(--soft-text-secondary)]">
+              {showOverview ? "Summary" : "Abstract"}
+            </div>
             <div className="mt-2 max-h-[200px] overflow-y-auto text-sm leading-relaxed text-[var(--text-main)]">
-              {paper.abstract || "No abstract available."}
+              {showOverview ? (
+                <MarkdownRenderer
+                  content={summaryMarkdown}
+                  className="text-sm leading-relaxed text-[var(--text-main)]"
+                />
+              ) : (
+                paper.abstract || "No abstract available."
+              )}
             </div>
           </div>
 

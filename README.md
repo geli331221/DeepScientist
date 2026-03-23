@@ -5,129 +5,113 @@
 </p>
 
 <p align="center">
-  Local-first research operating system with a Python runtime, an npm launcher,
-  one quest per Git repository, and shared web plus TUI surfaces.
+  <strong>DeepScientist is not just a long-running autonomous scientific discovery system. It is also a persistent research map that lives on your own machine.</strong>
 </p>
+
+<p align="center">
+  Local-first. Open-source. Git-backed. Built for verifiable computational research.
+</p>
+
+<p align="center">
+  <a href="docs/en/README.md">English</a> | <a href="docs/zh/README.md">中文</a>
+</p>
+
+<p align="center">
+  <a href="https://openreview.net/forum?id=cZFgsLq8Gs"><img alt="ICLR 2026" src="https://img.shields.io/badge/ICLR-2026-blue?style=for-the-badge&logo=openreview"></a>
+  <a href="LICENSE"><img alt="License Apache-2.0" src="https://img.shields.io/badge/License-Apache%202.0-yellow.svg?style=for-the-badge"></a>
+  <a href="https://www.python.org/"><img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white"></a>
+  <a href="https://www.npmjs.com/package/@researai/deepscientist"><img alt="npm @researai/deepscientist" src="https://img.shields.io/badge/npm-%40researai%2Fdeepscientist-CB3837?style=for-the-badge&logo=npm&logoColor=white"></a>
+  <a href="https://deepscientist.cc/"><img alt="Website deepscientist.cc" src="https://img.shields.io/badge/Website-deepscientist.cc-brightgreen?style=for-the-badge&logo=googlechrome&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <a href="docs/en/00_QUICK_START.md">Quick Start</a> •
+  <a href="docs/en/02_START_RESEARCH_GUIDE.md">Start Research Guide</a> •
+  <a href="docs/en/10_WEIXIN_CONNECTOR_GUIDE.md"><img src="assets/branding/connector-weixin.png" alt="Weixin" width="14" height="14" /> Weixin</a> •
+  <a href="docs/en/03_QQ_CONNECTOR_GUIDE.md"><img src="assets/branding/connector-qq.png" alt="QQ" width="14" height="14" /> QQ</a> •
+  <a href="docs/en/04_LINGZHU_CONNECTOR_GUIDE.md"><img src="assets/branding/connector-rokid.png" alt="Rokid" width="14" height="14" /> Rokid</a> •
+  <a href="https://openreview.net/forum?id=cZFgsLq8Gs">Paper</a>
+</p>
+
+## About
+
+DeepScientist is not just a long-running autonomous scientific discovery system. It is also a persistent research map that lives on your own machine.
+
+- See every branch.
+- Recover every lesson.
+- Compound every round.
+
+**A research workspace you can actually inspect.** The frontend rebuilds a live [Canvas](docs/en/06_RUNTIME_AND_CANVAS.md) from Git branches, artifacts, connector traffic, and raw quest events, so progress stays visible as a navigable map instead of collapsing into one long chat log.
+
+**Memory that survives failure.** Built-in [memory](docs/en/07_MEMORY_AND_MCP.md) turns paper notes, dead ends, route decisions, and recovered lessons into searchable project state that later rounds can pull back deliberately.
+
+**A self-evolving loop with real state.** Failed branches, reusable baselines, promoted lessons, and new evidence all feed the next round, so DeepScientist compounds research progress instead of restarting from zero.
+
+**A studio, not a sealed autopilot.** DeepScientist can drive a task end to end, but you can step in at any moment to redirect the plan, edit code, inspect files, or run the terminal yourself inside the same quest.
+
+DeepScientist is strong at:
+
+- reproducing baselines and keeping them reusable
+- reading papers, extracting concrete limitations, and generating hypotheses
+- running experiment branches, analysis campaigns, figures, and paper drafts
+- preserving both successful and failed results so the next round can start stronger
+
+DeepScientist is flexible and easy to use with:
+
+- local-first, open-source, one-command install
+- Git-backed quest repositories, shared web workspace, Studio / Canvas, and TUI
+- workshop-style collaboration: let DeepScientist drive, or pause anytime to inspect, edit, and run commands yourself
+- Codex with `gpt-5.4` by default, plus external OpenAI-compatible inference endpoints
+- use DeepScientist anywhere: server via TUI, browser via Web, phone via Weixin or QQ, and even glasses via Rokid Glasses
+- one bound external connector per quest: [Weixin](docs/en/10_WEIXIN_CONNECTOR_GUIDE.md), [QQ](docs/en/03_QQ_CONNECTOR_GUIDE.md), Telegram, Discord, Slack, Feishu, WhatsApp, and [Lingzhu / Rokid](docs/en/04_LINGZHU_CONNECTOR_GUIDE.md)
+- conference-to-journal extension workflows, and rebuttal workflows from paper, code, and reviewer comments
+- one quest, one Git repository
+- branches and worktrees as native research structure
+- live Studio and Canvas from durable quest state
+- reusable baselines, not one-off benchmark runs
+- durable `bash_exec` sessions, not disposable terminal output
+
+DeepScientist works best when the task is computational, verifiable, and worth tracking across multiple rounds.
+
+## News
+
+- `2026/03/24`: DeepScientist officially releases `v1.5`.
+- `2026/02/01`: the DeepScientist paper is available on [OpenReview](https://openreview.net/forum?id=cZFgsLq8Gs) for `ICLR 2026`.
+
+## Getting Started
+
+- [Docs Index (English)](docs/en/README.md)
+- [Quick Start (English)](docs/en/00_QUICK_START.md)
+- [Guided Workflow Tour (English)](docs/en/12_GUIDED_WORKFLOW_TOUR.md)
+- [Start Research Guide (English)](docs/en/02_START_RESEARCH_GUIDE.md)
+- [Core Architecture Guide (English)](docs/en/13_CORE_ARCHITECTURE_GUIDE.md)
 
 ## Install
 
-Install DeepScientist:
-
 ```bash
 npm install -g @researai/deepscientist
+codex --login
+ds --yolo --here
 ```
 
-For the best experience, we recommend using GPT-5.4 in `xhigh` mode (for example, via the $20 GPT Plus plan or the $200 GPT Pro plan); if you are in China, we recommend the MiniMax-M2.7 Token Plan (Max plan): https://platform.minimaxi.com/subscribe/token-plan
+If `codex --login` is unavailable, run `codex` once and finish authentication there. After startup, open `http://127.0.0.1:20999`.
 
-## Start
+For detailed install, troubleshooting, PDF compile, and other launch modes, use:
 
-```bash
-ds
-```
+- [Quick Start](docs/en/00_QUICK_START.md)
+- [Doctor](docs/en/09_DOCTOR.md)
 
-DeepScientist starts the local web workspace at `http://127.0.0.1:20999` by default.
+## Documentation
 
-By default, DeepScientist keeps Codex on the standard profile: `approval_policy=on-request` and `sandbox_mode=workspace-write`. Use `--yolo` only when you want explicit full-access execution.
-
-Recommended command when you want the current directory as the home and Codex full-access execution:
-
-```bash
-ds --yolo --port 20999 --here
-```
-
-Parameter meanings:
-
-- `--yolo`: run Codex in YOLO mode, which sets `approval_policy=never` and `sandbox_mode=danger-full-access`
-- `--port 20999`: bind the local web workspace to port `20999`
-- `--here`: use the current working directory as the DeepScientist home
-
-On first start, `ds` will:
-
-- bootstrap a local `uv` runtime manager automatically if your machine does not already have one
-- use the bundled Codex CLI that ships with the npm package
-- still require you to complete Codex login once if your account is not ready yet
-
-If you want another port:
-
-```bash
-ds --port 21000
-```
-
-If you want YOLO mode on another port:
-
-```bash
-ds --yolo --port 21000
-```
-
-If you want to bind on all interfaces:
-
-```bash
-ds --host 0.0.0.0 --port 21000
-```
-
-DeepScientist now uses `uv` to manage a locked local Python runtime. If a conda environment is active and already provides Python `>=3.11`, `ds` prefers it automatically; otherwise it bootstraps a managed `uv` + Python toolchain under `~/DeepScientist/runtime/`.
-
-The default DeepScientist home is:
-
-- macOS / Linux: `~/DeepScientist`
-- Windows: `%USERPROFILE%\\DeepScientist`
-
-Use `ds --home <path>` if you want to place the runtime somewhere else.
-
-If you want to use the current working directory directly as the DeepScientist home, use:
-
-```bash
-ds --here
-```
-
-This is equivalent to launching with `ds --home "$PWD"`.
-
-Useful launch examples:
-
-```bash
-ds --yolo --port 20999 --here
-ds --host 0.0.0.0 --port 21000
-ds --yolo --host 0.0.0.0 --port 21000 --here
-```
-
-If you want to install the bundled CLI tree into another base path from a source checkout:
-
-```bash
-bash install.sh --dir /data/DeepScientist
-```
-
-If you already have a populated DeepScientist home and want to move it safely:
-
-```bash
-ds migrate /data/DeepScientist
-```
-
-`ds migrate` stops the managed daemon first, shows the absolute source and target paths, asks for a double confirmation, verifies the copied tree, updates launcher wrappers, and only then removes the old path.
-
-## Troubleshooting
-
-```bash
-ds doctor
-```
-
-`ds docker` is also accepted as a compatibility alias, but `ds doctor` is the documented command.
-
-## Local PDF Compile
-
-```bash
-ds latex install-runtime
-```
-
-This installs a lightweight TinyTeX `pdflatex` runtime for local paper compilation.
-
-## QQ Connector
-
-- [Quick Start (English)](docs/en/00_QUICK_START.md)
-- [快速开始（中文）](docs/zh/00_QUICK_START.md)
+- [Docs Index (English)](docs/en/README.md)
+- [Guided Workflow Tour (English)](docs/en/12_GUIDED_WORKFLOW_TOUR.md)
+- [Core Architecture Guide (English)](docs/en/13_CORE_ARCHITECTURE_GUIDE.md)
+- [Prompt, Skills, and MCP Guide (English)](docs/en/14_PROMPT_SKILLS_AND_MCP_GUIDE.md)
+- [Weixin Connector Guide (English)](docs/en/10_WEIXIN_CONNECTOR_GUIDE.md)
 - [QQ Connector Guide (English)](docs/en/03_QQ_CONNECTOR_GUIDE.md)
-- [QQ Connector Guide (中文)](docs/zh/03_QQ_CONNECTOR_GUIDE.md)
+- [Lingzhu / Rokid Guide (English)](docs/en/04_LINGZHU_CONNECTOR_GUIDE.md)
 - [Memory and MCP Guide (English)](docs/en/07_MEMORY_AND_MCP.md)
-- [Memory 与 MCP 指南（中文）](docs/zh/07_MEMORY_AND_MCP.md)
+- [Settings Reference (English)](docs/en/01_SETTINGS_REFERENCE.md)
 
 ## Maintainers
 
@@ -136,9 +120,7 @@ This installs a lightweight TinyTeX `pdflatex` runtime for local paper compilati
 
 ## Citation
 
-This project is currently contributed by Yixuan Weng, Shichen Li, Weixu Zhao, Minjun Zhu. If you find our work valuable, please cite:
-
-本项目当前由 Yixuan Weng、Shichen Li、Weixu Zhao、Minjun Zhu 共同贡献。如果你觉得我们的工作有价值，请引用：
+This project is currently contributed by Yixuan Weng, Shichen Li, Weixu Zhao, Qiyao Sun, Zhen Lin, Minjun Zhu. If you find our work valuable, please cite:
 
 ```bibtex
 @inproceedings{
@@ -151,6 +133,37 @@ url={https://openreview.net/forum?id=cZFgsLq8Gs}
 }
 ```
 
+## End-to-End Autonomous Research Systems
+
+| System | System Type | E2E | Research Map | Workshop | Keeps Growing | Channels | Figure & Rebuttal & Review |
+|---|---|---|---|---|---|---|---|
+| [autoresearch](https://github.com/karpathy/autoresearch) | Open-source |  |  | ✓ |  |  |  |
+| [RD-Agent](https://github.com/microsoft/RD-Agent) | Open-source |  |  |  | ✓ |  |  |
+| [Agent Laboratory](https://github.com/SamuelSchmidgall/AgentLaboratory) | Open-source | ✓ |  | ✓ | ✓ |  |  |
+| [AI-Scientist](https://github.com/SakanaAI/AI-Scientist) | Open-source | ✓ |  |  |  |  |  |
+| [AI-Scientist-v2](https://github.com/SakanaAI/AI-Scientist-v2) | Open-source | ✓ |  |  |  |  |  |
+| [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw) | Open-source | ✓ |  |  | ✓ | ✓ |  |
+| [ClawPhD](https://github.com/ZhihaoAIRobotic/ClawPhD) | Open-source |  |  | ✓ |  | ✓ |  |
+| [Dr. Claw](https://github.com/OpenLAIR/dr-claw) | Open-source | ✓ |  | ✓ |  | ✓ |  |
+| [FARS](https://analemma.ai/fars/) | Closed-source | ✓ |  |  |  |  |  |
+| [EvoScientist](https://github.com/EvoScientist/EvoScientist) | Open-source | ✓ |  | ✓ | ✓ | ✓ |  |
+| [PaperClaw](https://github.com/meowscles69/PaperClaw) | Open-source |  |  |  |  |  | ✓ |
+| [ScienceClaw](https://github.com/beita6969/ScienceClaw) | Open-source |  |  |  | ✓ | ✓ |  |
+| [claude-scholar](https://github.com/Galaxy-Dawn/claude-scholar) | Open-source | ✓ |  | ✓ | ✓ |  |  |
+| [Research-Claw](https://github.com/wentorai/Research-Claw) | Open-source | ✓ |  | ✓ | ✓ | ✓ |  |
+| [DeepScientist](https://github.com/ResearAI/DeepScientist) | Open-source | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+## More From ResearAI
+
+DeepReviewer and AutoFigure projects worth exploring alongside DeepScientist:
+
+| Project | What it does |
+|---|---|
+| [AutoFigure](https://github.com/ResearAI/AutoFigure) | generate paper-ready figures |
+| [AutoFigure-Edit](https://github.com/ResearAI/AutoFigure-Edit) | editable vector paper figures |
+| [DeepReviewer-v2](https://github.com/ResearAI/DeepReviewer-v2) | review papers and drafts |
+| [Awesome-AI-Scientist](https://github.com/ResearAI/Awesome-AI-Scientist) | curated AI scientist landscape |
+
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)

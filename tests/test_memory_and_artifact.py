@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -8,7 +9,9 @@ import pytest
 
 from deepscientist.artifact import ArtifactService
 from deepscientist.artifact.metrics import MetricContractValidationError
+from deepscientist.connector.weixin_support import remember_weixin_context_token
 from deepscientist.config import ConfigManager
+from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.memory import MemoryService
 from deepscientist.memory.frontmatter import dump_markdown_document, load_markdown_document
@@ -118,6 +121,113 @@ def test_confirm_baseline_strict_rejects_missing_metric_explanations(temp_home: 
     assert exc.details["validation_stage"] == "baseline"
     assert exc.details["baseline_metric_ids"] == ["acc"]
     assert exc.details["baseline_metric_details"][0]["metric_id"] == "acc"
+
+
+def test_confirm_baseline_metric_directions_override_and_main_run_prefers_confirmed_contract_json(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("metric direction truth quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    baseline_root = quest_root / "baselines" / "local" / "baseline-direction"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Direction baseline\n", encoding="utf-8")
+
+    confirmed = artifact.confirm_baseline(
+        quest_root,
+        baseline_path=str(baseline_root),
+        baseline_id="baseline-direction",
+        summary="Direction-sensitive baseline",
+        metrics_summary={"sigma_max": 0.6921, "raw_false": 0.2149},
+        primary_metric={"metric_id": "sigma_max", "value": 0.6921},
+        metric_contract=_detailed_metric_contract(
+            ["sigma_max", "raw_false"],
+            primary_metric_id="sigma_max",
+            directions={
+                "sigma_max": "maximize",
+                "raw_false": "maximize",
+            },
+            evaluation_protocol={
+                "scope_id": "full",
+                "code_paths": ["eval.py"],
+            },
+        ),
+        metric_directions={
+            "sigma_max": "lower_better",
+            "raw_false": "lower_better",
+        },
+        strict_metric_contract=True,
+    )
+
+    metric_contract_json = read_json(Path(confirmed["metric_contract_json_path"]), {})
+    directions_by_id = {
+        item["metric_id"]: item["direction"]
+        for item in metric_contract_json["metric_contract"]["metrics"]
+    }
+    assert directions_by_id["sigma_max"] == "minimize"
+    assert directions_by_id["raw_false"] == "minimize"
+
+    attachment_path = quest_root / "baselines" / "imported" / "baseline-direction" / "attachment.yaml"
+    attachment = read_yaml(attachment_path, {})
+    for metric in attachment["entry"]["metric_contract"]["metrics"]:
+        if metric["metric_id"] in {"sigma_max", "raw_false"}:
+            metric["direction"] = "maximize"
+    write_yaml(attachment_path, attachment)
+
+    artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Direction-aware idea",
+        problem="Need lower-is-better comparison to stay correct.",
+        hypothesis="The confirmed contract JSON should stay authoritative.",
+        mechanism="Recompute using the confirmed baseline metric contract JSON.",
+        decision_reason="Launch the direction-sensitive run.",
+        next_target="experiment",
+    )
+
+    result = artifact.record_main_experiment(
+        quest_root,
+        run_id="direction-main-001",
+        title="Direction-sensitive run",
+        hypothesis="Lower sigma_max should count as better.",
+        setup="Reuse the confirmed baseline protocol.",
+        execution="Ran the full evaluation.",
+        results="Sigma max dropped substantially.",
+        conclusion="This should beat the baseline under the confirmed metric direction.",
+        metric_rows=[
+            {"metric_id": "sigma_max", "value": 0.2477},
+            {"metric_id": "raw_false", "value": 0.2063},
+        ],
+        metric_contract={
+            "primary_metric_id": "sigma_max",
+            "metrics": [
+                {"metric_id": "sigma_max", "direction": "maximize", "label": "Sigma max"},
+                {"metric_id": "raw_false", "direction": "maximize", "label": "Raw false"},
+            ],
+        },
+        strict_metric_contract=True,
+        evaluation_summary={
+            "takeaway": "The run improves the lower-is-better metrics.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "analysis_campaign",
+        },
+    )
+
+    payload = read_json(Path(result["result_json_path"]), {})
+    comparisons_by_id = {
+        item["metric_id"]: item
+        for item in payload["baseline_comparisons"]["items"]
+    }
+    assert comparisons_by_id["sigma_max"]["direction"] == "minimize"
+    assert comparisons_by_id["sigma_max"]["better"] is True
+    assert comparisons_by_id["raw_false"]["direction"] == "minimize"
+    assert payload["progress_eval"]["direction"] == "minimize"
+    assert payload["progress_eval"]["beats_baseline"] is True
 
 
 def test_confirm_baseline_strict_flattens_canonical_metric_summary(temp_home: Path) -> None:
@@ -559,7 +669,7 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
         execution="Ran the full validation sweep.",
         results="Accuracy dropped as expected.",
         evidence_paths=["experiments/analysis/ablation/result.json"],
-        metric_rows=[{"name": "acc", "value": 0.84}],
+        metric_rows=[{"metric_id": "acc", "value": 0.84, "direction": "higher_better"}],
         comparison_baselines=[
             {
                 "baseline_id": "adapter-ablation-baseline",
@@ -577,6 +687,10 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
     assert Path(first_record["mirror_path"]).exists()
     assert Path(first_record["result_json_path"]).exists()
     slice_result_payload = read_json(first_record["result_json_path"], {})
+    assert slice_result_payload["metrics_summary"] == {"acc": 0.84}
+    assert slice_result_payload["metric_rows"][0]["metric_id"] == "acc"
+    assert slice_result_payload["metric_rows"][0]["numeric_value"] == pytest.approx(0.84)
+    assert slice_result_payload["metric_contract"]["primary_metric_id"] == "acc"
     assert slice_result_payload["comparison_baselines"][0]["baseline_id"] == "adapter-ablation-baseline"
     analysis_inventory = read_json(analysis_inventory_path, {})
     registered_entry = next(
@@ -593,7 +707,7 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
         execution="Ran the full robustness sweep.",
         results="The method stayed stable under the robustness setting.",
         evidence_paths=["experiments/analysis/robustness/result.json"],
-        metric_rows=[{"name": "acc", "value": 0.86}],
+        metric_rows=[{"metric_id": "acc", "value": 0.86, "direction": "higher_better"}],
     )
     assert second_record["ok"] is True
     assert second_record["completed"] is True
@@ -602,9 +716,13 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
 
     final_state = quest_service.read_research_state(quest_root)
     assert final_state["active_analysis_campaign_id"] is None
-    assert final_state["current_workspace_root"] == str(idea_worktree)
+    assert final_state["current_workspace_branch"] == second_record["writing_branch"]
+    assert final_state["current_workspace_root"] == second_record["writing_worktree_root"]
+    assert final_state["paper_parent_branch"] == created["branch"]
+    assert final_state["paper_parent_worktree_root"] == str(idea_worktree)
+    assert final_state["workspace_mode"] == "paper"
     assert final_state["research_head_branch"] == created["branch"]
-    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "decision"
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "write"
 
     events = read_jsonl(quest_root / ".ds" / "events.jsonl")
     campaign_event = next(
@@ -765,6 +883,461 @@ def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path)
     assert stage_view["details"]["analysis"]["todo_items"][0]["slice_id"] == "ablation"
 
 
+def test_writing_facing_analysis_campaign_requires_selected_outline_and_todo_mapping(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("writing-facing analysis gate quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-outline-gate")
+    artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Outline-gated route",
+        problem="Writing-facing analysis should not start free-floating.",
+        hypothesis="The campaign must bind to a selected outline first.",
+        mechanism="Require outline-bound todo metadata.",
+        decision_reason="Prepare the writing-facing route.",
+        next_target="experiment",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        artifact.create_analysis_campaign(
+            quest_root,
+            campaign_title="Missing outline gate",
+            campaign_goal="This campaign should be rejected before writing begins.",
+            research_questions=["RQ-main"],
+            experimental_designs=["Exp-main"],
+            todo_items=[
+                {
+                    "todo_id": "todo-001",
+                    "slice_id": "ablation",
+                    "title": "Ablation for RQ-main",
+                    "research_question": "RQ-main",
+                    "experimental_design": "Exp-main",
+                    "completion_condition": "Run the ablation fully.",
+                }
+            ],
+            slices=[
+                {
+                    "slice_id": "ablation",
+                    "title": "Ablation",
+                    "goal": "Disable the core module and compare.",
+                }
+            ],
+        )
+
+    assert "selected_outline_ref" in str(exc_info.value)
+
+
+def test_artifact_stage_milestones_emit_semantic_connector_messages(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    def fake_qq_deliver(_self, _payload, _config):  # noqa: ANN001
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_qq_deliver)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("semantic connector milestones quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    quest_service.bind_source(quest["quest_id"], "qq:direct:semantic-user")
+
+    long_problem = (
+        "The baseline saturates too early during the full evaluation sweep and leaves the hard examples unresolved.\n\n"
+        "This second paragraph must remain visible in the connector milestone so the user receives the full rationale instead of a clipped notification."
+    )
+    long_hypothesis = (
+        "A compact adapter should preserve the gain while keeping the intervention auditable.\n\n"
+        "The connector update should keep both paragraphs intact, because this is the user-facing stage summary."
+    )
+    long_mechanism = (
+        "Insert a compact residual adapter in the main path and keep the rest of the protocol fixed.\n\n"
+        "The message should show the exact mechanism without collapsing it into an ellipsis."
+    )
+    long_takeaway = (
+        "The compact adapter improves the primary metric against the confirmed baseline under the full validation recipe.\n\n"
+        "This second paragraph must also survive delivery so the milestone preserves the real conclusion."
+    )
+    long_claim_impact = (
+        "The ablation strengthens the central mechanism claim because the gain disappears when the adapter is removed.\n\n"
+        "This follow-up paragraph should remain visible in the connector milestone."
+    )
+    long_bundle_summary = (
+        "The draft, manifest, and PDF reference are ready for final review on the paper branch.\n\n"
+        "This second paragraph should also be delivered in full so writing completion does not degrade into a clipped notification."
+    )
+
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-semantic")
+    idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Semantic route",
+        problem=long_problem,
+        hypothesis=long_hypothesis,
+        mechanism=long_mechanism,
+        decision_reason="Promote the route with the clearest mechanism.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="semantic-main-001",
+        title="Semantic main run",
+        hypothesis="The compact adapter improves the primary metric.",
+        setup="Use the full baseline recipe.",
+        execution="Ran the full validation sweep once.",
+        results="Accuracy improved over the confirmed baseline.",
+        conclusion="The gain is strong enough to justify analysis and writing.",
+        metric_rows=[{"metric_id": "acc", "value": 0.87}],
+        evaluation_summary={
+            "takeaway": long_takeaway,
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "analysis_campaign",
+        },
+    )
+    candidate = artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Semantic outline",
+        note="Promote the evidence-first version.",
+        story="Tell the evidence-first story with one main ablation.",
+        ten_questions=["What changed?", "Why is the gain real?"],
+        detailed_outline={
+            "title": "Semantic outline",
+            "research_questions": ["RQ-semantic"],
+            "experimental_designs": ["Ablation-semantic"],
+            "contributions": ["C-semantic"],
+        },
+        review_result="preferred",
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id=candidate["outline_id"],
+        selected_reason="This outline matches the main claim and the evidence plan.",
+    )
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Semantic analysis",
+        campaign_goal="Verify the core claim with one decisive ablation.",
+        selected_outline_ref=candidate["outline_id"],
+        research_questions=["RQ-semantic"],
+        experimental_designs=["Ablation-semantic"],
+        todo_items=[
+            {
+                "todo_id": "todo-semantic-001",
+                "slice_id": "ablation",
+                "title": "Core ablation",
+                "research_question": "RQ-semantic",
+                "experimental_design": "Ablation-semantic",
+                "completion_condition": "Show whether the adapter is necessary.",
+            }
+        ],
+        slices=[
+            {
+                "slice_id": "ablation",
+                "title": "Core ablation",
+                "goal": "Disable the adapter only.",
+                "hypothesis": "The gain disappears without the adapter.",
+                "required_changes": "Disable adapter only.",
+                "metric_contract": "Keep the full validation protocol.",
+            }
+        ],
+    )
+    artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="ablation",
+        setup="Disable the adapter only.",
+        execution="Ran the full validation sweep.",
+        results="The gain disappears when the adapter is removed.",
+        metric_rows=[{"metric_id": "acc", "value": 0.81}],
+        evidence_paths=["experiments/analysis/ablation/result.json"],
+        evaluation_summary={
+            "takeaway": "The ablation shows the adapter is necessary for the measured gain.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "write",
+        },
+        claim_impact=long_claim_impact,
+    )
+    bundle = artifact.submit_paper_bundle(
+        quest_root,
+        title="Semantic Paper",
+        summary=long_bundle_summary,
+        pdf_path="paper/paper.pdf",
+    )
+
+    qq_records = read_jsonl(temp_home / "logs" / "connectors" / "qq" / "outbox.jsonl")
+    texts = [str(item.get("text") or "") for item in qq_records]
+    idea_text = next(text for text in texts if text.startswith(f"Idea `{idea['idea_id']}`"))
+    main_text = next(text for text in texts if text.startswith("Main experiment `semantic-main-001`"))
+    outline_text = next(text for text in texts if text.startswith("Paper outline `"))
+    analysis_text = next(
+        text
+        for text in texts
+        if text.startswith(f"Analysis campaign `{campaign['campaign_id']}` is complete.")
+    )
+    bundle_text = next(text for text in texts if text.startswith("Paper bundle `Semantic Paper`"))
+
+    assert "Problem:\nThe baseline saturates too early during the full evaluation sweep and leaves the hard examples unresolved." in idea_text
+    assert "This second paragraph must remain visible in the connector milestone" in idea_text
+    assert "Hypothesis:\nA compact adapter should preserve the gain while keeping the intervention auditable." in idea_text
+    assert "Mechanism:\nInsert a compact residual adapter in the main path and keep the rest of the protocol fixed." in idea_text
+    assert "…" not in idea_text
+
+    assert "Outcome:\n- Metric: acc=0.87" in main_text
+    assert "Evaluation summary:\n- Takeaway: The compact adapter improves the primary metric against the confirmed baseline under the full validation recipe." in main_text
+    assert "This second paragraph must also survive delivery so the milestone preserves the real conclusion." in main_text
+    assert "…" not in main_text
+
+    assert "Paper outline" in outline_text
+    assert "Research questions:\n- RQ-semantic" in outline_text
+    assert "Experimental designs:\n- Ablation-semantic" in outline_text
+
+    assert "Overview:\n- Completed slices: 1" in analysis_text
+    assert "Completed slices:\n- `ablation`: Core ablation" in analysis_text
+    assert "Claim impact: The ablation strengthens the central mechanism claim because the gain disappears when the adapter is removed." in analysis_text
+    assert "This follow-up paragraph should remain visible in the connector milestone." in analysis_text
+    assert "…" not in analysis_text
+
+    assert bundle["interaction"]["status"] == "ok"
+    assert "Summary:\nThe draft, manifest, and PDF reference are ready for final review on the paper branch." in bundle_text
+    assert "This second paragraph should also be delivered in full" in bundle_text
+    assert "Files:\n- Bundle manifest:" in bundle_text
+    assert "- PDF: `paper/paper.pdf`" in bundle_text
+    assert "Next route:\nFinalize the paper package, review the bundle artifacts, and publish or close the quest when ready." in bundle_text
+    assert "…" not in bundle_text
+
+
+def test_stage_view_branch_node_routes_to_experiment_and_analysis_content(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("branch node stage routing quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-stage-routing")
+
+    idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Routing route",
+        problem="Need the branch node to open real stage content.",
+        hypothesis="The tab should show the durable experiment narrative.",
+        mechanism="Route branch-node selections into stage-specific views.",
+        decision_reason="Promote the route for canvas rendering.",
+    )
+    main_run = artifact.record_main_experiment(
+        quest_root,
+        run_id="routing-main-001",
+        title="Routing main run",
+        hypothesis="The routing fix should expose the actual experiment record.",
+        setup="Standard validation recipe.",
+        execution="Ran the main experiment once.",
+        results="The main experiment record exists.",
+        conclusion="Use the durable record directly in the stage tab.",
+        metric_rows=[{"metric_id": "acc", "value": 0.86}],
+        evaluation_summary={
+            "takeaway": "The durable main experiment record exists and should render inline.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "analysis_campaign",
+        },
+    )
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Routing analysis",
+        campaign_goal="Ensure branch-node analysis selections open the campaign content.",
+        slices=[
+            {
+                "slice_id": "ablation",
+                "title": "Routing ablation",
+                "goal": "Disable the new path and compare.",
+                "hypothesis": "The gain disappears without the new path.",
+                "required_changes": "One isolated ablation.",
+                "metric_contract": "Keep the full evaluation protocol.",
+            }
+        ],
+    )
+    artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="ablation",
+        setup="Disable the new path only.",
+        execution="Ran the campaign slice once.",
+        results="The campaign slice produced a durable result.",
+        metric_rows=[{"metric_id": "acc", "value": 0.82}],
+        evaluation_summary={
+            "takeaway": "The analysis slice now has durable inline content.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "write",
+        },
+    )
+
+    experiment_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": main_run["branch"],
+            "selection_type": "branch_node",
+            "branch_name": main_run["branch"],
+            "stage_key": "experiment",
+        },
+    )
+    assert experiment_view["stage_key"] == "experiment"
+    assert "The routing fix should expose the actual experiment record." in str(
+        experiment_view["details"]["experiment"]["result_payload"]["hypothesis"]
+    )
+    assert "Use the durable record directly in the stage tab." in str(
+        experiment_view["details"]["experiment"]["run_markdown"]
+    )
+
+    inferred_branch_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": main_run["branch"],
+            "selection_type": "branch_node",
+            "stage_key": "experiment",
+        },
+    )
+    assert inferred_branch_view["details"]["experiment"]["result_payload"]["run_id"] == "routing-main-001"
+
+    analysis_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": campaign["slices"][0]["branch"],
+            "selection_type": "branch_node",
+            "branch_name": campaign["slices"][0]["branch"],
+            "stage_key": "analysis-campaign",
+        },
+    )
+    assert analysis_view["stage_key"] == "analysis"
+    assert "Ensure branch-node analysis selections open the campaign content." in str(
+        analysis_view["details"]["analysis"]["goal"]
+    )
+    assert "The analysis slice now has durable inline content." in str(
+        analysis_view["details"]["analysis"]["slices"][0]["evaluation_summary"]["takeaway"]
+    )
+    assert "Disable the new path only." in str(analysis_view["details"]["analysis"]["slices"][0]["result_markdown"])
+
+
+def test_stage_view_general_stage_nodes_resolve_to_canonical_stage_content(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("general stage routing quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-general-routing")
+
+    idea = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="General idea route",
+        problem="Need the general stage node to stop falling into paper drafting.",
+        hypothesis="Resolve stage nodes from the branch identity when the trace only says general.",
+        mechanism="Infer the canonical stage from the branch namespace and durable artifacts.",
+        decision_reason="General stage selections should still open the correct stage page.",
+    )
+    main_run = artifact.record_main_experiment(
+        quest_root,
+        run_id="general-main-001",
+        title="General main run",
+        hypothesis="The experiment stage should open the durable run payload.",
+        setup="Standard comparable setup.",
+        execution="Ran the main experiment once.",
+        results="The main experiment payload is available.",
+        conclusion="Keep the experiment page aligned with the recorded artifact.",
+        metric_rows=[{"metric_id": "acc", "value": 0.84}],
+    )
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="General analysis",
+        campaign_goal="Ensure general analysis stage nodes still open the campaign content.",
+        slices=[
+            {
+                "slice_id": "ablation",
+                "title": "General ablation",
+                "goal": "Check the analysis branch routing.",
+                "hypothesis": "The analysis stage stays available through general stage nodes.",
+                "required_changes": "One ablation only.",
+                "metric_contract": "Reuse the full evaluation protocol.",
+            }
+        ],
+    )
+    artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="ablation",
+        setup="Disable the routed feature.",
+        execution="Ran the analysis slice once.",
+        results="The analysis slice artifact exists.",
+        metric_rows=[{"metric_id": "acc", "value": 0.81}],
+    )
+
+    idea_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": f"stage:{idea['branch']}:general",
+            "selection_type": "stage_node",
+            "branch_name": idea["branch"],
+            "stage_key": "general",
+        },
+    )
+    assert idea_view["stage_key"] == "idea"
+    assert idea_view["details"]["latest_artifact"]["payload"]["kind"] == "idea"
+    assert "Need the general stage node" in str(idea_view["details"]["idea"]["problem"])
+
+    experiment_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": f"stage:{main_run['branch']}:general",
+            "selection_type": "stage_node",
+            "branch_name": main_run["branch"],
+            "stage_key": "general",
+        },
+    )
+    assert experiment_view["stage_key"] == "experiment"
+    assert experiment_view["details"]["latest_artifact"]["payload"]["run_kind"] == "main_experiment"
+    assert "The experiment stage should open the durable run payload." in str(
+        experiment_view["details"]["experiment"]["result_payload"]["hypothesis"]
+    )
+
+    analysis_branch = campaign["slices"][0]["branch"]
+    analysis_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": f"stage:{analysis_branch}:general",
+            "selection_type": "stage_node",
+            "branch_name": analysis_branch,
+            "stage_key": "general",
+        },
+    )
+    assert analysis_view["stage_key"] == "analysis"
+    assert analysis_view["details"]["latest_artifact"]["payload"]["flow_type"] in {"analysis_campaign", "analysis_slice"}
+    assert "Ensure general analysis stage nodes" in str(analysis_view["details"]["analysis"]["goal"])
+
+
 def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unified_fields(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -910,6 +1483,14 @@ def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unif
     assert analysis_details["todo_items"][0]["success_criteria"] == "Produce a fair comparison and a usable manuscript update."
     assert analysis_details["slices"][0]["claim_impact"] == "Strengthens confidence in the main claim."
     assert analysis_details["slices"][0]["evaluation_summary"]["claim_update"] == "strengthens"
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest["quest_id"])
+    by_ref = {item["ref"]: item for item in branches["nodes"]}
+    paper_branch = str(completed["research_state"]["current_workspace_branch"] or "").strip()
+    assert completed["research_state"]["workspace_mode"] == "paper"
+    assert by_ref[paper_branch]["workflow_state"]["writing_state"] == "active"
+    assert by_ref[paper_branch]["workflow_state"]["status_reason"] == "Writing workspace active."
+    assert by_ref[manifest_after["parent_branch"]]["workflow_state"]["writing_state"] == "ready"
 
 
 def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path) -> None:
@@ -955,6 +1536,7 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
         pdf_path="paper/paper.pdf",
     )
     assert result["ok"] is True
+    assert result["interaction"]["status"] == "ok"
     assert Path(result["manifest_path"]).exists()
     assert Path(result["baseline_inventory_path"]).exists()
     assert Path(result["open_source_manifest_path"]).exists()
@@ -1425,13 +2007,13 @@ def test_submit_idea_lineage_intent_creates_child_and_sibling_like_nodes(temp_ho
     sibling_metadata, _ = load_markdown_document(Path(sibling_like_idea["idea_md_path"]))
 
     assert child_idea["lineage_intent"] == "continue_line"
-    assert child_idea["parent_branch"] == first_idea["branch"]
+    assert child_idea["parent_branch"] == "run/main-lineage-001"
     assert child_idea["foundation_ref"]["kind"] == "run"
     assert child_idea["foundation_ref"]["ref"] == "main-lineage-001"
     assert child_metadata["lineage_intent"] == "continue_line"
 
     assert sibling_like_idea["lineage_intent"] == "branch_alternative"
-    assert sibling_like_idea["parent_branch"] == first_idea["branch"]
+    assert sibling_like_idea["parent_branch"] == "run/main-lineage-001"
     assert sibling_like_idea["foundation_ref"]["kind"] == "run"
     assert sibling_like_idea["foundation_ref"]["ref"] == "main-lineage-001"
     assert sibling_metadata["lineage_intent"] == "branch_alternative"
@@ -1439,10 +2021,10 @@ def test_submit_idea_lineage_intent_creates_child_and_sibling_like_nodes(temp_ho
     branches = artifact.list_research_branches(quest_root)
     by_branch = {item["branch_name"]: item for item in branches["branches"]}
     assert by_branch[child_idea["branch"]]["lineage_intent"] == "continue_line"
-    assert by_branch[child_idea["branch"]]["parent_branch"] == first_idea["branch"]
+    assert by_branch[child_idea["branch"]]["parent_branch"] == "run/main-lineage-001"
     assert by_branch[child_idea["branch"]]["idea_draft_path"].endswith("/draft.md")
     assert by_branch[sibling_like_idea["branch"]]["lineage_intent"] == "branch_alternative"
-    assert by_branch[sibling_like_idea["branch"]]["parent_branch"] == first_idea["branch"]
+    assert by_branch[sibling_like_idea["branch"]]["parent_branch"] == "run/main-lineage-001"
     assert by_branch[sibling_like_idea["branch"]]["idea_draft_path"].endswith("/draft.md")
 
 
@@ -1550,6 +2132,8 @@ def test_artifact_arxiv_overview_falls_back_to_arxiv_abstract(temp_home: Path, m
 
     def fake_urlopen(request, timeout=8):  # noqa: ANN001
         url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            raise TimeoutError("api timed out")
         if url.endswith("/overview/2010.11929.md"):
             raise TimeoutError("overview timed out")
         if url.endswith("/abs/2010.11929"):
@@ -1579,8 +2163,10 @@ def test_artifact_arxiv_overview_falls_back_to_arxiv_abstract(temp_home: Path, m
     assert result["content_mode"] == "abstract"
     assert "An Image is Worth 16x16 Words" in result["content"]
     assert "Vision Transformers apply pure transformer layers" in result["content"]
-    assert result["attempts"][0]["source"] == "alphaxiv_overview"
+    assert result["attempts"][0]["source"] == "arxiv_api"
     assert result["attempts"][0]["ok"] is False
+    assert result["attempts"][1]["source"] == "arxiv_abstract"
+    assert result["attempts"][1]["ok"] is True
 
 
 def test_artifact_arxiv_full_text_falls_back_to_html(temp_home: Path, monkeypatch) -> None:
@@ -1589,6 +2175,22 @@ def test_artifact_arxiv_full_text_falls_back_to_html(temp_home: Path, monkeypatc
 
     def fake_urlopen(request, timeout=8):  # noqa: ANN001
         url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            return _FakeUrlopenResponse(
+                """
+                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+                  <entry>
+                    <id>http://arxiv.org/abs/2010.11929</id>
+                    <published>2020-10-23T17:54:00Z</published>
+                    <title>An Image is Worth 16x16 Words</title>
+                    <summary>Vision Transformers apply pure transformer layers directly to image patches.</summary>
+                    <author><name>Dosovitskiy, Alexey</name></author>
+                    <arxiv:primary_category term="cs.CV" />
+                    <category term="cs.CV" />
+                  </entry>
+                </feed>
+                """
+            )
         if url.endswith("/abs/2010.11929.md"):
             raise HTTPError(url, 404, "not found", hdrs=None, fp=None)
         if url.endswith("/html/2010.11929"):
@@ -1618,8 +2220,252 @@ def test_artifact_arxiv_full_text_falls_back_to_html(temp_home: Path, monkeypatc
     assert result["content_mode"] == "full_text"
     assert "Introduction." in result["content"]
     assert "Methods." in result["content"]
-    assert result["attempts"][0]["source"] == "alphaxiv_full_text"
-    assert result["attempts"][0]["ok"] is False
+    assert result["attempts"][0]["source"] == "arxiv_api"
+    assert result["attempts"][0]["ok"] is True
+    assert result["attempts"][1]["source"] == "alphaxiv_full_text"
+    assert result["attempts"][1]["ok"] is False
+
+
+def test_artifact_arxiv_read_mode_persists_quest_library_and_lists_saved_items(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("persist arxiv quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    def fake_urlopen(request, timeout=8):  # noqa: ANN001
+        url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            return _FakeUrlopenResponse(
+                """
+                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+                  <entry>
+                    <id>http://arxiv.org/abs/2010.11929</id>
+                    <published>2020-10-23T17:54:00Z</published>
+                    <title>Vision Transformers</title>
+                    <summary>Vision Transformers apply pure transformer layers directly to image patches.</summary>
+                    <author><name>Dosovitskiy, Alexey</name></author>
+                    <arxiv:primary_category term="cs.CV" />
+                    <category term="cs.CV" />
+                  </entry>
+                </feed>
+                """
+            )
+        if url.endswith("/overview/2010.11929.md"):
+            return _FakeUrlopenResponse(
+                "# Vision Transformers\n\nVision Transformers apply pure transformer layers directly to image patches and remain competitive with CNNs."
+            )
+        if url.endswith("/pdf/2010.11929.pdf"):
+            return _FakeUrlopenResponse("%PDF-1.7\nfake pdf body")
+        if url.endswith("/abs/2010.11929"):
+            return _FakeUrlopenResponse(
+                """
+                <html>
+                  <head>
+                    <meta name="citation_title" content="Vision Transformers" />
+                    <meta name="citation_author" content="Dosovitskiy, Alexey" />
+                  </head>
+                  <body>
+                    <blockquote class="abstract mathjax">
+                      <span class="descriptor">Abstract:</span>
+                      Vision Transformers apply pure transformer layers directly to image patches.
+                    </blockquote>
+                  </body>
+                </html>
+                """
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr("deepscientist.artifact.arxiv.urlopen", fake_urlopen)
+    monkeypatch.setattr("deepscientist.arxiv_library.urlopen", fake_urlopen)
+
+    result = artifact.arxiv("2010.11929", mode="read", quest_root=quest_root)
+
+    assert result["ok"] is True
+    assert result["mode"] == "read"
+    assert result["paper_id"] == "2010.11929"
+    assert result["summary_source"] == "alphaxiv_overview"
+    assert result["metadata_source"] == "arxiv_api"
+    assert result["overview_markdown"].startswith("# Vision Transformers")
+    assert result["status"] in {"processing", "ready"}
+
+    pdf_path = quest_root / "literature" / "arxiv" / "pdfs" / "2010.11929.pdf"
+    for _ in range(40):
+        if pdf_path.exists():
+            break
+        time.sleep(0.05)
+    assert pdf_path.exists()
+    assert pdf_path.read_bytes().startswith(b"%PDF")
+
+    manifest = {}
+    for _ in range(40):
+        manifest = read_json(quest_root / "literature" / "arxiv" / "index.json", {})
+        items = manifest.get("items") or []
+        if items and items[0].get("status") == "ready":
+            break
+        time.sleep(0.05)
+    assert manifest["schema_version"] == 2
+    saved = manifest["items"][0]
+    assert saved["arxiv_id"] == "2010.11929"
+    assert saved["title"] == "Vision Transformers"
+    assert "transformer layers directly to image patches" in saved["abstract"]
+    assert saved["pdf_rel_path"] == "literature/arxiv/pdfs/2010.11929.pdf"
+    assert saved["status"] == "ready"
+    assert saved["metadata_source"] == "arxiv_api"
+    assert saved["summary_source"] == "alphaxiv_overview"
+    assert saved["overview_markdown"].startswith("# Vision Transformers")
+    assert saved["bibtex"].startswith("@misc{")
+
+    listed = artifact.arxiv(mode="list", quest_root=quest_root)
+    assert listed["ok"] is True
+    assert listed["mode"] == "list"
+    assert listed["count"] == 1
+    assert listed["items"][0]["arxiv_id"] == "2010.11929"
+    assert listed["items"][0]["overview_markdown"].startswith("# Vision Transformers")
+    assert listed["items"][0]["document_id"] == "questpath::literature/arxiv/pdfs/2010.11929.pdf"
+
+
+def test_artifact_arxiv_list_refreshes_legacy_summary_markdown(
+    temp_home: Path, monkeypatch
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("legacy arxiv summary quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    def fake_urlopen(request, timeout=8):  # noqa: ANN001
+        url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            return _FakeUrlopenResponse(
+                """
+                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+                  <entry>
+                    <id>http://arxiv.org/abs/2010.11929</id>
+                    <published>2020-10-23T17:54:00Z</published>
+                    <title>Vision Transformers</title>
+                    <summary>Vision Transformers apply pure transformer layers directly to image patches.</summary>
+                    <author><name>Dosovitskiy, Alexey</name></author>
+                    <arxiv:primary_category term="cs.CV" />
+                    <category term="cs.CV" />
+                  </entry>
+                </feed>
+                """
+            )
+        if url.endswith("/overview/2010.11929.md"):
+            return _FakeUrlopenResponse("# Vision Transformers\n\nA concise AlphaXiv summary.")
+        if url.endswith("/abs/2010.11929"):
+            return _FakeUrlopenResponse(
+                """
+                <html>
+                  <head>
+                    <meta name="citation_title" content="Vision Transformers" />
+                    <meta name="citation_author" content="Dosovitskiy, Alexey" />
+                  </head>
+                  <body>
+                    <blockquote class="abstract mathjax">
+                      <span class="descriptor">Abstract:</span>
+                      Vision Transformers apply pure transformer layers directly to image patches.
+                    </blockquote>
+                  </body>
+                </html>
+                """
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr("deepscientist.artifact.arxiv.urlopen", fake_urlopen)
+    monkeypatch.setattr("deepscientist.arxiv_library.urlopen", fake_urlopen)
+
+    artifact.arxiv_library.upsert_item(
+        quest_root,
+        {
+            "arxiv_id": "2010.11929",
+            "title": "Vision Transformers",
+            "display_name": "Vision Transformers",
+            "authors": ["Dosovitskiy, Alexey"],
+            "categories": ["cs.CV"],
+            "abstract": "Vision Transformers apply pure transformer layers directly to image patches.",
+            "published_at": "2020-10-23T17:54:00Z",
+            "metadata_source": "arxiv_api",
+            "metadata_status": "ready",
+            "summary_source": "arxiv_api",
+            "bibtex": "@misc{vit,title={Vision Transformers}}",
+            "status": "ready",
+            "pdf_rel_path": "literature/arxiv/pdfs/2010.11929.pdf",
+        },
+    )
+
+    listed = artifact.arxiv(mode="list", quest_root=quest_root)
+
+    assert listed["ok"] is True
+    assert listed["items"][0]["summary_source"] == "alphaxiv_overview"
+    assert listed["items"][0]["overview_markdown"].startswith("# Vision Transformers")
+    assert listed["items"][0]["overview_source"] == "alphaxiv_overview"
+
+
+def test_artifact_arxiv_read_mode_preserves_placeholder_when_metadata_times_out(
+    temp_home: Path, monkeypatch
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("pending arxiv quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    def fake_urlopen(request, timeout=8):  # noqa: ANN001
+        url = request.full_url
+        if "export.arxiv.org/api/query" in url:
+            raise TimeoutError("metadata timed out")
+        if url.endswith("/abs/2509.26603"):
+            raise TimeoutError("abstract timed out")
+        if url.endswith("/pdf/2509.26603.pdf"):
+            return _FakeUrlopenResponse("%PDF-1.7\nfake pdf body")
+        raise AssertionError(url)
+
+    monkeypatch.setattr("deepscientist.artifact.arxiv.urlopen", fake_urlopen)
+    monkeypatch.setattr("deepscientist.arxiv_library.urlopen", fake_urlopen)
+
+    result = artifact.arxiv("2509.26603", mode="read", quest_root=quest_root)
+
+    assert result["ok"] is True
+    assert result["metadata_pending"] is True
+    assert result["metadata_status"] == "pending"
+    assert result["abs_url"] == "https://arxiv.org/abs/2509.26603"
+    assert result["title"] == "2509.26603"
+
+    pdf_path = quest_root / "literature" / "arxiv" / "pdfs" / "2509.26603.pdf"
+    for _ in range(40):
+        if pdf_path.exists():
+            break
+        time.sleep(0.05)
+    assert pdf_path.exists()
+
+    listed = artifact.arxiv(mode="list", quest_root=quest_root)
+    assert listed["items"][0]["metadata_status"] == "pending"
+
+
+def test_open_document_supports_legacy_path_arxiv_ids_from_worktree(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("legacy arxiv path quest")
+    quest_root = Path(quest["quest_root"])
+    pdf_path = quest_root / "literature" / "arxiv" / "pdfs" / "2010.11929.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b"%PDF-1.7\nlegacy arxiv path")
+
+    worktree_root = quest_root / ".ds" / "worktrees" / "analysis-test"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    quest_service.update_research_state(quest_root, current_workspace_root=str(worktree_root))
+
+    payload = quest_service.open_document(quest["quest_id"], "path::literature/arxiv/pdfs/2010.11929.pdf")
+
+    assert payload["title"] == "2010.11929.pdf"
+    assert payload["path"] == str(pdf_path)
+    assert payload["mime_type"] == "application/pdf"
 
 
 def test_artifact_interact_respects_primary_connector_policy(temp_home: Path, monkeypatch) -> None:
@@ -1778,6 +2624,71 @@ def test_artifact_interact_auto_uses_single_enabled_connector_for_primary_only(t
 
     assert any("Single connector auto-selection test." in str(item.get("text") or "") for item in whatsapp_records)
     assert not local_outbox.exists()
+
+
+def test_artifact_interact_routes_to_weixin_connector(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["weixin"]["enabled"] = True
+    connectors["weixin"]["bot_token"] = "wx-token"
+    connectors["weixin"]["account_id"] = "wx-bot-1@im.bot"
+    connectors["weixin"]["login_user_id"] = "wx-owner@im.wechat"
+    connectors["_routing"]["primary_connector"] = "weixin"
+    connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("artifact weixin routing quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    quest_service.bind_source(quest["quest_id"], "web")
+    quest_service.bind_source(quest["quest_id"], "weixin:direct:wx-user-1@im.wechat")
+    remember_weixin_context_token(
+        temp_home / "logs" / "connectors" / "weixin",
+        user_id="wx-user-1@im.wechat",
+        context_token="ctx-token-1",
+        account_id="wx-bot-1@im.bot",
+    )
+
+    sends: list[dict] = []
+
+    def fake_send_weixin_message(*, base_url, token, body, route_tag=None, timeout_ms=15_000):  # noqa: ANN001
+        sends.append(
+            {
+                "base_url": base_url,
+                "token": token,
+                "body": body,
+                "route_tag": route_tag,
+                "timeout_ms": timeout_ms,
+            }
+        )
+        return {}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.send_weixin_message", fake_send_weixin_message)
+
+    result = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="Weixin artifact interaction test.",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["preferred_connector"] == "weixin"
+    assert result["delivery_policy"] == "primary_only"
+    assert result["delivery_targets"] == ["weixin:direct:wx-user-1@im.wechat"]
+    assert len(sends) == 1
+    assert sends[0]["token"] == "wx-token"
+    assert sends[0]["body"]["msg"]["to_user_id"] == "wx-user-1@im.wechat"
+    assert sends[0]["body"]["msg"]["context_token"] == "ctx-token-1"
+    assert sends[0]["body"]["msg"]["item_list"][0]["text_item"]["text"] == "Weixin artifact interaction test."
+
+    weixin_records = read_jsonl(temp_home / "logs" / "connectors" / "weixin" / "outbox.jsonl")
+    assert any("Weixin artifact interaction test." in str(item.get("text") or "") for item in weixin_records)
 
 
 def test_artifact_interact_persists_surface_actions_and_connector_payload(temp_home: Path, monkeypatch) -> None:

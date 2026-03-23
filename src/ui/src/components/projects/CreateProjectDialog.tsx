@@ -1,7 +1,8 @@
-import { ArrowUpRight, BookmarkPlus, Bot, CircleHelp, Lock, RotateCcw, Settings2, Sparkles } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { ArrowUpRight, BookmarkPlus, CircleHelp, Lock, RotateCcw, Sparkles } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import { ConnectorTargetRadioGroup, type ConnectorTargetRadioItem } from '@/components/connectors/ConnectorTargetRadioGroup'
 import { OverlayDialog } from '@/components/home/OverlayDialog'
 import { connectorCatalog } from '@/components/settings/connectorCatalog'
 import { AnimatedCheckbox } from '@/components/ui/animated-checkbox'
@@ -11,8 +12,10 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { client } from '@/lib/api'
-import { connectorTargetLabel, normalizeConnectorTargets, recentConversationLabel } from '@/lib/connectors'
+import { connectorInstanceMode, connectorTargetLabel, normalizeConnectorTargets, parseConversationId, recentConversationLabel } from '@/lib/connectors'
 import { useI18n } from '@/lib/i18n'
+import { useOnboardingStore } from '@/lib/stores/onboarding'
+import { resetDemoRuntime } from '@/demo/runtime'
 import {
   applyStartResearchIntensityPreset,
   compileStartResearchPrompt,
@@ -23,6 +26,7 @@ import {
   listReferenceStartResearchTemplates,
   listStartResearchIntensityPresets,
   resolveStartResearchContractFields,
+  resolveStartResearchConnectorBindings,
   saveStartResearchDraft,
   saveStartResearchTemplate,
   slugifyQuestRepo,
@@ -67,8 +71,8 @@ const copy = {
     targetRunnerValue: 'Codex / local daemon',
     connectorDeliveryLabel: 'Connector delivery',
     connectorDeliveryHelp:
-      'Optional. Each enabled connector can bind one target for this new project immediately. Leave a connector unchecked to keep it out of the initial binding set.',
-    connectorDeliveryHint: 'Each connector can choose one target. If a target is already bound elsewhere, rebinding this project will replace the old quest binding.',
+      'Select at most one external connector target for this new project. The dialog preselects the first available option, but you can switch it or keep the project local-only.',
+    connectorDeliveryHint: 'A quest keeps local access plus at most one external connector. If the selected target is already bound elsewhere, rebinding this project will replace the old quest binding.',
     connectorSettingsAction: 'Open connector settings',
     connectorEmptyTitle: 'No enabled connector yet',
     connectorEmptyBody:
@@ -76,16 +80,20 @@ const copy = {
     connectorUnavailableTitle: 'No selectable connector target yet',
     connectorUnavailableBody:
       'Enabled connectors exist, but no active target is available yet. Send one message to that connector first, or set a default target in Settings.',
-    connectorAutoModeLabel: 'No manual selection',
-    connectorAutoModeBody: 'Keep the current automatic binding behavior during project creation.',
+    connectorAutoModeLabel: 'Default preselection',
+    connectorAutoModeBody: 'The first available connector target is preselected. You can switch it or turn it off before creating the project.',
     connectorSummaryLabel: 'Connector',
-    connectorSummaryAuto: 'Automatic',
-    connectorSelectedHint: 'If a selected target is already bound to another quest, creating this project will rebind that target here.',
+    connectorSummaryAuto: 'Local only',
+    connectorSummaryLocalBody: 'Project starts in local-only mode. You can bind a connector later if needed.',
+    connectorSelectedHint: 'Only one external connector can be bound to a project. If the selected target is already bound elsewhere, creating this project will rebind it here.',
     connectorSourceDefault: 'Default target',
     connectorSourceRecent: 'Recent conversation',
     connectorSourceLast: 'Latest conversation',
     connectorSourceDiscovered: 'Discovered target',
     connectorSourceUnavailable: 'Waiting for first message',
+    connectorModeSingle: 'Single endpoint',
+    connectorModeMulti: 'Multi-instance',
+    connectorSelectPlaceholder: 'Local only',
     connectorSuggestTitle: 'Bind a connector first?',
     connectorSuggestBody:
       'For a smoother experience, it is recommended to configure at least one connector before starting research. Then milestones and progress can reach you outside the web workspace too.',
@@ -128,6 +136,8 @@ const copy = {
     titleLabel: 'Project title',
     titlePlaceholder: 'A short human-readable research title',
     titleHelp: 'This is the display title shown in the workspace and project cards.',
+    tutorialExample: 'Use tutorial example',
+    tutorialExampleHelp: 'Fill a clean sample request that matches the first-run guide.',
     repoLabel: 'Project ID',
     repoPlaceholder: 'Default: next sequential id such as 001, 002, 003',
     repoHelp: 'By default runtime allocates the next sequential project id. You can override it manually when needed.',
@@ -254,8 +264,8 @@ const copy = {
     targetRunnerValue: 'Codex / 本地 daemon',
     connectorDeliveryLabel: '连接器投递',
     connectorDeliveryHelp:
-      '可选。每个已启用的 connector 都可以为新项目选择 1 个目标会话；不勾选则表示这个 connector 暂不参与初始绑定。',
-    connectorDeliveryHint: '每个 connector 最多选择 1 个目标；如果该目标已绑定到别的 quest，创建当前项目时会自动替换原绑定。',
+      '给这个新项目最多选择 1 个外部 connector 目标；弹窗会先默认勾选第一个可用项，但你可以改成别的，或者保持仅本地。',
+    connectorDeliveryHint: '一个 quest 会保留本地访问，并且最多只绑定 1 个外部 connector；如果该目标已绑定到别的 quest，创建当前项目时会自动替换原绑定。',
     connectorSettingsAction: '打开 Connector 设置',
     connectorEmptyTitle: '还没有启用的 connector',
     connectorEmptyBody:
@@ -263,16 +273,20 @@ const copy = {
     connectorUnavailableTitle: '还没有可选的 connector 目标',
     connectorUnavailableBody:
       '已有启用的 connector，但当前还没有可用目标。请先给对应 connector 发一条消息，或在 Settings 中设置默认目标。',
-    connectorAutoModeLabel: '不手动指定',
-    connectorAutoModeBody: '创建项目时保持当前默认的自动绑定行为。',
+    connectorAutoModeLabel: '默认预选',
+    connectorAutoModeBody: '系统会先默认勾选第一个可用 connector 目标；创建前你可以切换，也可以关闭外部绑定。',
     connectorSummaryLabel: '连接器',
-    connectorSummaryAuto: '自动',
-    connectorSelectedHint: '如果当前选中的目标已经绑定到别的 quest，创建后会自动重绑到当前项目。',
+    connectorSummaryAuto: '仅本地',
+    connectorSummaryLocalBody: '项目将以仅本地模式启动；如果之后需要，你也可以稍后再绑定 connector。',
+    connectorSelectedHint: '一个项目最多只能绑定 1 个外部 connector；如果当前选中的目标已经绑定到别的 quest，创建后会自动重绑到当前项目。',
     connectorSourceDefault: '默认目标',
     connectorSourceRecent: '最近会话',
     connectorSourceLast: '最新会话',
     connectorSourceDiscovered: '已发现目标',
     connectorSourceUnavailable: '等待第一条消息',
+    connectorModeSingle: '单实例',
+    connectorModeMulti: '多实例',
+    connectorSelectPlaceholder: '仅本地',
     connectorSuggestTitle: '建议先绑定一个 Connector',
     connectorSuggestBody:
       '为了获得更顺滑的使用体验，建议你先配置至少一个 connector。这样开始研究后，里程碑和进展也能同步发到网页之外。',
@@ -314,6 +328,8 @@ const copy = {
     titleLabel: '课题标题',
     titlePlaceholder: '一个简洁易读的研究标题',
     titleHelp: '这是工作区和项目卡片中展示给用户看的标题。',
+    tutorialExample: '填入教程示例',
+    tutorialExampleHelp: '填入一个适合首次教程演示的正式示例。',
     repoLabel: '项目 ID',
     repoPlaceholder: '默认使用下一个顺序编号，例如 001、002、003',
     repoHelp: '默认由 runtime 分配下一个顺序项目 ID；如有需要你也可以手动覆盖。',
@@ -430,8 +446,10 @@ type StartConnectorChoice = {
   subtitle: string
   transport: string
   connectionState: string
+  instanceMode: 'single_instance' | 'multi_instance'
   targets: Array<{
     conversationId: string
+    cardId: string
     targetLabel: string
     compactLabel: string
     detailLabel: string
@@ -456,6 +474,9 @@ function parseConversationLabel(value?: string | null) {
   if (parts.length !== 3) return raw
   const [, chatType, chatId] = parts
   if (!chatType || !chatId) return raw
+  if (chatType === 'passive') {
+    return `Passive · ${chatId}`
+  }
   return `${chatType} · ${chatId}`
 }
 
@@ -485,6 +506,16 @@ function compactConnectorTargetOption(args: {
   return clampText(String(args.fallbackLabel || '').trim() || [chatType, shortChatId(chatId)].filter(Boolean).join(' · '), 44)
 }
 
+function connectorTargetCardId(conversationId: string, profileLabel?: string | null) {
+  const parsed = parseConversationId(conversationId)
+  const profile = String(profileLabel || parsed?.profile_id || '').trim()
+  const chatId =
+    parsed?.chat_type === 'passive'
+      ? `Passive · ${String(parsed?.chat_id || conversationId || '').trim()}`
+      : String(parsed?.chat_id || conversationId || '').trim()
+  return [profile, chatId].filter(Boolean).join(' · ') || conversationId
+}
+
 function resolveStartConnectorChoice(snapshot: ConnectorSnapshot): StartConnectorChoice {
   const catalogEntry = connectorCatalogByName.get(snapshot.name as (typeof connectorCatalog)[number]['name'])
   const normalizedConnectorTargets = normalizeConnectorTargets(snapshot)
@@ -496,6 +527,7 @@ function resolveStartConnectorChoice(snapshot: ConnectorSnapshot): StartConnecto
   }, {})
   const normalizedTargets = normalizedConnectorTargets.map((target) => ({
       conversationId: target.conversation_id,
+      cardId: connectorTargetCardId(target.conversation_id, target.profile_label),
       targetLabel: connectorTargetLabel(target),
       compactLabel: compactConnectorTargetOption({
         profileLabel: target.profile_label,
@@ -523,6 +555,7 @@ function resolveStartConnectorChoice(snapshot: ConnectorSnapshot): StartConnecto
     if (recentConversation?.conversation_id) {
       normalizedTargets.push({
         conversationId: recentConversation.conversation_id,
+        cardId: connectorTargetCardId(recentConversation.conversation_id, recentConversation.profile_label),
         targetLabel: recentConversationLabel(recentConversation),
         compactLabel: compactConnectorTargetOption({
           profileLabel: recentConversation.profile_label,
@@ -539,6 +572,7 @@ function resolveStartConnectorChoice(snapshot: ConnectorSnapshot): StartConnecto
     } else if (lastConversationId) {
       normalizedTargets.push({
         conversationId: lastConversationId,
+        cardId: connectorTargetCardId(lastConversationId),
         targetLabel: parseConversationLabel(lastConversationId),
         compactLabel: clampText(parseConversationLabel(lastConversationId), 44),
         detailLabel: clampText(lastConversationId, 36),
@@ -556,6 +590,7 @@ function resolveStartConnectorChoice(snapshot: ConnectorSnapshot): StartConnecto
     subtitle: catalogEntry?.subtitle || '',
     transport: String(snapshot.transport || snapshot.display_mode || snapshot.mode || '').trim(),
     connectionState: String(snapshot.connection_state || '').trim(),
+    instanceMode: connectorInstanceMode(snapshot),
     targets: normalizedTargets,
   }
 }
@@ -586,15 +621,17 @@ function InlineField({
   label,
   help,
   hint,
+  dataOnboardingId,
   children,
 }: {
   label: string
   help?: string
   hint?: string
+  dataOnboardingId?: string
   children: ReactNode
 }) {
   return (
-    <div className="space-y-1">
+    <div className="space-y-1" data-onboarding-id={dataOnboardingId}>
       <div className="flex items-center gap-1.5 text-[11px] font-medium text-[rgba(75,73,69,0.78)] dark:text-[rgba(75,73,69,0.78)]">
         <span>{label}</span>
         {help ? <FieldHelp text={help} /> : null}
@@ -697,17 +734,7 @@ function ConnectorChoiceField({
   value,
   loading = false,
   error,
-  emptyTitle,
-  emptyBody,
-  unavailableTitle,
-  unavailableBody,
-  settingsActionLabel,
-  autoModeLabel,
-  autoModeBody,
-  selectedHint,
-  sourceLabels,
-  locale,
-  onOpenSettings,
+  localOnlyLabel,
   onChange,
 }: {
   label: string
@@ -717,23 +744,43 @@ function ConnectorChoiceField({
   value: Record<string, string | null>
   loading?: boolean
   error?: string | null
-  emptyTitle: string
-  emptyBody: string
-  unavailableTitle: string
-  unavailableBody: string
-  settingsActionLabel: string
-  autoModeLabel: string
-  autoModeBody: string
-  selectedHint: string
-  sourceLabels: Record<'default' | 'recent' | 'last' | 'discovered' | 'unavailable', string>
-  locale: 'en' | 'zh'
-  onOpenSettings: () => void
+  localOnlyLabel: string
   onChange: (connectorName: string, next: string | null) => void
 }) {
   const enabledItems = items
   const selectableItems = enabledItems.filter((item) => item.targets.length > 0)
-  const hasUnavailable = enabledItems.some((item) => item.targets.length === 0)
-  const selectedCount = Object.values(value).filter(Boolean).length
+  const selectedConnectorName = enabledItems.find((item) => Boolean(value[item.name]))?.name || null
+  const flattenedOptions = selectableItems.flatMap((item) =>
+    item.targets.map((target) => ({
+      key: `${item.name}::${target.conversationId}`,
+      connectorName: item.name,
+      connectorLabel: item.label,
+      target,
+    }))
+  )
+  const selectedConversationId = selectedConnectorName ? value[selectedConnectorName] || null : null
+  const selectedOption =
+    flattenedOptions.find(
+      (item) => item.connectorName === selectedConnectorName && item.target.conversationId === selectedConversationId
+    ) || null
+  const selectedValue = selectedOption?.key || '__local__'
+  const cardItems: ConnectorTargetRadioItem[] = [
+    {
+      value: '__local__',
+      connectorName: 'local',
+      connectorLabel: localOnlyLabel,
+      targetId: localOnlyLabel,
+      boundQuestLabel: '',
+      localOnly: true,
+    },
+    ...flattenedOptions.map((item) => ({
+      value: item.key,
+      connectorName: item.connectorName,
+      connectorLabel: item.connectorLabel,
+      targetId: item.target.cardId,
+      boundQuestLabel: item.target.boundQuestId ? `Quest ${item.target.boundQuestId}` : 'Unbound',
+    })),
+  ]
 
   return (
     <InlineField label={label} help={help} hint={hint}>
@@ -741,107 +788,31 @@ function ConnectorChoiceField({
         <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/60 px-3 py-3 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:border-[rgba(45,42,38,0.08)] dark:bg-white/70 dark:text-[rgba(86,82,77,0.82)]">
           Loading connectors…
         </div>
-      ) : enabledItems.length === 0 ? (
-        <div className="rounded-[16px] border border-dashed border-[rgba(45,42,38,0.12)] bg-white/52 px-4 py-4 dark:border-[rgba(45,42,38,0.12)] dark:bg-white/64">
-          <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
-            {emptyTitle}
-          </div>
-          <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
-            {emptyBody}
-          </div>
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-[rgba(45,42,38,0.1)] bg-white/82 px-3 py-1.5 text-[11px] font-medium text-[rgba(38,36,33,0.95)] transition hover:bg-white dark:border-[rgba(45,42,38,0.1)] dark:bg-white/88"
-          >
-            <Settings2 className="h-3.5 w-3.5" />
-            {settingsActionLabel}
-          </button>
-        </div>
       ) : (
         <div className="space-y-3">
-          <div className="divide-y divide-[rgba(45,42,38,0.08)] dark:divide-[rgba(45,42,38,0.08)]">
-            {enabledItems.map((item) => {
-              const selectedConversationId = value[item.name] || null
-              const available = item.targets.length > 0
-              const selectedTarget = item.targets.find((target) => target.conversationId === selectedConversationId) || null
-              const catalogEntry = connectorCatalogByName.get(item.name as (typeof connectorCatalog)[number]['name'])
-              const Icon = catalogEntry?.icon || Bot
-
-              return (
-                <div
-                  key={item.name}
-                  className="grid grid-cols-1 gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,210px)_minmax(0,1fr)] sm:items-start"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] border border-[rgba(45,42,38,0.08)] bg-white/82 text-[rgba(56,52,47,0.9)] dark:border-[rgba(45,42,38,0.08)] dark:bg-white/88">
-                      <Icon className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
-                        {item.label}
-                      </div>
-                      <div className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
-                        {item.connectionState || item.transport || 'connector'}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="min-w-0 space-y-1.5">
-                    <select
-                      value={selectedConversationId || ''}
-                      onChange={(event) => onChange(item.name, event.target.value || null)}
-                      className={cn(selectClassName, 'w-full min-w-0')}
-                      disabled={!available}
-                    >
-                      <option value="">{autoModeLabel}</option>
-                      {item.targets.map((target) => (
-                        <option key={target.conversationId} value={target.conversationId}>
-                          {target.compactLabel}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="text-[11px] leading-5 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
-                      {!available
-                        ? unavailableBody
-                        : selectedTarget
-                          ? selectedTarget.boundQuestId
-                            ? `${sourceLabels[selectedTarget.sourceKind]} · ${selectedTarget.boundQuestId}${selectedTarget.boundQuestTitle ? ` · ${clampText(selectedTarget.boundQuestTitle, 28)}` : ''}`
-                            : `${sourceLabels[selectedTarget.sourceKind]} · ${selectedTarget.detailLabel}`
-                          : autoModeBody}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="px-1 text-[11px] leading-5 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]">
-            {selectedCount > 0
-              ? locale === 'zh'
-                ? `已选择 ${selectedCount} 个 connector。${selectedHint}`
-                : `${selectedCount} connector(s) selected. ${selectedHint}`
-              : `${autoModeLabel}. ${autoModeBody}`}
-          </div>
-
-          {hasUnavailable && selectableItems.length === 0 ? (
-            <div className="rounded-[14px] border border-dashed border-[rgba(45,42,38,0.12)] bg-white/52 px-4 py-4 dark:border-[rgba(45,42,38,0.12)] dark:bg-white/64">
-              <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
-                {unavailableTitle}
-              </div>
-              <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
-                {unavailableBody}
-              </div>
-              <button
-                type="button"
-                onClick={onOpenSettings}
-                className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-[rgba(45,42,38,0.1)] bg-white/82 px-3 py-1.5 text-[11px] font-medium text-[rgba(38,36,33,0.95)] transition hover:bg-white dark:border-[rgba(45,42,38,0.1)] dark:bg-white/88"
-              >
-                <Settings2 className="h-3.5 w-3.5" />
-                {settingsActionLabel}
-              </button>
-            </div>
-          ) : null}
+          <ConnectorTargetRadioGroup
+            ariaLabel={label}
+            items={cardItems}
+            value={selectedValue}
+            onChange={(nextValue) => {
+              if (!nextValue || nextValue === '__local__') {
+                if (selectedConnectorName) {
+                  onChange(selectedConnectorName, null)
+                }
+                return
+              }
+              const separatorIndex = nextValue.indexOf('::')
+              if (separatorIndex < 0) {
+                return
+              }
+              const connectorName = nextValue.slice(0, separatorIndex)
+              const conversationId = nextValue.slice(separatorIndex + 2)
+              if (!connectorName || !conversationId) {
+                return
+              }
+              onChange(connectorName, conversationId)
+            }}
+          />
 
           {error ? <div className="text-[11px] leading-5 text-[#9a1b1b]">{error}</div> : null}
         </div>
@@ -854,13 +825,16 @@ function SectionCard({
   title,
   children,
   muted = false,
+  dataOnboardingId,
 }: {
   title: string
   children: ReactNode
   muted?: boolean
+  dataOnboardingId?: string
 }) {
   return (
     <div
+      data-onboarding-id={dataOnboardingId}
       className={cn(
         'rounded-[18px] border p-3 sm:rounded-xl',
         muted
@@ -893,6 +867,74 @@ function sanitizeLines(value: string) {
     .split('\n')
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<StartResearchTemplate> {
+  if (language === 'zh') {
+    return {
+      title: '复现公开 baseline，并验证一个可计算改进方向',
+      goal: [
+        '请先复现目标 baseline，确认主指标和运行脚本稳定可用；然后基于误差分析提出一个更高效的改进方向，并执行一轮可比较实验。',
+        '',
+        '成功标准是 baseline 可信、至少有一组可比较 metric，并形成简短结论与下一步建议。',
+      ].join('\n'),
+      baseline_id: '',
+      baseline_variant_id: '',
+      baseline_urls: '',
+      paper_urls: '',
+      runtime_constraints: [
+        '- 优先控制计算成本。',
+        '- 保留日志和关键中间结果。',
+        '- 如果证据不足，不要提前下结论。',
+      ].join('\n'),
+      objectives: [
+        '1. 建立可信 baseline。',
+        '2. 跑通一个改进分支。',
+        '3. 输出 metric、日志和简短分析。',
+      ].join('\n'),
+      need_research_paper: true,
+      research_intensity: 'balanced',
+      decision_policy: 'autonomous',
+      launch_mode: 'standard',
+      custom_profile: 'freeform',
+      entry_state_summary: '',
+      review_summary: '',
+      custom_brief: '',
+      user_language: 'zh',
+    }
+  }
+
+  return {
+    title: 'Reproduce a public baseline and test one computable improvement direction',
+    goal: [
+      'First reproduce the target baseline and verify that the main metric and scripts run reliably. Then propose one efficiency-oriented improvement based on error analysis and run one comparable experiment.',
+      '',
+      'Success means the baseline is trustworthy, at least one branch produces a clear metric comparison, and the project leaves a concise conclusion with next-step advice.',
+    ].join('\n'),
+    baseline_id: '',
+    baseline_variant_id: '',
+    baseline_urls: '',
+    paper_urls: '',
+    runtime_constraints: [
+      '- Control cost.',
+      '- Preserve logs and key intermediate results.',
+      '- Do not make claims before evidence is sufficient.',
+    ].join('\n'),
+    objectives: [
+      '1. Establish a trustworthy baseline.',
+      '2. Run one improvement branch.',
+      '3. Produce metrics, logs, and a short analysis.',
+    ].join('\n'),
+    need_research_paper: true,
+    research_intensity: 'balanced',
+    decision_policy: 'autonomous',
+    launch_mode: 'standard',
+    custom_profile: 'freeform',
+    entry_state_summary: '',
+    review_summary: '',
+    custom_brief: '',
+    user_language: 'en',
+  }
 }
 
 function clampText(value: string, limit = 48) {
@@ -967,6 +1009,7 @@ export function CreateProjectDialog({
 }) {
   const navigate = useNavigate()
   const { locale } = useI18n()
+  const onboardingStatus = useOnboardingStore((state) => state.status)
   const t = copy[locale]
   const [form, setForm] = useState<StartResearchTemplate>(defaultStartResearchTemplate(locale))
   const [promptDraft, setPromptDraft] = useState('')
@@ -1049,10 +1092,12 @@ export function CreateProjectDialog({
       return
     }
     const next = loadStartResearchTemplate(locale)
+    const tutorialSeed = onboardingStatus === 'running' ? buildTutorialStartResearchExample(locale) : null
     const withSeed = {
       ...next,
-      goal: initialGoal || next.goal,
-      user_language: locale,
+      ...(tutorialSeed || {}),
+      goal: initialGoal || tutorialSeed?.goal || next.goal,
+      user_language: tutorialSeed?.user_language || locale,
     }
     setForm({
       ...withSeed,
@@ -1068,7 +1113,7 @@ export function CreateProjectDialog({
     setConnectorRecommendationHandled(false)
     setConnectorAvailability(null)
     setConnectorAvailabilityResolved(false)
-  }, [initialGoal, locale, open])
+  }, [initialGoal, locale, onboardingStatus, open])
 
   const setField = <K extends keyof StartResearchTemplate>(
     key: K,
@@ -1080,6 +1125,21 @@ export function CreateProjectDialog({
       return next
     })
   }
+
+  const handleApplyTutorialExample = useCallback(() => {
+    const example = buildTutorialStartResearchExample(locale)
+    setManualOverride(false)
+    setQuestIdManualOverride(false)
+    setForm((current) => {
+      const next: StartResearchTemplate = {
+        ...current,
+        ...example,
+        quest_id: current.quest_id,
+      }
+      saveStartResearchDraft(next)
+      return next
+    })
+  }, [locale])
 
   useEffect(() => {
     if (!open) return
@@ -1105,6 +1165,10 @@ export function CreateProjectDialog({
   }, [open])
 
   useEffect(() => {
+    if (onboardingStatus === 'running') {
+      setShowConnectorRecommendation(false)
+      return
+    }
     if (
       !shouldRecommendStartResearchConnectorBinding({
         open,
@@ -1125,6 +1189,7 @@ export function CreateProjectDialog({
     connectorAvailabilityLoading,
     connectorAvailabilityResolved,
     connectorRecommendationHandled,
+    onboardingStatus,
     open,
   ])
 
@@ -1245,46 +1310,28 @@ export function CreateProjectDialog({
     [connectors]
   )
 
+  const effectiveSelectedConnectorBindings = useMemo(
+    () => resolveStartResearchConnectorBindings(connectorChoices, selectedConnectorBindings),
+    [connectorChoices, selectedConnectorBindings]
+  )
+
   const selectedConnectorTargets = useMemo(
     () =>
       connectorChoices.flatMap((item) => {
-        const selectedConversationId = selectedConnectorBindings[item.name] || null
+        const selectedConversationId = effectiveSelectedConnectorBindings[item.name] || null
         if (!selectedConversationId) return []
         const target = item.targets.find((candidate) => candidate.conversationId === selectedConversationId)
         if (!target) return []
         return [{ connector: item.label, target }]
       }),
-    [connectorChoices, selectedConnectorBindings]
+    [connectorChoices, effectiveSelectedConnectorBindings]
   )
+  const selectedConnectorTarget = selectedConnectorTargets[0] || null
 
   const templateOptions = useMemo(
     () => [...referenceTemplates, ...templates],
     [referenceTemplates, templates]
   )
-
-  useEffect(() => {
-    setSelectedConnectorBindings((current) => {
-      const next: Record<string, string | null> = {}
-      let changed = false
-      for (const item of connectorChoices) {
-        const currentValue = current[item.name] || null
-        const availableIds = new Set(item.targets.map((target) => target.conversationId))
-        if (currentValue && availableIds.has(currentValue)) {
-          next[item.name] = currentValue
-          continue
-        }
-        next[item.name] = null
-        if ((current[item.name] || null) !== null) {
-          changed = true
-        }
-      }
-      const currentKeys = Object.keys(current)
-      if (!changed && currentKeys.length === Object.keys(next).length) {
-        return current
-      }
-      return next
-    })
-  }, [connectorChoices])
 
   useEffect(() => {
     if (!open || manualOverride) return
@@ -1417,7 +1464,18 @@ export function CreateProjectDialog({
     navigate('/settings/connector', { state: { configName: 'connectors' } })
   }
 
+  const handleLaunchTutorialDemo = useCallback(() => {
+    setShowConnectorRecommendation(false)
+    onClose()
+    resetDemoRuntime('demo-memory')
+    navigate('/projects/demo-memory')
+  }, [navigate, onClose])
+
   const handleCreate = async () => {
+    if (onboardingStatus === 'running') {
+      handleLaunchTutorialDemo()
+      return
+    }
     if (!manualOverride && !form.goal.trim()) {
       return
     }
@@ -1438,7 +1496,7 @@ export function CreateProjectDialog({
     const requestedConnectorBindings = connectorChoices
       .map((item) => ({
         connector: item.name,
-        conversation_id: selectedConnectorBindings[item.name] || null,
+        conversation_id: effectiveSelectedConnectorBindings[item.name] || null,
       }))
       .filter((item) => Boolean(item.conversation_id))
     const startupContract = {
@@ -1481,7 +1539,10 @@ export function CreateProjectDialog({
         onClose={onClose}
         className="h-[94svh] max-w-[96vw] rounded-[26px] sm:h-[92vh] sm:max-w-[92vw] sm:rounded-[30px]"
       >
-        <div className="feed-scrollbar flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3 sm:gap-4 sm:p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:overflow-hidden lg:p-5">
+        <div
+          className="feed-scrollbar flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3 sm:gap-4 sm:p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:overflow-hidden lg:p-5"
+          data-onboarding-id="start-research-dialog"
+        >
         <div
           className={cn(
             'flex flex-none flex-col overflow-visible lg:min-h-0 lg:flex-auto lg:overflow-hidden lg:rounded-xl lg:border lg:border-[rgba(45,42,38,0.09)] lg:bg-[rgba(255,255,255,0.76)] lg:shadow-[0_10px_26px_-22px_rgba(45,42,38,0.26)] lg:backdrop-blur-xl dark:lg:border-[rgba(45,42,38,0.09)] dark:lg:bg-[rgba(255,255,255,0.82)]'
@@ -1545,39 +1606,34 @@ export function CreateProjectDialog({
                     <div className="mt-1 text-sm font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">{t.targetRunnerValue}</div>
                   </div>
                 </div>
-                <ConnectorChoiceField
+                <div data-onboarding-id="start-research-connector">
+                  <ConnectorChoiceField
                   label={t.connectorDeliveryLabel}
                   help={t.connectorDeliveryHelp}
                   hint={t.connectorDeliveryHint}
                   items={connectorChoices}
-                  value={selectedConnectorBindings}
+                  value={effectiveSelectedConnectorBindings}
                   loading={connectorsLoading}
                   error={connectorsError}
-                  emptyTitle={t.connectorEmptyTitle}
-                  emptyBody={t.connectorEmptyBody}
-                  unavailableTitle={t.connectorUnavailableTitle}
-                  unavailableBody={t.connectorUnavailableBody}
-                  settingsActionLabel={t.connectorSettingsAction}
-                  autoModeLabel={t.connectorAutoModeLabel}
-                  autoModeBody={t.connectorAutoModeBody}
-                  selectedHint={t.connectorSelectedHint}
-                  sourceLabels={{
-                    default: t.connectorSourceDefault,
-                    recent: t.connectorSourceRecent,
-                    last: t.connectorSourceLast,
-                    discovered: t.connectorSourceDiscovered,
-                    unavailable: t.connectorSourceUnavailable,
-                  }}
-                  locale={locale}
-                  onOpenSettings={handleOpenConnectorSettings}
+                  localOnlyLabel={t.connectorSelectPlaceholder}
                   onChange={(connectorName, next) =>
-                    setSelectedConnectorBindings((current) => ({ ...current, [connectorName]: next }))
+                    setSelectedConnectorBindings(() => {
+                      const normalized: Record<string, string | null> = {}
+                      for (const item of connectorChoices) {
+                        normalized[item.name] = null
+                      }
+                      if (next) {
+                        normalized[connectorName] = next
+                      }
+                      return normalized
+                    })
                   }
-                />
+                  />
+                </div>
               </SectionCard>
 
               <SectionCard title={t.basics}>
-                <InlineField label={t.titleLabel} help={t.titleHelp}>
+                <InlineField label={t.titleLabel} help={t.titleHelp} dataOnboardingId="start-research-title">
                   <Input
                     value={form.title}
                     onChange={(event) => setField('title', event.target.value)}
@@ -1597,7 +1653,23 @@ export function CreateProjectDialog({
                   />
                 </InlineField>
 
-                <InlineField label={t.goalLabel} help={t.goalHelp}>
+                {onboardingStatus !== 'running' ? (
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="rounded-full"
+                      onClick={handleApplyTutorialExample}
+                      disabled={manualOverride}
+                      title={t.tutorialExampleHelp}
+                    >
+                      {t.tutorialExample}
+                    </Button>
+                  </div>
+                ) : null}
+
+                <InlineField label={t.goalLabel} help={t.goalHelp} dataOnboardingId="start-research-goal">
                   <Textarea
                     value={form.goal}
                     onChange={(event) => setField('goal', event.target.value)}
@@ -1609,7 +1681,7 @@ export function CreateProjectDialog({
                 {goalRequired ? <div className="text-xs text-[#9a1b1b]">{t.goalRequired}</div> : null}
               </SectionCard>
 
-              <SectionCard title={t.references}>
+              <SectionCard title={t.references} dataOnboardingId="start-research-references">
                 <div className="grid grid-cols-1 gap-3">
                   <InlineField label={t.baselineRoot} help={t.baselineRootHelp}>
                     <div className="space-y-2">
@@ -1712,7 +1784,7 @@ export function CreateProjectDialog({
                 </InlineField>
               </SectionCard>
 
-              <SectionCard title={t.policy}>
+              <SectionCard title={t.policy} dataOnboardingId="start-research-contract">
                 <InlineField label={t.launchModeLabel} help={t.launchModeHelp} hint={t.launchModeHelp}>
                   <select
                     value={form.launch_mode}
@@ -1880,6 +1952,7 @@ export function CreateProjectDialog({
         </div>
 
         <div
+          data-onboarding-id="start-research-preview"
           className={cn(
             'flex flex-none flex-col overflow-visible p-0 sm:p-0 lg:min-h-0 lg:flex-auto lg:overflow-hidden lg:rounded-xl lg:border lg:border-[rgba(45,42,38,0.09)] lg:bg-[rgba(255,255,255,0.76)] lg:p-4 lg:shadow-[0_10px_26px_-22px_rgba(45,42,38,0.26)] lg:backdrop-blur-xl dark:lg:border-[rgba(45,42,38,0.09)] dark:lg:bg-[rgba(255,255,255,0.82)]'
           )}
@@ -1917,28 +1990,21 @@ export function CreateProjectDialog({
             <div className="rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
               <div className="text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)]">{t.connectorSummaryLabel}</div>
               <div className="mt-1 font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
-                {selectedConnectorTargets.length > 0
-                  ? locale === 'zh'
-                    ? `已选 ${selectedConnectorTargets.length} 个`
-                    : `${selectedConnectorTargets.length} selected`
+                {selectedConnectorTarget
+                  ? selectedConnectorTarget.connector
                   : t.connectorSummaryAuto}
               </div>
               <div
                 className="mt-1 truncate text-[10px] leading-4 text-[rgba(107,103,97,0.78)] dark:text-[rgba(107,103,97,0.78)]"
                 title={
-                  selectedConnectorTargets.length > 0
-                    ? selectedConnectorTargets
-                        .map((item) => `${item.connector} · ${item.target.compactLabel}`)
-                        .join(' / ')
-                    : t.connectorAutoModeBody
+                  selectedConnectorTarget
+                    ? `${selectedConnectorTarget.connector} · ${selectedConnectorTarget.target.compactLabel}`
+                    : t.connectorSummaryLocalBody
                 }
               >
-                {selectedConnectorTargets.length > 0
-                  ? selectedConnectorTargets
-                      .slice(0, 2)
-                      .map((item) => `${item.connector} · ${item.target.compactLabel}`)
-                      .join(' / ')
-                  : t.connectorAutoModeBody}
+                {selectedConnectorTarget
+                  ? selectedConnectorTarget.target.compactLabel
+                  : t.connectorSummaryLocalBody}
               </div>
             </div>
             <div className="hidden rounded-lg border border-[rgba(45,42,38,0.09)] bg-[rgba(244,239,233,0.55)] px-3 py-2 text-[11px] sm:block dark:border-[rgba(45,42,38,0.09)] dark:bg-[rgba(244,239,233,0.65)]">
@@ -1981,7 +2047,9 @@ export function CreateProjectDialog({
               <BookmarkPlus className="h-3.5 w-3.5" />
               <span>{templateOptions.length} template(s)</span>
             </div>
-            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
+            <div
+              className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3"
+            >
               <Button
                 variant="secondary"
                 disabled={!manualOverride || loading}
@@ -1998,6 +2066,7 @@ export function CreateProjectDialog({
                 onClick={() => void handleCreate()}
                 disabled={loading || goalRequired || promptRequired}
                 className="w-full sm:w-auto"
+                data-onboarding-id="start-research-create"
               >
                 <Sparkles className="h-4 w-4" />
                 {loading ? '…' : t.create}

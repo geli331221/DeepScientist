@@ -310,6 +310,8 @@ export const Toolbar = memo(function Toolbar({
   infoDisabled = false,
   markdownActive,
   onMarkdownToggle,
+  markdownLabel,
+  markdownTitle,
   reviewOpinionActive,
   onReviewOpinionToggle,
   reviewOpinionLabel,
@@ -318,6 +320,8 @@ export const Toolbar = memo(function Toolbar({
   const { t } = useI18n("pdf_viewer");
   const isMarkdownActive = Boolean(markdownActive);
   const canToggleMarkdown = typeof onMarkdownToggle === "function";
+  const markdownButtonLabel = markdownLabel?.trim() || t("markdown");
+  const markdownButtonTitle = markdownTitle?.trim() || t("open_markdown");
   const isReviewOpinionActive = Boolean(reviewOpinionActive);
   const canToggleReviewOpinion = typeof onReviewOpinionToggle === "function";
   const reviewOpinionButtonLabel = reviewOpinionLabel?.trim() || t("review_opinion");
@@ -389,10 +393,10 @@ export const Toolbar = memo(function Toolbar({
               "bg-background hover:bg-muted/60 border-border",
               isMarkdownActive && "bg-primary/10 text-primary border-primary/20"
             )}
-            title={t("open_markdown")}
+            title={markdownButtonTitle}
           >
             <FileText className="w-4 h-4" />
-            {t("markdown")}
+            {markdownButtonLabel}
           </button>
         ) : null}
         {canToggleReviewOpinion ? (

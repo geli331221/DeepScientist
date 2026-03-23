@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -16,6 +17,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request
 
 from .. import __version__
+from ..annotations import AnnotationService
 from ..artifact import ArtifactService
 from ..bash_exec import BashExecService
 from ..bash_exec.runtime import TerminalClient
@@ -27,9 +29,10 @@ from ..channels.feishu_long_connection import FeishuLongConnectionService
 from ..channels.qq_gateway import QQGatewayService
 from ..channels.slack_socket import SlackSocketModeService
 from ..channels.telegram_polling import TelegramPollingService
+from ..channels.weixin_ilink import WeixinIlinkService
 from ..channels.whatsapp_local_session import WhatsAppLocalSessionService
 from ..cloud import CloudLinkService
-from ..connector_profiles import (
+from ..connector.connector_profiles import (
     CONNECTOR_PROFILE_SPECS,
     PROFILEABLE_CONNECTOR_NAMES,
     connector_profile_label,
@@ -44,15 +47,36 @@ from ..home import repo_root
 from ..memory import MemoryService
 from ..network import urlopen_with_proxy as urlopen
 from ..latex_runtime import QuestLatexService
+from ..connector.lingzhu_support import (
+    lingzhu_detect_tool_call_from_text,
+    lingzhu_extract_task_text,
+    lingzhu_extract_user_text,
+    lingzhu_health_payload,
+    lingzhu_is_passive_conversation_id,
+    lingzhu_passive_conversation_id,
+    lingzhu_request_conversation_id,
+    lingzhu_request_sender_id,
+    lingzhu_sse_answer,
+    lingzhu_sse_tool_call,
+    lingzhu_surface_action_tool_call,
+    lingzhu_verify_auth_header,
+)
 from ..prompts import PromptBuilder
 from ..prompts.builder import STANDARD_SKILLS
-from ..qq_profiles import list_qq_profiles, merge_qq_profile_config, normalize_qq_connector_config
+from ..connector.qq_profiles import list_qq_profiles, merge_qq_profile_config, normalize_qq_connector_config
 from ..quest import QuestService
 from ..runners import CodexRunner, RunRequest, get_runner_factory, register_builtin_runners
 from ..runtime_logs import JsonlLogger
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, read_text, resolve_within, run_command, slugify, utc_now, which, write_json
 from ..skills import SkillInstaller
 from ..team import SingleTeamService
+from ..connector.weixin_support import (
+    DEFAULT_WEIXIN_BOT_TYPE,
+    fetch_weixin_qrcode,
+    normalize_weixin_base_url,
+    normalize_weixin_cdn_base_url,
+    poll_weixin_qrcode_status,
+)
 from .api import ApiHandlers, match_route
 from .sessions import SessionStore
 from websockets.datastructures import Headers
@@ -70,6 +94,23 @@ CODEX_RETRY_DEFAULT_MAX_BACKOFF_SEC = 1800.0
 LEGACY_CODEX_RETRY_INITIAL_BACKOFF_SEC = 1.0
 LEGACY_CODEX_RETRY_BACKOFF_MULTIPLIER = 2.0
 LEGACY_CODEX_RETRY_MAX_BACKOFF_SEC = 8.0
+_LINGZHU_SHORT_COMMAND_DIRECT_MAP = {
+    "帮助": "help",
+    "列表": "list",
+    "状态": "status",
+    "总结": "summary",
+    "图谱": "graph",
+    "指标": "metrics",
+}
+_LINGZHU_SHORT_COMMAND_PREFIX_MAP = {
+    "绑定": "use",
+    "新建": "new",
+    "删除": "delete",
+    "暂停": "stop",
+    "恢复": "resume",
+}
+_LINGZHU_SHORT_LATEST_ALIASES = {"latest", "newest", "最新"}
+_LINGZHU_DELETE_CONFIRM_ALIASES = {"确认", "强制", "--yes", "-y"}
 
 
 class DaemonApp:
@@ -88,6 +129,7 @@ class DaemonApp:
         self.quest_service = QuestService(home, skill_installer=self.skill_installer)
         self.latex_service = QuestLatexService(self.quest_service)
         self.memory_service = MemoryService(home)
+        self.annotation_service = AnnotationService(home)
         self.artifact_service = ArtifactService(home)
         self.bash_exec_service = BashExecService(home)
         self.team_service = SingleTeamService(home)
@@ -127,6 +169,7 @@ class DaemonApp:
         }
         self.channels = {name: self._create_channel(name) for name in list_channel_names()}
         self.sessions = SessionStore()
+        self._canonicalize_lingzhu_binding_state()
         self._turn_lock = threading.Lock()
         self._turn_state: dict[str, dict[str, object]] = {}
         self._server: ThreadingHTTPServer | None = None
@@ -138,11 +181,13 @@ class DaemonApp:
         self._serve_port: int | None = None
         self._shutdown_requested = threading.Event()
         self._qq_gateways: dict[str, QQGatewayService] = {}
+        self._weixin_ilink: WeixinIlinkService | None = None
         self._telegram_polling: dict[str, TelegramPollingService] = {}
         self._slack_socket: dict[str, SlackSocketModeService] = {}
         self._discord_gateway: dict[str, DiscordGatewayService] = {}
         self._feishu_long_connection: dict[str, FeishuLongConnectionService] = {}
         self._whatsapp_local_session: dict[str, WhatsAppLocalSessionService] = {}
+        self._weixin_login_sessions: dict[str, dict[str, Any]] = {}
         self.handlers = ApiHandlers(self)
 
     def list_connector_statuses(self) -> list[dict[str, object]]:
@@ -150,10 +195,10 @@ class DaemonApp:
         items = [
             self._augment_connector_status(channel.status(), title_by_quest=title_by_quest)
             for name, channel in self.channels.items()
-            if name == "local" or self._is_connector_system_enabled(name)
+            if name == "local" or (name != "lingzhu" and self._is_connector_system_enabled(name))
         ]
         lingzhu_config = self.connectors_config.get("lingzhu")
-        if isinstance(lingzhu_config, dict) and self._is_connector_system_enabled("lingzhu"):
+        if isinstance(lingzhu_config, dict):
             items.append(self._augment_connector_status(self.config_manager.lingzhu_snapshot(lingzhu_config), title_by_quest=title_by_quest))
         return items
 
@@ -858,12 +903,14 @@ class DaemonApp:
         return {
             name
             for name in SYSTEM_CONNECTOR_NAMES
-            if bool(system_enabled.get(name, name == "qq"))
+            if bool(system_enabled.get(name, name in {"qq", "weixin"}))
         }
 
     def _is_connector_system_enabled(self, connector_name: str) -> bool:
         normalized = str(connector_name or "").strip().lower()
         if normalized == "local":
+            return True
+        if normalized == "lingzhu":
             return True
         enabled = self._system_enabled_connector_names()
         if normalized in enabled:
@@ -999,10 +1046,13 @@ class DaemonApp:
         preferred_connector_conversation_id: str | None = None,
         requested_connector_bindings: list[dict[str, object]] | None = None,
         force_connector_rebind: bool = True,
+        auto_bind_latest_connectors: bool = True,
         requested_baseline_ref: dict[str, object] | None = None,
         startup_contract: dict[str, object] | None = None,
     ) -> dict:
         normalized_requested_bindings = self._normalize_requested_connector_bindings(requested_connector_bindings)
+        if len(normalized_requested_bindings) > 1:
+            raise ValueError("A quest may bind at most one external connector target.")
         snapshot = self.quest_service.create(
             goal=goal,
             title=title,
@@ -1126,7 +1176,7 @@ class DaemonApp:
                         ),
                     }
                 )
-        else:
+        elif auto_bind_latest_connectors:
             self._auto_bind_connectors_to_latest_quest(
                 snapshot["quest_id"],
                 goal=goal,
@@ -2370,6 +2420,176 @@ class DaemonApp:
         channel = self._channel_with_bindings(connector_name)
         return channel.list_bindings()
 
+    def start_weixin_login_qr(self, *, force: bool = False) -> dict[str, Any]:
+        connectors = self.config_manager.load_named_normalized("connectors")
+        weixin = connectors.get("weixin") if isinstance(connectors.get("weixin"), dict) else {}
+        base_url = normalize_weixin_base_url(weixin.get("base_url"))
+        bot_type = str(weixin.get("bot_type") or DEFAULT_WEIXIN_BOT_TYPE).strip() or DEFAULT_WEIXIN_BOT_TYPE
+        route_tag = str(weixin.get("route_tag") or "").strip() or None
+        qr_payload = fetch_weixin_qrcode(base_url=base_url, bot_type=bot_type, route_tag=route_tag)
+        qrcode_token = str(qr_payload.get("qrcode") or "").strip()
+        qrcode_content = str(qr_payload.get("qrcode_img_content") or qr_payload.get("url") or "").strip()
+        if not qrcode_token or not qrcode_content:
+            raise RuntimeError("Weixin QR login did not return a valid qrcode token or renderable content.")
+        session_key = generate_id("wxqr")
+        self._weixin_login_sessions[session_key] = {
+            "session_key": session_key,
+            "qrcode": qrcode_token,
+            "qrcode_content": qrcode_content,
+            "base_url": base_url,
+            "bot_type": bot_type,
+            "route_tag": route_tag,
+            "started_at": time.time(),
+            "refresh_count": 0,
+            "force": bool(force),
+        }
+        return {
+            "ok": True,
+            "session_key": session_key,
+            "qrcode_content": qrcode_content,
+            "qrcode_url": qrcode_content,
+            "message": "Weixin QR code is ready. Scan it with WeChat to connect DeepScientist.",
+        }
+
+    def wait_weixin_login_qr(self, *, session_key: str, timeout_ms: int = 1_500) -> dict[str, Any]:
+        normalized_session_key = str(session_key or "").strip()
+        if not normalized_session_key:
+            return {
+                "ok": False,
+                "connected": False,
+                "message": "Weixin QR session key is required.",
+            }
+        session = self._weixin_login_sessions.get(normalized_session_key)
+        if not isinstance(session, dict):
+            return {
+                "ok": False,
+                "connected": False,
+                "message": "Weixin QR session was not found. Start a new login first.",
+            }
+
+        deadline = time.time() + max(int(timeout_ms or 1_500), 500) / 1000.0
+        while time.time() < deadline:
+            remaining = max(deadline - time.time(), 1.0)
+            try:
+                status = poll_weixin_qrcode_status(
+                    base_url=str(session.get("base_url") or ""),
+                    qrcode=str(session.get("qrcode") or ""),
+                    route_tag=str(session.get("route_tag") or "").strip() or None,
+                    timeout=min(remaining, 35.0),
+                )
+            except Exception as exc:
+                message = str(exc or "").strip().lower()
+                if isinstance(exc, TimeoutError) or "timed out" in message or "timeout" in message:
+                    break
+                raise
+            state = str(status.get("status") or "wait").strip().lower() or "wait"
+            session["status"] = state
+            if state == "confirmed":
+                return self._persist_weixin_login_session(session, status)
+            if state == "expired":
+                refreshed = self._refresh_weixin_login_session(session)
+                return {
+                    "ok": True,
+                    "connected": False,
+                    "status": "expired",
+                    "session_key": normalized_session_key,
+                    "qrcode_content": refreshed.get("qrcode_content"),
+                    "qrcode_url": refreshed.get("qrcode_content"),
+                    "message": "Weixin QR code expired and was refreshed automatically.",
+                }
+            if state in {"scaned", "scanned"}:
+                return {
+                    "ok": True,
+                    "connected": False,
+                    "status": "scaned",
+                    "session_key": normalized_session_key,
+                    "qrcode_content": str(session.get("qrcode_content") or "").strip() or None,
+                    "qrcode_url": str(session.get("qrcode_content") or "").strip() or None,
+                    "message": "QR code scanned. Confirm the login inside WeChat.",
+                }
+        return {
+            "ok": True,
+            "connected": False,
+            "status": str(session.get("status") or "wait").strip() or "wait",
+            "session_key": normalized_session_key,
+            "qrcode_content": str(session.get("qrcode_content") or "").strip() or None,
+            "qrcode_url": str(session.get("qrcode_content") or "").strip() or None,
+            "message": "Waiting for Weixin QR confirmation.",
+        }
+
+    def _refresh_weixin_login_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        qr_payload = fetch_weixin_qrcode(
+            base_url=str(session.get("base_url") or ""),
+            bot_type=str(session.get("bot_type") or DEFAULT_WEIXIN_BOT_TYPE),
+            route_tag=str(session.get("route_tag") or "").strip() or None,
+        )
+        session["qrcode"] = str(qr_payload.get("qrcode") or "").strip()
+        session["qrcode_content"] = str(qr_payload.get("qrcode_img_content") or qr_payload.get("url") or "").strip()
+        session["started_at"] = time.time()
+        session["refresh_count"] = int(session.get("refresh_count") or 0) + 1
+        return session
+
+    def _persist_weixin_login_session(self, session: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+        bot_token = str(status.get("bot_token") or "").strip()
+        account_id = str(status.get("ilink_bot_id") or "").strip()
+        login_user_id = str(status.get("ilink_user_id") or "").strip() or None
+        if not bot_token or not account_id:
+            return {
+                "ok": False,
+                "connected": False,
+                "status": "confirmed",
+                "message": "Weixin QR login confirmed, but the platform did not return `bot_token` or `ilink_bot_id`.",
+            }
+        connectors = self.config_manager.load_named_normalized("connectors")
+        weixin = connectors.get("weixin") if isinstance(connectors.get("weixin"), dict) else {}
+        weixin.update(
+            {
+                "enabled": True,
+                "transport": "ilink_long_poll",
+                "base_url": normalize_weixin_base_url(status.get("baseurl") or session.get("base_url")),
+                "cdn_base_url": normalize_weixin_cdn_base_url(weixin.get("cdn_base_url")),
+                "bot_type": str(session.get("bot_type") or DEFAULT_WEIXIN_BOT_TYPE),
+                "bot_token": bot_token,
+                "account_id": account_id,
+                "login_user_id": login_user_id,
+            }
+        )
+        connectors["weixin"] = weixin
+        save_result = self.config_manager.save_named_payload("connectors", connectors)
+        if not bool(save_result.get("ok")):
+            self.logger.log(
+                "warning",
+                "connector.weixin_qr_persist_failed",
+                session_key=str(session.get("session_key") or ""),
+                account_id=account_id,
+                errors=save_result.get("errors") or [],
+                warnings=save_result.get("warnings") or [],
+            )
+            return {
+                "ok": False,
+                "connected": False,
+                "status": "confirmed",
+                "errors": save_result.get("errors") or [],
+                "warnings": save_result.get("warnings") or [],
+                "message": "Weixin login succeeded, but DeepScientist could not persist the connector config.",
+            }
+        self.reload_connectors_config()
+        self._weixin_login_sessions.pop(str(session.get("session_key") or ""), None)
+        snapshot = next(
+            (item for item in self.list_connector_statuses() if str(item.get("name") or "").strip().lower() == "weixin"),
+            None,
+        )
+        return {
+            "ok": True,
+            "connected": True,
+            "status": "confirmed",
+            "account_id": account_id,
+            "login_user_id": login_user_id,
+            "base_url": str(weixin.get("base_url") or "").strip() or None,
+            "snapshot": snapshot,
+            "message": "Weixin login succeeded and the connector config was saved.",
+        }
+
     def delete_connector_profile(self, connector_name: str, profile_id: str) -> dict | tuple[int, dict]:
         normalized_connector = str(connector_name or "").strip().lower()
         normalized_profile_id = str(profile_id or "").strip()
@@ -2701,8 +2921,9 @@ class DaemonApp:
         connector_name = str(parsed.get("connector") or "").strip().lower()
         if not connector_name or connector_name == "local" or connector_name not in self.channels:
             return 400, {"ok": False, "message": f"Unknown connector `{connector_name}` for conversation `{normalized}`."}
+        binding_conversation_id = self._logical_connector_binding_conversation(connector_name, normalized)
         channel = self._channel_with_bindings(connector_name)
-        conflicts = self._inspect_connector_binding_conflicts(quest_id, normalized)
+        conflicts = self._inspect_connector_binding_conflicts(quest_id, binding_conversation_id)
         if conflicts and not force:
             return 409, {
                 "ok": False,
@@ -2710,23 +2931,23 @@ class DaemonApp:
                 "message": "Conversation is already bound to another quest.",
                 "quest_id": quest_id,
                 "connector": connector_name,
-                "conversation_id": normalized,
+                "conversation_id": binding_conversation_id,
                 "conflicts": conflicts,
             }
-        existing_bound = channel.resolve_bound_quest(normalized)
+        existing_bound = channel.resolve_bound_quest(binding_conversation_id)
         for item in conflicts:
             other_id = str(item.get("quest_id") or "").strip()
             if other_id and other_id != quest_id:
-                self.quest_service.unbind_source(other_id, normalized)
-                self.sessions.unbind(other_id, normalized)
-        channel.bind_conversation(normalized, quest_id)
-        self.sessions.bind(quest_id, normalized)
+                self.quest_service.unbind_source(other_id, binding_conversation_id)
+                self.sessions.unbind(other_id, binding_conversation_id)
+        channel.bind_conversation(binding_conversation_id, quest_id)
+        self.sessions.bind(quest_id, binding_conversation_id)
         self.quest_service.bind_source(quest_id, "local:default")
-        self.quest_service.bind_source(quest_id, normalized)
+        self.quest_service.bind_source(quest_id, binding_conversation_id)
         if clear_scope == "all_external":
-            removed = self._unbind_external_bindings(quest_id, preserve={normalized})
+            removed = self._unbind_external_bindings(quest_id, preserve={binding_conversation_id})
         elif clear_scope == "connector":
-            removed = self._unbind_quest_connector_bindings(quest_id, connector_name, preserve={normalized})
+            removed = self._unbind_quest_connector_bindings(quest_id, connector_name, preserve={binding_conversation_id})
         else:
             removed = []
         snapshot = self.quest_service.snapshot(quest_id)
@@ -2743,7 +2964,7 @@ class DaemonApp:
             "ok": True,
             "quest_id": quest_id,
             "connector": connector_name,
-            "conversation_id": normalized,
+            "conversation_id": binding_conversation_id,
             "snapshot": snapshot,
             "removed_conversations": removed,
             "conflicts_resolved": [item.get("quest_id") for item in conflicts if item.get("quest_id")],
@@ -2790,7 +3011,7 @@ class DaemonApp:
                 "message": f"Conversation `{normalized}` does not belong to connector `{normalized_connector}`.",
             }
 
-        return self._apply_conversation_binding(quest_id, normalized, force=force, clear_scope="connector")
+        return self._apply_conversation_binding(quest_id, normalized, force=force, clear_scope="all_external")
 
     def update_quest_bindings(
         self,
@@ -2803,6 +3024,12 @@ class DaemonApp:
         if not quest_root.joinpath("quest.yaml").exists():
             return 404, {"ok": False, "message": f"Unknown quest `{quest_id}`."}
         normalized_bindings = self._normalize_requested_connector_bindings(requested_bindings)
+        if len(normalized_bindings) > 1:
+            return 400, {
+                "ok": False,
+                "message": "A quest may bind at most one external connector target.",
+                "quest_id": quest_id,
+            }
         conflicts = self.preview_connector_binding_conflicts(normalized_bindings, quest_id=quest_id)
         if conflicts and not force:
             return 409, {
@@ -2959,12 +3186,22 @@ class DaemonApp:
         channel = self._channel_with_bindings(connector_name)
         connector_label = self._connector_label(connector_name)
         conversation_id = str(message.get("conversation_id") or "")
+        binding_conversation_id = self._logical_connector_binding_conversation(connector_name, conversation_id)
         text = str(message.get("text") or "").strip()
         command_prefix = channel.command_prefix()
         quest_id = channel.resolve_bound_quest(conversation_id)
-
+        if quest_id is None and str(connector_name or "").strip().lower() == "lingzhu":
+            quest_id = self._resolve_lingzhu_bound_quest(conversation_id)
+        command_name = ""
+        args: list[str] = []
         if text.startswith(command_prefix):
             command_name, args = self._parse_prefixed_command(text, command_prefix)
+        elif str(connector_name or "").strip().lower() == "lingzhu":
+            parsed_lingzhu_command = self._parse_lingzhu_short_command(text)
+            if parsed_lingzhu_command is not None:
+                command_name, args = parsed_lingzhu_command
+
+        if command_name:
             if command_name == "help":
                 return channel.send(
                     {
@@ -3001,7 +3238,7 @@ class DaemonApp:
                     announce_connector_binding=True,
                     exclude_conversation_id=conversation_id,
                 )
-                self.update_quest_binding(created["quest_id"], conversation_id, force=True)
+                self.update_quest_binding(created["quest_id"], binding_conversation_id, force=True)
                 self.submit_user_message(
                     created["quest_id"],
                     text=goal_text,
@@ -3051,7 +3288,23 @@ class DaemonApp:
                             ),
                         }
                     )
-                self.update_quest_binding(target_quest, conversation_id, force=True)
+                previous_external = self._quest_external_binding(target_quest)
+                binding_result = self.update_quest_binding(target_quest, binding_conversation_id, force=True)
+                if isinstance(binding_result, tuple):
+                    _status, payload = binding_result
+                    return channel.send(
+                        {
+                            "conversation_id": conversation_id,
+                            "kind": "ack",
+                            "message": str(payload.get("message") or "Unable to switch connector binding."),
+                        }
+                    )
+                transition = self._binding_transition_summary(
+                    quest_id=target_quest,
+                    previous_conversation_id=previous_external,
+                    current_conversation_id=self._quest_external_binding(target_quest),
+                )
+                self._announce_binding_transition(transition, notify_new=False, notify_old=True)
                 return channel.send(
                     {
                         "conversation_id": conversation_id,
@@ -3139,9 +3392,22 @@ class DaemonApp:
                     }
                 )
 
-            if quest_id is None and command_name and command_name not in {"help", "projects", "quests", "list", "new", "use", "delete"}:
+            if quest_id is None and command_name not in {"help", "projects", "quests", "list", "new", "use", "delete"}:
                 auto_bound = self._maybe_auto_bind_connector_conversation(connector_name, conversation_id)
                 if auto_bound is not None:
+                    if bool(auto_bound.get("blocked")):
+                        return channel.send(
+                            {
+                                "conversation_id": conversation_id,
+                                "kind": "ack",
+                                "message": self._connector_switch_required_message(
+                                    connector_name=connector_name,
+                                    quest_id=str(auto_bound.get("quest_id") or "").strip(),
+                                    current_conversation_id=str(auto_bound.get("current_conversation_id") or "").strip(),
+                                    requested_conversation_id=str(auto_bound.get("requested_conversation_id") or "").strip(),
+                                ),
+                            }
+                        )
                     quest_id = str(auto_bound.get("quest_id") or "").strip() or None
 
             if command_name in {"stop", "resume"}:
@@ -3172,7 +3438,7 @@ class DaemonApp:
                 target_quest_id = str(target_quest_id or "").strip()
                 bound_quest_id = str(channel.resolve_bound_quest(conversation_id) or "").strip() or None
                 self.sessions.bind(target_quest_id, conversation_id)
-                self.quest_service.bind_source(target_quest_id, conversation_id)
+                self.quest_service.bind_source(target_quest_id, binding_conversation_id)
                 result = self.control_quest(
                     target_quest_id,
                     action=command_name,
@@ -3197,7 +3463,7 @@ class DaemonApp:
                 )
 
             self.sessions.bind(quest_id, conversation_id)
-            self.quest_service.bind_source(quest_id, conversation_id)
+            self.quest_service.bind_source(quest_id, binding_conversation_id)
             if command_name == "status":
                 snapshot = self.quest_service.snapshot(quest_id)
                 return channel.send(
@@ -3370,6 +3636,19 @@ class DaemonApp:
         if quest_id is None:
             auto_bound = self._maybe_auto_bind_connector_conversation(connector_name, conversation_id)
             if auto_bound is not None:
+                if bool(auto_bound.get("blocked")):
+                    return channel.send(
+                        {
+                            "conversation_id": conversation_id,
+                            "kind": "ack",
+                            "message": self._connector_switch_required_message(
+                                connector_name=connector_name,
+                                quest_id=str(auto_bound.get("quest_id") or "").strip(),
+                                current_conversation_id=str(auto_bound.get("current_conversation_id") or "").strip(),
+                                requested_conversation_id=str(auto_bound.get("requested_conversation_id") or "").strip(),
+                            ),
+                        }
+                    )
                 quest_id = str(auto_bound.get("quest_id") or "").strip() or None
 
         if quest_id is None:
@@ -3382,6 +3661,7 @@ class DaemonApp:
             )
 
         self.sessions.bind(quest_id, conversation_id)
+        self.quest_service.bind_source(quest_id, binding_conversation_id)
         materialized_attachments = self._materialize_connector_attachments(
             quest_id=quest_id,
             connector_name=connector_name,
@@ -3500,13 +3780,35 @@ class DaemonApp:
         name = str(resolved.get("name") or "").strip()
         content_type = str(resolved.get("content_type") or "").strip()
         url = str(resolved.get("url") or "").strip()
+        path = str(resolved.get("path") or "").strip()
         target_path = batch_root / self._connector_attachment_filename(index=index, name=name, content_type=content_type)
         resolved["manifest_path"] = str(batch_root / "manifest.json")
         resolved["batch_path"] = str(batch_root)
-        if not url:
-            resolved["materialized"] = False
-            resolved["download_error"] = "missing_download_url"
-            return resolved
+        if path:
+            try:
+                source_path = Path(path).expanduser()
+                if not source_path.is_absolute():
+                    source_path = (quest_root / source_path).resolve()
+                else:
+                    source_path = source_path.resolve()
+                if not source_path.exists():
+                    raise FileNotFoundError(f"attachment local path does not exist: {source_path}")
+                size_bytes = self._copy_connector_attachment(
+                    source_path=source_path,
+                    target_path=target_path,
+                )
+                resolved["path"] = str(target_path)
+                resolved["source_path"] = str(source_path)
+                resolved["quest_relative_path"] = str(target_path.relative_to(quest_root))
+                resolved["size_bytes"] = int(size_bytes)
+                resolved["materialized"] = True
+                resolved["downloaded_at"] = utc_now()
+                return resolved
+            except Exception as exc:
+                if not url:
+                    resolved["materialized"] = False
+                    resolved["download_error"] = str(exc)
+                    return resolved
         try:
             size_bytes = self._download_connector_attachment(
                 connector_name=connector_name,
@@ -3525,6 +3827,28 @@ class DaemonApp:
             resolved["materialized"] = False
             resolved["download_error"] = str(exc)
             return resolved
+
+    def _copy_connector_attachment(
+        self,
+        *,
+        source_path: Path,
+        target_path: Path,
+    ) -> int:
+        ensure_dir(target_path.parent)
+        total = 0
+        with source_path.open("rb") as source_handle:
+            with target_path.open("wb") as target_handle:
+                while True:
+                    chunk = source_handle.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self._MAX_INBOUND_ATTACHMENT_BYTES:
+                        raise ValueError(
+                            f"attachment exceeds max inbound size limit ({self._MAX_INBOUND_ATTACHMENT_BYTES} bytes)"
+                        )
+                    target_handle.write(chunk)
+        return total
 
     def _download_connector_attachment(
         self,
@@ -3611,37 +3935,37 @@ class DaemonApp:
         if not candidates:
             return []
 
-        bound_conversations: list[str] = []
-        seen_identity_keys: set[str] = set()
-        for connector_name, conversation_id in candidates:
-            original_identity = conversation_identity_key(conversation_id)
-            if original_identity in seen_identity_keys:
-                continue
-            result = self._apply_conversation_binding(quest_id, conversation_id, force=True, clear_scope="none")
-            if isinstance(result, tuple):
-                continue
-            bound_conversation = str(result.get("conversation_id") or "").strip() or conversation_id
-            identity_key = conversation_identity_key(bound_conversation)
-            if identity_key in seen_identity_keys:
-                continue
-            seen_identity_keys.add(identity_key)
-            bound_conversations.append(bound_conversation)
-            if announce:
-                channel = self._channel_with_bindings(connector_name)
-                channel.send(
-                    {
-                        "conversation_id": bound_conversation,
-                        "quest_id": quest_id,
-                        "kind": "ack",
-                        "message": self._quest_created_connector_message(
-                            connector_name,
-                            quest_id=quest_id,
-                            goal=goal,
-                            previous_quest_id=str(result.get("previous_quest_id") or "").strip() or None,
-                        ),
-                    }
-                )
-        return bound_conversations
+        preferred_conversation_id = str(self.connector_availability_summary().get("preferred_conversation_id") or "").strip()
+        selected: tuple[str, str] | None = None
+        if preferred_conversation_id:
+            for item in candidates:
+                if conversation_identity_key(item[1]) == conversation_identity_key(preferred_conversation_id):
+                    selected = item
+                    break
+        if selected is None:
+            selected = candidates[0]
+
+        connector_name, conversation_id = selected
+        result = self._apply_conversation_binding(quest_id, conversation_id, force=True, clear_scope="none")
+        if isinstance(result, tuple):
+            return []
+        bound_conversation = str(result.get("conversation_id") or "").strip() or conversation_id
+        if announce:
+            channel = self._channel_with_bindings(connector_name)
+            channel.send(
+                {
+                    "conversation_id": bound_conversation,
+                    "quest_id": quest_id,
+                    "kind": "ack",
+                    "message": self._quest_created_connector_message(
+                        connector_name,
+                        quest_id=quest_id,
+                        goal=goal,
+                        previous_quest_id=str(result.get("previous_quest_id") or "").strip() or None,
+                    ),
+                }
+            )
+        return [bound_conversation]
 
     def _latest_connector_conversation_id(self, connector_name: str) -> str:
         candidates = self._latest_connector_conversation_ids(connector_name)
@@ -3801,12 +4125,24 @@ class DaemonApp:
         latest_quest_id = self._latest_quest_id()
         if latest_quest_id is None:
             return None
-        result = self.update_quest_binding(latest_quest_id, conversation_id, force=True)
+        normalized_conversation_id = self._logical_connector_binding_conversation(connector_name, conversation_id)
+        current_external = self._quest_external_binding(latest_quest_id)
+        if current_external and conversation_identity_key(current_external) != conversation_identity_key(normalized_conversation_id):
+            return {
+                "ok": False,
+                "blocked": True,
+                "quest_id": latest_quest_id,
+                "current_conversation_id": current_external,
+                "requested_conversation_id": normalized_conversation_id,
+            }
+        result = self.update_quest_binding(latest_quest_id, normalized_conversation_id, force=True)
         if isinstance(result, tuple):
             return None
         return result
 
     def _connector_home_help(self, connector_name: str, *, message: dict) -> str:
+        if str(connector_name or "").strip().lower() == "lingzhu":
+            return self._with_qq_main_chat_notice(message, self._lingzhu_unbound_help_text())
         quests = self.quest_service.list_quests()
         latest = str(quests[0]["quest_id"]) if quests else "none"
         body = self._polite_copy(
@@ -3838,6 +4174,241 @@ class DaemonApp:
             ),
         )
         return self._with_qq_main_chat_notice(message, body)
+
+    def _quest_external_binding(self, quest_id: str | None) -> str | None:
+        normalized_quest_id = str(quest_id or "").strip()
+        if not normalized_quest_id:
+            return None
+        for source in self.quest_service.binding_sources(normalized_quest_id):
+            parsed = parse_conversation_id(source)
+            if parsed is None:
+                continue
+            if str(parsed.get("connector") or "").strip().lower() == "local":
+                continue
+            return normalize_conversation_id(source)
+        return None
+
+    def _lingzhu_passive_conversation_id(self) -> str | None:
+        lingzhu_config = self.connectors_config.get("lingzhu")
+        resolved = dict(lingzhu_config) if isinstance(lingzhu_config, dict) else {}
+        auth_ak = self.config_manager._secret(resolved, "auth_ak", "auth_ak_env")
+        if not auth_ak:
+            return None
+        return lingzhu_passive_conversation_id(resolved)
+
+    def _logical_connector_binding_conversation(self, connector_name: str, conversation_id: str | None) -> str:
+        normalized_connector = str(connector_name or "").strip().lower()
+        if normalized_connector == "lingzhu":
+            passive_conversation_id = self._lingzhu_passive_conversation_id()
+            if passive_conversation_id:
+                return passive_conversation_id
+        return normalize_conversation_id(conversation_id)
+
+    def _remove_connector_sources_from_quest(self, quest_id: str, connector_name: str) -> None:
+        normalized_connector = str(connector_name or "").strip().lower()
+        if not normalized_connector:
+            return
+        current_sources = self.quest_service.binding_sources(quest_id)
+        filtered_sources = []
+        for source in current_sources:
+            parsed = parse_conversation_id(source)
+            if parsed is not None and str(parsed.get("connector") or "").strip().lower() == normalized_connector:
+                continue
+            filtered_sources.append(source)
+        self.quest_service.set_binding_sources(quest_id, filtered_sources or ["local:default"])
+
+    def _canonicalize_lingzhu_binding_state(self) -> None:
+        passive_conversation_id = self._lingzhu_passive_conversation_id()
+        if not passive_conversation_id:
+            return
+        try:
+            channel = self._channel_with_bindings("lingzhu")
+        except Exception:
+            return
+        bindings = [dict(item) for item in channel.list_bindings() if isinstance(item, dict)]
+        selected_quest_id: str | None = None
+        selected_updated_at = ""
+        quests_with_lingzhu_sources: set[str] = set()
+
+        for item in bindings:
+            quest_id = str(item.get("quest_id") or "").strip()
+            updated_at = str(item.get("updated_at") or "").strip()
+            if quest_id and (updated_at, quest_id) >= (selected_updated_at, str(selected_quest_id or "")):
+                selected_quest_id = quest_id
+                selected_updated_at = updated_at
+
+        for quest in self.quest_service.list_quests():
+            quest_id = str(quest.get("quest_id") or "").strip()
+            if not quest_id:
+                continue
+            sources = self.quest_service.binding_sources(quest_id)
+            if any(
+                (
+                    parsed := parse_conversation_id(source)
+                ) is not None and str(parsed.get("connector") or "").strip().lower() == "lingzhu"
+                for source in sources
+            ):
+                quests_with_lingzhu_sources.add(quest_id)
+                if not selected_quest_id:
+                    selected_quest_id = quest_id
+
+        for item in bindings:
+            conversation_id = str(item.get("conversation_id") or "").strip()
+            quest_id = str(item.get("quest_id") or "").strip() or None
+            if not conversation_id:
+                continue
+            channel.unbind_conversation(conversation_id, quest_id=quest_id)
+            if quest_id:
+                self.sessions.unbind(quest_id, conversation_id)
+
+        for quest_id in quests_with_lingzhu_sources:
+            self._remove_connector_sources_from_quest(quest_id, "lingzhu")
+
+        if selected_quest_id:
+            channel.bind_conversation(passive_conversation_id, selected_quest_id)
+            self.quest_service.bind_source(selected_quest_id, "local:default")
+            self.quest_service.bind_source(selected_quest_id, passive_conversation_id)
+
+    def _resolve_lingzhu_bound_quest(self, conversation_id: str) -> str | None:
+        normalized_conversation_id = normalize_conversation_id(conversation_id)
+        channel = self._channel_with_bindings("lingzhu")
+        known_quest_id = str(channel.resolve_bound_quest(normalized_conversation_id) or "").strip() or None
+        if known_quest_id:
+            return known_quest_id
+        passive_conversation_id = self._lingzhu_passive_conversation_id()
+        passive_quest_id = str(channel.resolve_bound_quest(passive_conversation_id) or "").strip() or None
+        if not passive_quest_id:
+            return None
+        return passive_quest_id
+
+    def _connector_target_label(self, conversation_id: str | None) -> str:
+        normalized = normalize_conversation_id(conversation_id)
+        parsed = parse_conversation_id(normalized)
+        if parsed is None:
+            return str(conversation_id or "unknown").strip() or "unknown"
+        connector_label = self._connector_label(str(parsed.get("connector") or "").strip())
+        profile_id = str(parsed.get("profile_id") or "").strip()
+        if lingzhu_is_passive_conversation_id(normalized):
+            agent_id = str(parsed.get("chat_id_raw") or parsed.get("chat_id") or "").strip() or "main"
+            return f"{connector_label} · passive · {agent_id}"
+        chat_id = str(parsed.get("chat_id_raw") or parsed.get("chat_id") or normalized).strip()
+        if profile_id:
+            return f"{connector_label} · {profile_id} · {chat_id}"
+        return f"{connector_label} · {chat_id}"
+
+    def _binding_transition_summary(
+        self,
+        *,
+        quest_id: str,
+        previous_conversation_id: str | None,
+        current_conversation_id: str | None,
+    ) -> dict[str, Any]:
+        previous = normalize_conversation_id(previous_conversation_id)
+        current = normalize_conversation_id(current_conversation_id)
+        if conversation_identity_key(previous) == conversation_identity_key(current):
+            mode = "unchanged"
+        elif previous and current:
+            mode = "switch"
+        elif current:
+            mode = "bind"
+        elif previous:
+            mode = "disconnect"
+        else:
+            mode = "unchanged"
+        return {
+            "quest_id": quest_id,
+            "mode": mode,
+            "previous_conversation_id": previous or None,
+            "previous_label": self._connector_target_label(previous) if previous else None,
+            "current_conversation_id": current or None,
+            "current_label": self._connector_target_label(current) if current else None,
+            "changed": mode != "unchanged",
+        }
+
+    def _announce_binding_transition(
+        self,
+        summary: dict[str, Any] | None,
+        *,
+        notify_new: bool,
+        notify_old: bool,
+    ) -> None:
+        if not isinstance(summary, dict) or not bool(summary.get("changed")):
+            return
+        quest_id = str(summary.get("quest_id") or "").strip()
+        previous_conversation_id = str(summary.get("previous_conversation_id") or "").strip() or None
+        current_conversation_id = str(summary.get("current_conversation_id") or "").strip() or None
+        previous_label = str(summary.get("previous_label") or "").strip() or None
+        current_label = str(summary.get("current_label") or "").strip() or None
+        mode = str(summary.get("mode") or "").strip()
+
+        if notify_old and previous_conversation_id and conversation_identity_key(previous_conversation_id) != conversation_identity_key(current_conversation_id):
+            old_connector = str((parse_conversation_id(previous_conversation_id) or {}).get("connector") or "").strip().lower()
+            if old_connector and old_connector in self.channels:
+                channel = self._channel_with_bindings(old_connector)
+                if mode == "disconnect":
+                    message = self._polite_copy(
+                        zh=f"当前已退出 Quest `{quest_id}`，项目已切换为仅本地。",
+                        en=f"This conversation is no longer bound to Quest `{quest_id}`. The project is now local only.",
+                    )
+                else:
+                    message = self._polite_copy(
+                        zh=f"当前已退出 Quest `{quest_id}`，后续请在 {current_label} 查看进展。",
+                        en=f"This conversation is no longer bound to Quest `{quest_id}`. Continue from {current_label}.",
+                    )
+                channel.send(
+                    {
+                        "conversation_id": previous_conversation_id,
+                        "quest_id": quest_id,
+                        "kind": "binding_notice",
+                        "message": message,
+                    }
+                )
+
+        if notify_new and current_conversation_id:
+            new_connector = str((parse_conversation_id(current_conversation_id) or {}).get("connector") or "").strip().lower()
+            if new_connector and new_connector in self.channels:
+                channel = self._channel_with_bindings(new_connector)
+                if mode == "bind":
+                    message = self._polite_copy(
+                        zh=f"当前已绑定 Quest `{quest_id}`。",
+                        en=f"This conversation is now bound to Quest `{quest_id}`.",
+                    )
+                elif mode == "switch":
+                    message = self._polite_copy(
+                        zh=f"当前已绑定 Quest `{quest_id}`，并已从 {previous_label} 切换到当前会话。",
+                        en=f"This conversation is now bound to Quest `{quest_id}`, replacing {previous_label}.",
+                    )
+                else:
+                    message = ""
+                if message:
+                    channel.send(
+                        {
+                            "conversation_id": current_conversation_id,
+                            "quest_id": quest_id,
+                            "kind": "binding_notice",
+                            "message": message,
+                        }
+                    )
+
+    def _connector_switch_required_message(
+        self,
+        *,
+        connector_name: str,
+        quest_id: str,
+        current_conversation_id: str,
+        requested_conversation_id: str,
+    ) -> str:
+        switch_command = f"绑定{quest_id}" if str(connector_name or "").strip().lower() == "lingzhu" else f"/use {quest_id}"
+        return self._polite_copy(
+            zh=(
+                f"当前 Quest `{quest_id}` 已绑定 {self._connector_target_label(current_conversation_id)}。\n"
+                f"如需切换到 {self._connector_target_label(requested_conversation_id)}，请发送 `{switch_command}`，或在项目设置里保存切换。"
+            ),
+            en=(
+                f"Quest `{quest_id}` is already bound to {self._connector_target_label(current_conversation_id)}.\n"
+                f"To switch to {self._connector_target_label(requested_conversation_id)}, send `{switch_command}` or save the change from project settings."
+            ),
+        )
 
     def _unbind_external_bindings(self, quest_id: str, *, preserve: set[str] | None = None) -> list[str]:
         preserve_keys = {conversation_identity_key(item) for item in (preserve or set()) if item}
@@ -3923,6 +4494,46 @@ class DaemonApp:
             return "", []
         parts = stripped.split()
         return parts[0].lower(), parts[1:]
+
+    @staticmethod
+    def _parse_lingzhu_short_command(text: str) -> tuple[str, list[str]] | None:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip())
+        if not normalized or normalized.startswith("/"):
+            return None
+        direct = _LINGZHU_SHORT_COMMAND_DIRECT_MAP.get(normalized)
+        if direct:
+            return direct, []
+        for prefix, command_name in _LINGZHU_SHORT_COMMAND_PREFIX_MAP.items():
+            if not normalized.startswith(prefix):
+                continue
+            remainder = normalized[len(prefix) :].strip().lstrip("：:，,。.;；!！?？ ")
+            if command_name == "new":
+                return command_name, [remainder] if remainder else []
+            if command_name == "delete":
+                matched = re.match(r"^(?P<target>\S+)?(?:\s+(?P<confirm>\S+))?$", remainder)
+                target = str((matched.group("target") if matched else "") or "").strip()
+                confirm = str((matched.group("confirm") if matched else "") or "").strip()
+                args: list[str] = []
+                if target:
+                    args.append("latest" if target in _LINGZHU_SHORT_LATEST_ALIASES else target)
+                if confirm in _LINGZHU_DELETE_CONFIRM_ALIASES:
+                    args.append("--yes")
+                return command_name, args
+            if remainder:
+                return command_name, ["latest" if remainder in _LINGZHU_SHORT_LATEST_ALIASES else remainder]
+            return command_name, []
+        return None
+
+    def _lingzhu_unbound_help_text(self) -> str:
+        latest = str(self._latest_quest_id() or "none")
+        return (
+            "当前还没绑定 Quest。\n"
+            "可直接说：帮助、列表、绑定025、绑定最新、新建 复现一个 baseline。\n"
+            f"当前最新 Quest：`{latest}`。\n"
+            "绑定后再说：我现在的任务是 ……\n"
+            "查看进展可说：继续 或 汇报。\n"
+            "快捷指令：状态、总结、暂停、恢复、删除025。"
+        )
 
     def _maybe_bind_qq_main_chat(self, message: dict) -> dict | None:
         chat_type = str(message.get("chat_type") or "").strip().lower()
@@ -4053,6 +4664,20 @@ class DaemonApp:
                 )
                 if gateway.start():
                     self._qq_gateways[profile_id] = gateway
+        weixin_config = self.connectors_config.get("weixin", {})
+        if self._is_connector_system_enabled("weixin") and isinstance(weixin_config, dict) and self._weixin_ilink is None:
+            weixin = WeixinIlinkService(
+                home=self.home,
+                config=weixin_config,
+                on_event=lambda event: self.handle_connector_inbound("weixin", event),
+                log=lambda level, message: self.logger.log(
+                    level,
+                    "connector.weixin_ilink",
+                    message=message,
+                ),
+            )
+            if weixin.start():
+                self._weixin_ilink = weixin
         if self._is_connector_system_enabled("telegram") and not self._telegram_polling:
             for profile_id, profile_label, profile_config in self._profiled_connector_configs("telegram"):
                 polling = TelegramPollingService(
@@ -4149,6 +4774,10 @@ class DaemonApp:
         self._qq_gateways = {}
         for gateway in gateways:
             gateway.stop()
+        weixin = self._weixin_ilink
+        self._weixin_ilink = None
+        if weixin is not None:
+            weixin.stop()
         polling = list(self._telegram_polling.values())
         self._telegram_polling = {}
         for item in polling:
@@ -4262,6 +4891,435 @@ class DaemonApp:
         stream_value = ((query.get("stream") or [""])[0] or "").strip().lower()
         accept = str(headers.get("Accept") or headers.get("accept") or "").lower()
         return stream_value in {"1", "true", "yes", "stream"} or "text/event-stream" in accept
+
+    def lingzhu_health_payload(self) -> dict[str, Any]:
+        config = self.connectors_config.get("lingzhu")
+        resolved = dict(config) if isinstance(config, dict) else {}
+        return lingzhu_health_payload(resolved, chat_completions_enabled=True)
+
+    def _lingzhu_state_path(self) -> Path:
+        return self.home / "logs" / "connectors" / "lingzhu" / "metis_state.json"
+
+    def _read_lingzhu_state(self) -> dict[str, Any]:
+        payload = read_json(self._lingzhu_state_path(), {"delivered_counts": {}})
+        if not isinstance(payload, dict):
+            payload = {}
+        delivered_counts = payload.get("delivered_counts")
+        if not isinstance(delivered_counts, dict):
+            delivered_counts = {}
+        return {"delivered_counts": delivered_counts}
+
+    def _write_lingzhu_state(self, payload: dict[str, Any]) -> None:
+        path = self._lingzhu_state_path()
+        ensure_dir(path.parent)
+        write_json(path, payload)
+
+    def _lingzhu_delivered_count(self, conversation_id: str) -> int:
+        delivered_counts = self._read_lingzhu_state().get("delivered_counts") or {}
+        raw_value = delivered_counts.get(conversation_identity_key(conversation_id))
+        try:
+            return max(0, int(raw_value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_lingzhu_delivered_count(self, conversation_id: str, delivered_count: int) -> None:
+        state = self._read_lingzhu_state()
+        counts = dict(state.get("delivered_counts") or {})
+        counts[conversation_identity_key(conversation_id)] = max(0, int(delivered_count))
+        state["delivered_counts"] = counts
+        self._write_lingzhu_state(state)
+
+    def _lingzhu_outbox_records(self, conversation_id: str) -> list[dict[str, Any]]:
+        outbox_path = self.home / "logs" / "connectors" / "lingzhu" / "outbox.jsonl"
+        target_key = conversation_identity_key(conversation_id)
+        items: list[dict[str, Any]] = []
+        for record in read_jsonl(outbox_path):
+            if not isinstance(record, dict):
+                continue
+            current_conversation_id = str(record.get("conversation_id") or "").strip()
+            if not current_conversation_id:
+                continue
+            if conversation_identity_key(current_conversation_id) != target_key:
+                continue
+            text = str(record.get("text") or "").strip()
+            if not text:
+                continue
+            items.append(dict(record))
+        return items
+
+    def _lingzhu_pending_outbox_records(
+        self,
+        conversation_id: str,
+        *,
+        delivered_count: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        records = self._lingzhu_outbox_records(conversation_id)
+        baseline = self._lingzhu_delivered_count(conversation_id) if delivered_count is None else delivered_count
+        applied_baseline = max(0, min(int(baseline), len(records)))
+        return records[applied_baseline:], len(records)
+
+    @staticmethod
+    def _lingzhu_wait_timeout_seconds(config: dict[str, Any]) -> float:
+        try:
+            timeout_ms = int(config.get("request_timeout_ms") or 60000)
+        except (TypeError, ValueError):
+            timeout_ms = 60000
+        timeout_ms = max(15000, min(timeout_ms, 120000))
+        return timeout_ms / 1000.0
+
+    def _lingzhu_wait_for_outbox_records(
+        self,
+        conversation_id: str,
+        *,
+        delivered_count: int,
+        timeout_seconds: float,
+    ) -> tuple[list[dict[str, Any]], int]:
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        while time.monotonic() < deadline:
+            pending_records, total_count = self._lingzhu_pending_outbox_records(
+                conversation_id,
+                delivered_count=delivered_count,
+            )
+            if pending_records:
+                return pending_records, total_count
+            time.sleep(0.25)
+        return self._lingzhu_pending_outbox_records(conversation_id, delivered_count=delivered_count)
+
+    def _lingzhu_emit_outbox_records(
+        self,
+        handler: BaseHTTPRequestHandler,
+        *,
+        message_id: str,
+        agent_id: str,
+        records: list[dict[str, Any]],
+        config: dict[str, Any] | None = None,
+    ) -> int:
+        emitted = 0
+        resolved = dict(config or {})
+        default_navigation_mode = str(resolved.get("default_navigation_mode") or "0").strip() or "0"
+        experimental_enabled = bool(resolved.get("enable_experimental_native_actions", False))
+        for record in records:
+            raw_text = str(record.get("text") or "").strip()
+            detected_tool_call = None
+            text = raw_text
+            if raw_text:
+                detected_tool_call, text = lingzhu_detect_tool_call_from_text(
+                    raw_text,
+                    default_navigation_mode=default_navigation_mode,
+                    experimental_enabled=experimental_enabled,
+                )
+            if text:
+                self._write_sse_event(
+                    handler,
+                    event="message",
+                    data=lingzhu_sse_answer(
+                        message_id=message_id,
+                        agent_id=agent_id,
+                        answer_stream=text,
+                        is_finish=True,
+                    ),
+                )
+                emitted += 1
+            emitted_tool_call = False
+            for action in record.get("surface_actions") or []:
+                tool_call = lingzhu_surface_action_tool_call(
+                    action,
+                    default_navigation_mode=default_navigation_mode,
+                    experimental_enabled=experimental_enabled,
+                )
+                if not tool_call:
+                    continue
+                self._write_sse_event(
+                    handler,
+                    event="message",
+                    data=lingzhu_sse_tool_call(
+                        message_id=message_id,
+                        agent_id=agent_id,
+                        tool_call=tool_call,
+                        is_finish=True,
+                    ),
+                )
+                emitted += 1
+                emitted_tool_call = True
+            if not emitted_tool_call and detected_tool_call:
+                self._write_sse_event(
+                    handler,
+                    event="message",
+                    data=lingzhu_sse_tool_call(
+                        message_id=message_id,
+                        agent_id=agent_id,
+                        tool_call=detected_tool_call,
+                        is_finish=True,
+                    ),
+                )
+                emitted += 1
+        return emitted
+
+    def _lingzhu_short_status_text(self, quest_id: str | None) -> str:
+        if not quest_id:
+            return self._lingzhu_unbound_help_text()
+        snapshot = self.quest_service.snapshot(quest_id)
+        runtime_status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip().lower()
+        if runtime_status in {"running", "active"}:
+            return "进行中"
+        if runtime_status == "waiting_for_user":
+            return "等你确认"
+        if runtime_status in {"paused", "stopped"}:
+            return "已暂停"
+        if runtime_status == "completed":
+            return "已完成"
+        if runtime_status == "error":
+            return "出错了"
+        return "暂无新进展"
+
+    @staticmethod
+    def _lingzhu_reply_payload(result: dict[str, Any]) -> tuple[str, str | None, str]:
+        if not isinstance(result, dict):
+            return "", None, ""
+        reply = result.get("reply")
+        if not isinstance(reply, dict):
+            return "", None, ""
+        payload = reply.get("payload")
+        if not isinstance(payload, dict):
+            return "", None, ""
+        text = str(payload.get("text") or payload.get("message") or "").strip()
+        quest_id = str(payload.get("quest_id") or "").strip() or None
+        kind = str(payload.get("kind") or "").strip()
+        return text, quest_id, kind
+
+    def stream_lingzhu_sse(
+        self,
+        handler: BaseHTTPRequestHandler,
+        *,
+        raw_body: bytes,
+        headers: dict[str, str],
+    ) -> None:
+        config = self.connectors_config.get("lingzhu")
+        resolved = dict(config) if isinstance(config, dict) else {}
+        if resolved.get("enabled") is False:
+            handler.send_response(503)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"error": "Lingzhu connector is disabled"}, ensure_ascii=False).encode("utf-8"))
+            return
+
+        auth_ak = self.config_manager._secret(resolved, "auth_ak", "auth_ak_env")
+        auth_header = headers.get("Authorization") or headers.get("authorization") or ""
+        if not lingzhu_verify_auth_header(auth_header, auth_ak):
+            handler.send_response(401)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"error": "Unauthorized"}, ensure_ascii=False).encode("utf-8"))
+            return
+
+        try:
+            body = self.handlers.parse_body(raw_body)
+        except Exception:
+            handler.send_response(400)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"error": "Invalid JSON body"}, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if not isinstance(body, dict):
+            handler.send_response(400)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"error": "Request body must be a JSON object"}, ensure_ascii=False).encode("utf-8"))
+            return
+
+        message_id = str(body.get("message_id") or body.get("request_id") or generate_id("lingzhu")).strip()
+        agent_id = str(body.get("agent_id") or resolved.get("agent_id") or "main").strip() or "main"
+        messages = body.get("message")
+        if not isinstance(messages, list):
+            messages = body.get("messages")
+        if not isinstance(messages, list):
+            text = str(body.get("text") or body.get("content") or "").strip()
+            messages = [{"role": "user", "type": "text", "text": text}] if text else None
+        if not isinstance(messages, list):
+            handler.send_response(400)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.end_headers()
+            handler.wfile.write(
+                json.dumps({"error": "Missing required fields: message or messages"}, ensure_ascii=False).encode("utf-8")
+            )
+            return
+
+        conversation_id = lingzhu_request_conversation_id(body)
+        binding_conversation_id = self._logical_connector_binding_conversation("lingzhu", conversation_id)
+        sender_id = lingzhu_request_sender_id(body)
+        inbound_text = lingzhu_extract_user_text(messages) or self._polite_copy(
+            zh="你好，请继续。",
+            en="Hello, please continue.",
+        )
+        channel = self._channel_with_bindings("lingzhu")
+        known_quest_id = self._resolve_lingzhu_bound_quest(conversation_id)
+        delivered_count = self._lingzhu_delivered_count(conversation_id)
+        task_text = lingzhu_extract_task_text(inbound_text)
+        is_command = inbound_text.startswith(channel.command_prefix()) or self._parse_lingzhu_short_command(inbound_text) is not None
+
+        inbound_payload = {
+            "conversation_id": conversation_id,
+            "chat_type": "direct",
+            "message_id": message_id,
+            "sender_id": sender_id,
+            "sender_name": sender_id,
+            "user_id": sender_id,
+            "direct_id": sender_id,
+            "text": inbound_text,
+            "message": inbound_text,
+            "content": inbound_text,
+            "raw_event": body,
+            "metadata": body.get("metadata"),
+        }
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.end_headers()
+
+        try:
+            handler.wfile.write(b": keepalive\n\n")
+            handler.wfile.flush()
+
+            if is_command:
+                result = self.handle_connector_inbound("lingzhu", inbound_payload)
+                reply_text, _, _ = self._lingzhu_reply_payload(result)
+                pending_records, total_count = self._lingzhu_pending_outbox_records(
+                    conversation_id,
+                    delivered_count=delivered_count,
+                )
+                emitted = self._lingzhu_emit_outbox_records(
+                    handler,
+                    message_id=message_id,
+                    agent_id=agent_id,
+                    records=pending_records,
+                    config=resolved,
+                )
+                if emitted:
+                    self._set_lingzhu_delivered_count(conversation_id, total_count)
+                else:
+                    answer_text = reply_text
+                    if not answer_text:
+                        if not bool(result.get("accepted", False)):
+                            reason = str(result.get("reason") or (result.get("normalized") or {}).get("reason") or "").strip()
+                            answer_text = reason or "请求未接受"
+                        else:
+                            answer_text = "已收到"
+                    self._write_sse_event(
+                        handler,
+                        event="message",
+                        data=lingzhu_sse_answer(
+                            message_id=message_id,
+                            agent_id=agent_id,
+                            answer_stream=answer_text,
+                            is_finish=True,
+                        ),
+                    )
+                handler.close_connection = True
+                return
+
+            if task_text is not None:
+                target_quest_id = known_quest_id
+                if target_quest_id:
+                    self.sessions.bind(target_quest_id, conversation_id)
+                    self.quest_service.bind_source(target_quest_id, binding_conversation_id)
+                pending_before, total_before = self._lingzhu_pending_outbox_records(
+                    conversation_id,
+                    delivered_count=delivered_count,
+                )
+                emitted_before = self._lingzhu_emit_outbox_records(
+                    handler,
+                    message_id=message_id,
+                    agent_id=agent_id,
+                    records=pending_before,
+                    config=resolved,
+                )
+                if emitted_before:
+                    delivered_count = total_before
+                    self._set_lingzhu_delivered_count(conversation_id, total_before)
+
+                if not target_quest_id:
+                    self._write_sse_event(
+                        handler,
+                        event="message",
+                        data=lingzhu_sse_answer(
+                            message_id=message_id,
+                            agent_id=agent_id,
+                            answer_stream=self._lingzhu_unbound_help_text(),
+                            is_finish=True,
+                        ),
+                    )
+                    handler.close_connection = True
+                    return
+
+                self.submit_user_message(
+                    target_quest_id,
+                    text=task_text,
+                    source=conversation_id,
+                    client_message_id=message_id,
+                )
+                pending_after, total_after = self._lingzhu_wait_for_outbox_records(
+                    conversation_id,
+                    delivered_count=delivered_count,
+                    timeout_seconds=self._lingzhu_wait_timeout_seconds(resolved),
+                )
+                emitted_after = self._lingzhu_emit_outbox_records(
+                    handler,
+                    message_id=message_id,
+                    agent_id=agent_id,
+                    records=pending_after,
+                    config=resolved,
+                )
+                if emitted_after:
+                    self._set_lingzhu_delivered_count(conversation_id, total_after)
+                else:
+                    self._write_sse_event(
+                        handler,
+                        event="message",
+                        data=lingzhu_sse_answer(
+                            message_id=message_id,
+                            agent_id=agent_id,
+                            answer_stream="已开始" if emitted_before else self._lingzhu_short_status_text(target_quest_id),
+                            is_finish=True,
+                        ),
+                    )
+                handler.close_connection = True
+                return
+
+            if known_quest_id:
+                self.sessions.bind(known_quest_id, conversation_id)
+                self.quest_service.bind_source(known_quest_id, binding_conversation_id)
+
+            pending_records, total_count = self._lingzhu_pending_outbox_records(
+                conversation_id,
+                delivered_count=delivered_count,
+            )
+            emitted = self._lingzhu_emit_outbox_records(
+                handler,
+                message_id=message_id,
+                agent_id=agent_id,
+                records=pending_records,
+                config=resolved,
+            )
+            if emitted:
+                self._set_lingzhu_delivered_count(conversation_id, total_count)
+            else:
+                self._write_sse_event(
+                    handler,
+                    event="message",
+                    data=lingzhu_sse_answer(
+                        message_id=message_id,
+                        agent_id=agent_id,
+                        answer_stream=self._lingzhu_short_status_text(known_quest_id),
+                        is_finish=True,
+                    ),
+                )
+            handler.close_connection = True
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
 
     @staticmethod
     def _write_sse_event(
@@ -4730,6 +5788,14 @@ class DaemonApp:
                     except Exception as exc:
                         self._write_json(500, {"ok": False, "message": str(exc)})
                     return
+                if route_name == "lingzhu_sse":
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    raw_body = self.rfile.read(content_length) if content_length else b""
+                    try:
+                        app.stream_lingzhu_sse(self, raw_body=raw_body, headers=dict(self.headers.items()))
+                    except Exception as exc:
+                        self._write_json(500, {"ok": False, "message": str(exc)})
+                    return
 
                 content_length = int(self.headers.get("Content-Length", "0"))
                 raw_body = self.rfile.read(content_length) if content_length else b""
@@ -4765,11 +5831,14 @@ class DaemonApp:
                         "terminal_restore",
                         "terminal_history",
                         "latex_builds",
+                        "arxiv_list",
+                        "annotations_file",
+                        "annotations_project",
                     }:
                         payload = result(**params, path=self.path)
                     elif method == "GET":
                         payload = result(**params) if params else result()
-                    elif route_name in {"document_open", "document_asset_upload", "chat", "command", "quest_control", "config_save", "quest_create", "quest_baseline_binding", "run_create", "qq_inbound", "connector_inbound", "docs_open", "admin_shutdown", "bash_stop", "quest_settings", "quest_bindings", "quest_delete", "terminal_session_ensure", "terminal_attach", "terminal_input", "stage_view", "latex_init", "latex_compile", "system_update_action"}:
+                    elif route_name in {"document_open", "document_asset_upload", "chat", "command", "quest_control", "config_save", "quest_create", "quest_baseline_binding", "run_create", "qq_inbound", "connector_inbound", "docs_open", "admin_shutdown", "bash_stop", "quest_settings", "quest_bindings", "quest_delete", "quest_layout_update", "terminal_session_ensure", "terminal_attach", "terminal_input", "stage_view", "latex_init", "latex_compile", "system_update_action", "weixin_login_qr_start", "weixin_login_qr_wait", "arxiv_import", "annotation_create"}:
                         payload = result(**params, body=body)
                     elif route_name == "config_validate":
                         payload = result(body)

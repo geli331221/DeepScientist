@@ -1,18 +1,17 @@
 'use client'
 
 import * as React from 'react'
-import { AlertTriangle, CheckCircle2, Link2, Moon, RefreshCw, Sun, Unlink2 } from 'lucide-react'
+import { AlertTriangle, Link2, Moon, RefreshCw, Sun } from 'lucide-react'
 
+import { ConnectorTargetRadioGroup, type ConnectorTargetRadioItem } from '@/components/connectors/ConnectorTargetRadioGroup'
 import { EnhancedCard } from '@/components/ui/enhanced-card'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { ConfirmModal } from '@/components/ui/modal'
 import { SegmentedControl } from '@/components/ui/segmented-control'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { useToast } from '@/components/ui/toast'
 import { client } from '@/lib/api'
-import { connectorTargetLabel, conversationIdentityKey, normalizeConnectorTargets, parseConversationId } from '@/lib/connectors'
+import { conversationIdentityKey, normalizeConnectorTargets, parseConversationId } from '@/lib/connectors'
 import { useThemeStore, type Theme } from '@/lib/stores/theme'
 import { cn } from '@/lib/utils'
 import type { ConnectorSnapshot, ConnectorTargetSnapshot, QuestSummary } from '@/types'
@@ -30,21 +29,43 @@ function connectorLabel(connector: ConnectorSnapshot) {
   return name[0].toUpperCase() + name.slice(1)
 }
 
-function connectionBadge(connector: ConnectorSnapshot) {
-  const enabled = Boolean(connector.enabled)
-  const connection = String(connector.connection_state || '').trim().toLowerCase()
-  if (!enabled) return { label: 'disabled', variant: 'secondary' as const }
-  if (connection === 'connected') return { label: 'connected', variant: 'default' as const }
-  if (connection === 'ready') return { label: 'ready', variant: 'default' as const }
-  if (connection === 'awaiting_first_message') return { label: 'awaiting message', variant: 'secondary' as const }
-  if (connection === 'needs_credentials') return { label: 'needs credentials', variant: 'secondary' as const }
-  if (connection === 'error') return { label: 'error', variant: 'destructive' as const }
-  if (connection) return { label: connection.replace(/_/g, ' '), variant: 'secondary' as const }
-  return { label: 'unknown', variant: 'secondary' as const }
+function bindingTargetLabel(conversationId?: string | null) {
+  const parsed = parseConversationId(conversationId || '')
+  if (!parsed?.connector) return 'Local only'
+  const connector = parsed.connector.toLowerCase() === 'qq' ? 'QQ' : `${parsed.connector[0].toUpperCase()}${parsed.connector.slice(1)}`
+  const chatId =
+    parsed.chat_type === 'passive'
+      ? `Passive · ${String(parsed.chat_id || parsed.chat_id_raw || conversationId || '').trim()}`
+      : String(parsed.chat_id || parsed.chat_id_raw || conversationId || '').trim()
+  return [connector, chatId].filter(Boolean).join(' · ')
 }
 
-function targetLabel(target: ConnectorTargetSnapshot) {
-  return connectorTargetLabel(target) || String(target.conversation_id)
+function connectorTargetId(target: ConnectorTargetSnapshot) {
+  const parsed = parseConversationId(target.conversation_id)
+  const profileLabel = String(target.profile_label || target.profile_id || '').trim()
+  const chatId =
+    parsed?.chat_type === 'passive'
+      ? `Passive · ${String(parsed?.chat_id || target.chat_id || target.chat_id_raw || target.conversation_id || '').trim()}`
+      : String(parsed?.chat_id || target.chat_id || target.chat_id_raw || target.conversation_id || '').trim()
+  return [profileLabel, chatId].filter(Boolean).join(' · ') || 'Unknown'
+}
+
+function bindingTransitionDescription(transition: unknown, questId: string) {
+  if (!transition || typeof transition !== 'object') return 'Connector bindings updated.'
+  const payload = transition as Record<string, unknown>
+  const mode = String(payload.mode || '').trim().toLowerCase()
+  const previousLabel = String(payload.previous_label || '').trim()
+  const currentLabel = String(payload.current_label || '').trim()
+  if (mode === 'switch' && previousLabel && currentLabel) {
+    return `Switched ${questId} from ${previousLabel} to ${currentLabel}.`
+  }
+  if (mode === 'bind' && currentLabel) {
+    return `Bound ${currentLabel} to ${questId}.`
+  }
+  if (mode === 'disconnect') {
+    return `${questId} is now local only.`
+  }
+  return 'Connector bindings updated.'
 }
 
 export function QuestSettingsSurface({
@@ -57,20 +78,24 @@ export function QuestSettingsSurface({
   onRefresh: () => Promise<void>
 }) {
   const { toast } = useToast()
-  const boundConversationByConnector = React.useMemo(() => {
-    const mapping: Record<string, string> = {}
+  const currentExternalBinding = React.useMemo(() => {
     for (const raw of snapshot?.bound_conversations || []) {
       const parsed = parseConversationId(raw)
       if (!parsed || parsed.connector === 'local') continue
-      mapping[parsed.connector] = parsed.conversation_id
+      return {
+        connector: parsed.connector,
+        conversation_id: parsed.conversation_id,
+      }
     }
-    return mapping
+    return null
   }, [snapshot?.bound_conversations])
 
   const [connectors, setConnectors] = React.useState<ConnectorSnapshot[]>([])
   const [loadingConnectors, setLoadingConnectors] = React.useState(true)
   const [binding, setBinding] = React.useState(false)
   const [selection, setSelection] = React.useState<Record<string, string>>({})
+  const [activeConnectorName, setActiveConnectorName] = React.useState<string | null>(null)
+  const [selectionDirty, setSelectionDirty] = React.useState(false)
 
   const [confirmOpen, setConfirmOpen] = React.useState(false)
   const [confirmPayload, setConfirmPayload] = React.useState<Array<{ connector: string; conversation_id?: string | null }>>([])
@@ -101,24 +126,44 @@ export function QuestSettingsSurface({
 
   React.useEffect(() => {
     if (!connectors.length) {
+      setSelection({})
+      if (!selectionDirty) {
+        setActiveConnectorName(null)
+      }
       return
     }
-    setSelection(() => {
+
+    setSelection((current) => {
       const next: Record<string, string> = {}
       for (const connector of connectors) {
-        const name = connector.name
-        const boundConversation = boundConversationByConnector[name.toLowerCase()] || ''
         const targets = normalizeConnectorTargets(connector)
-        const defaultId =
+        const currentValue = current[connector.name] || ''
+        const currentValid = targets.some(
+          (target) => conversationIdentityKey(target.conversation_id) === conversationIdentityKey(currentValue)
+        )
+        const boundConversation =
+          currentExternalBinding?.connector === connector.name.toLowerCase() ? currentExternalBinding.conversation_id : ''
+        next[connector.name] =
+          (currentValid ? currentValue : '') ||
           boundConversation ||
           connector.default_target?.conversation_id ||
           targets[0]?.conversation_id ||
           ''
-        next[name] = defaultId
       }
       return next
     })
-  }, [boundConversationByConnector, connectors])
+
+    if (!selectionDirty) {
+      const nextActiveConnectorName = currentExternalBinding
+        ? connectors.find((connector) => connector.name.toLowerCase() === currentExternalBinding.connector)?.name || null
+        : null
+      setActiveConnectorName(nextActiveConnectorName)
+    } else {
+      setActiveConnectorName((current) =>
+        current && connectors.some((connector) => connector.name === current) ? current : null
+      )
+    }
+  }, [connectors, currentExternalBinding, selectionDirty])
 
   const saveBindings = React.useCallback(
     async (bindings: Array<{ connector: string; conversation_id?: string | null }>, { force }: { force: boolean }) => {
@@ -153,9 +198,10 @@ export function QuestSettingsSurface({
 
         toast({
           title: 'Saved',
-          description: 'Connector bindings updated.',
+          description: bindingTransitionDescription(result.binding_transition, questId),
         })
         await Promise.all([onRefresh(), reloadConnectors()])
+        setSelectionDirty(false)
       } finally {
         setBinding(false)
       }
@@ -163,23 +209,79 @@ export function QuestSettingsSurface({
     [onRefresh, questId, reloadConnectors, toast]
   )
 
+  const pendingBinding = React.useMemo(() => {
+    if (!activeConnectorName) return null
+    const conversationId = String(selection[activeConnectorName] || '').trim()
+    if (!conversationId) return null
+    return {
+      connector: activeConnectorName,
+      conversation_id: conversationId,
+    }
+  }, [activeConnectorName, selection])
   const pendingBindings = React.useMemo(
-    () =>
-      connectors.map((connector) => ({
-        connector: connector.name,
-        conversation_id: selection[connector.name] || null,
-      })),
-    [connectors, selection]
+    () => (pendingBinding ? [pendingBinding] : []),
+    [pendingBinding]
   )
 
   const hasPendingChanges = React.useMemo(
     () =>
-      connectors.some((connector) => {
-        const name = connector.name.toLowerCase()
-        return (selection[connector.name] || '') !== (boundConversationByConnector[name] || '')
-      }),
-    [boundConversationByConnector, connectors, selection]
+      conversationIdentityKey(currentExternalBinding?.conversation_id || '') !== conversationIdentityKey(pendingBinding?.conversation_id || '') ||
+      String(currentExternalBinding?.connector || '') !== String(pendingBinding?.connector || '').toLowerCase(),
+    [currentExternalBinding, pendingBinding]
   )
+  const pendingSwitchDescription = React.useMemo(() => {
+    if (!hasPendingChanges) return ''
+    const previousLabel = bindingTargetLabel(currentExternalBinding?.conversation_id)
+    const nextLabel = pendingBinding ? bindingTargetLabel(pendingBinding.conversation_id) : 'Local only'
+    return `Switch ${questId} from ${previousLabel} to ${nextLabel}.`
+  }, [currentExternalBinding, hasPendingChanges, pendingBinding, questId])
+  const cardItems = React.useMemo<ConnectorTargetRadioItem[]>(() => {
+    const items: ConnectorTargetRadioItem[] = [
+      {
+        value: '__none__',
+        connectorName: 'local',
+        connectorLabel: 'Local only',
+        targetId: 'No external connector',
+        boundQuestLabel: 'Local access always kept',
+        localOnly: true,
+      },
+      ...connectors.flatMap((connector) =>
+        normalizeConnectorTargets(connector).map((target) => ({
+          value: target.conversation_id,
+          connectorName: connector.name,
+          connectorLabel: connectorLabel(connector),
+          targetId: connectorTargetId(target),
+          boundQuestLabel: target.bound_quest_id ? `Quest ${target.bound_quest_id}` : 'Unbound',
+        }))
+      ),
+    ]
+    return items
+  }, [connectors])
+  const selectableTargets = React.useMemo(
+    () =>
+      connectors.flatMap((connector) =>
+        normalizeConnectorTargets(connector).map((target) => ({
+          connector,
+          target,
+        }))
+      ),
+    [connectors]
+  )
+  const unavailableConnectors = React.useMemo(
+    () => connectors.filter((connector) => normalizeConnectorTargets(connector).length === 0),
+    [connectors]
+  )
+  const selectedTargetOption = React.useMemo(() => {
+    if (!pendingBinding) return null
+    return (
+      selectableTargets.find(
+        (item) =>
+          item.connector.name === pendingBinding.connector &&
+          conversationIdentityKey(item.target.conversation_id) === conversationIdentityKey(pendingBinding.conversation_id)
+      ) || null
+    )
+  }, [pendingBinding, selectableTargets])
+  const selectedCardValue = pendingBinding?.conversation_id || '__none__'
 
   const themeItems = React.useMemo(
     () => [
@@ -244,28 +346,11 @@ export function QuestSettingsSurface({
                 <div>
                   <div className="text-sm font-medium text-foreground">Connector bindings</div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    Choose one target per connector for <span className="font-mono">{questId}</span>. Saving here keeps different connectors independent.
+                    Choose one connector card for <span className="font-mono">{questId}</span>, or keep it local only.
                   </div>
+                  {pendingSwitchDescription ? <div className="mt-2 text-xs text-[var(--ds-brand)]">{pendingSwitchDescription}</div> : null}
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() =>
-                      setSelection((current) => {
-                        const next = { ...current }
-                        for (const connector of connectors) {
-                          next[connector.name] = ''
-                        }
-                        return next
-                      })
-                    }
-                    disabled={binding || connectors.length === 0}
-                  >
-                    <Unlink2 className="mr-2 h-4 w-4" />
-                    Local only
-                  </Button>
                   <Button
                     type="button"
                     size="sm"
@@ -285,126 +370,49 @@ export function QuestSettingsSurface({
                   {loadingConnectors ? 'Loading connectors…' : 'No connector configured yet.'}
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-3">
-                  {connectors.map((connector) => {
-                    const badge = connectionBadge(connector)
-                    const targets = normalizeConnectorTargets(connector)
-                    const chosen = selection[connector.name] ?? ''
-                    const chosenTarget =
-                      targets.find((item) => conversationIdentityKey(item.conversation_id) === conversationIdentityKey(chosen)) ||
-                      null
-                    const isBound =
-                      Boolean(chosen) &&
-                      conversationIdentityKey(chosen) === conversationIdentityKey(boundConversationByConnector[connector.name.toLowerCase()] || '')
-                    const boundQuestId = chosenTarget?.bound_quest_id
+                <div className="space-y-3">
+                  <ConnectorTargetRadioGroup
+                    ariaLabel={`Connector target selection for ${questId}`}
+                    items={cardItems}
+                    value={selectedCardValue}
+                    onChange={(value) => {
+                      setSelectionDirty(true)
+                      if (value === '__none__') {
+                        setActiveConnectorName(null)
+                        return
+                      }
+                      const parsed = parseConversationId(value)
+                      if (!parsed?.connector) {
+                        return
+                      }
+                      const connectorName =
+                        connectors.find((item) => item.name.toLowerCase() === parsed.connector)?.name || null
+                      if (!connectorName) {
+                        return
+                      }
+                      setSelection((current) => ({
+                        ...current,
+                        [connectorName]: value,
+                      }))
+                      setActiveConnectorName(connectorName)
+                    }}
+                  />
 
-                    return (
-                      <div
-                        key={connector.name}
-                        className={cn(
-                          'rounded-2xl border px-3 py-3 bg-background/40 backdrop-blur-md',
-                          isBound ? 'border-[var(--ds-brand)]/40 shadow-sm' : 'border-border/50'
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-semibold text-foreground">
-                                {connectorLabel(connector)}
-                              </span>
-                              <Badge variant={badge.variant} className="text-[10px] uppercase tracking-wide">
-                                {badge.label}
-                              </Badge>
-                              {isBound ? (
-                                <span className="inline-flex items-center gap-1 text-xs text-[var(--success-foreground)]">
-                                  <CheckCircle2 className="h-3.5 w-3.5" />
-                                  bound
-                                </span>
-                              ) : null}
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {connector.transport ? `transport: ${connector.transport}` : ' '}
-                            </div>
-                          </div>
-                          {isBound ? (
-                            <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
-                              active
-                            </Badge>
-                          ) : null}
-                        </div>
-
-                        <div className="mt-3 flex flex-col gap-2">
-                          <div className="flex items-center gap-2">
-                            <div className="text-xs text-muted-foreground shrink-0">Target</div>
-                            <div className="flex-1 min-w-0">
-                              <Select
-                                value={chosen || '__none__'}
-                                onValueChange={(value) =>
-                                  setSelection((current) => ({
-                                    ...current,
-                                    [connector.name]: value === '__none__' ? '' : value,
-                                  }))
-                                }
-                                disabled={!connector.enabled || targets.length === 0}
-                              >
-                                <SelectTrigger className="h-8 rounded-xl bg-background/40 border-border/60">
-                                  <SelectValue placeholder={targets.length ? 'Select target…' : 'No target yet'} />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="__none__">Not bound</SelectItem>
-                                  {targets.map((item) => (
-                                    <SelectItem key={item.conversation_id} value={item.conversation_id}>
-                                      {targetLabel(item)}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              size="sm"
-                              onClick={() =>
-                                setSelection((current) => ({
-                                  ...current,
-                                  [connector.name]: '',
-                                }))
-                              }
-                              disabled={!chosen}
-                              className="shrink-0"
-                            >
-                              <Unlink2 className="mr-1.5 h-3.5 w-3.5" />
-                              Close
-                            </Button>
-                          </div>
-
-                          {chosenTarget ? (
-                            <div className="rounded-xl border border-border/50 bg-background/30 px-3 py-2 text-xs text-muted-foreground">
-                              <div className="font-mono text-[11px] text-foreground">{chosenTarget.conversation_id}</div>
-                              {chosenTarget.bound_quest_id ? (
-                                <div className="mt-1">
-                                  Bound to <span className="font-mono">{chosenTarget.bound_quest_id}</span>
-                                  {chosenTarget.bound_quest_title ? ` · ${chosenTarget.bound_quest_title}` : ''}
-                                </div>
-                              ) : (
-                                <div className="mt-1">Currently not bound to another project.</div>
-                              )}
-                            </div>
-                          ) : null}
-
-                          {boundQuestId && boundQuestId !== questId ? (
-                            <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                              <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                              <div className="text-xs text-amber-800 dark:text-amber-200">
-                                This target is currently bound to <span className="font-mono">{boundQuestId}</span>.
-                                Binding here will reassign it.
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
+                  {selectedTargetOption?.target.bound_quest_id && selectedTargetOption.target.bound_quest_id !== questId ? (
+                    <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
+                      <div className="text-xs text-amber-800 dark:text-amber-200">
+                        This target is currently bound to <span className="font-mono">{selectedTargetOption.target.bound_quest_id}</span>.
+                        Saving here will reassign it.
                       </div>
-                    )
-                  })}
+                    </div>
+                  ) : null}
+
+                  {unavailableConnectors.length > 0 ? (
+                    <div className="rounded-xl border border-dashed border-border/50 bg-background/20 px-3 py-3 text-xs text-muted-foreground">
+                      Waiting for first message: {unavailableConnectors.map((connector) => connectorLabel(connector)).join(' · ')}
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -427,11 +435,11 @@ export function QuestSettingsSurface({
         title="Rebind connector?"
         description={
           conflicts.length
-            ? `This will unbind the conversation from: ${conflicts
+            ? `${pendingSwitchDescription || 'This connector target is already bound elsewhere.'} It will be unbound from: ${conflicts
                 .map((item) => item.quest_id)
                 .filter(Boolean)
                 .join(', ')}`
-            : 'This connector target is already bound elsewhere.'
+            : pendingSwitchDescription || 'This connector target is already bound elsewhere.'
         }
         confirmText="Rebind"
         cancelText="Cancel"

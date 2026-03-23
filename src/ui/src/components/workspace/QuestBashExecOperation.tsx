@@ -179,12 +179,16 @@ export function QuestBashExecOperation({
           ? parsedOutput.cwd
           : typeof metadata?.workdir === 'string'
             ? metadata.workdir
+            : typeof metadata?.cwd === 'string'
+              ? metadata.cwd
             : ''
   const bashId =
     typeof parsedOutput?.bash_id === 'string'
       ? parsedOutput.bash_id
       : typeof metadata?.bash_id === 'string'
         ? metadata.bash_id
+        : typeof parsedArgs?.id === 'string'
+          ? parsedArgs.id
         : ''
   const exitCode = typeof parsedOutput?.exit_code === 'number' ? parsedOutput.exit_code : null
   const [liveProgress, setLiveProgress] = React.useState<BashProgress | null>(initialProgress)
@@ -243,7 +247,6 @@ export function QuestBashExecOperation({
     isRunning,
     workdir,
   })
-  const shouldHideGenericCompletedCard = label === 'tool_result' && mode === 'read'
   const progressPercent = getProgressPercent(liveProgress)
   const progressLabel = formatProgressLabel(liveProgress)
   const progressMeta = formatProgressMeta(liveProgress)
@@ -319,10 +322,6 @@ export function QuestBashExecOperation({
           }
         : {},
     metadata: eventMetadata,
-  }
-
-  if (shouldHideGenericCompletedCard) {
-    return null
   }
 
   return (
@@ -402,6 +401,7 @@ export function QuestBashExecOperation({
             readOnly={false}
             panelMode="inline"
             chrome="bare"
+            preferBashTerminalRender
             onLiveStateChange={(state) => {
               setLiveProgress(state.progress)
               setLiveStatus(state.status)

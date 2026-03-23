@@ -5,7 +5,7 @@ from typing import Any
 
 from ..connector_runtime import build_discovered_target, conversation_identity_key, format_conversation_id, merge_discovered_targets, parse_conversation_id
 from ..bridges import get_connector_bridge
-from ..qq_profiles import find_qq_profile, list_qq_profiles, merge_qq_profile_config, qq_profile_label
+from ..connector.qq_profiles import find_qq_profile, list_qq_profiles, merge_qq_profile_config, qq_profile_label
 from ..shared import append_jsonl, ensure_dir, generate_id, read_json, read_jsonl, utc_now, write_json
 from .base import BaseChannel
 

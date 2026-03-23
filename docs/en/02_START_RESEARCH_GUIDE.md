@@ -16,6 +16,92 @@ Implementation sources:
 3. binds an optional reusable baseline
 4. persists a structured `startup_contract` for later prompt building
 
+## Worked example: a cleaned-up version of quest 025
+
+The quickest way to understand the dialog is to walk through a real example.
+
+This example is adapted from a real project input in quest `025`, but normalized into a cleaner public form. The task is:
+
+- reproduce the official Mandela-Effect baseline
+- keep the original task and evaluation protocol
+- study stronger truth-preserving collaboration under mixed correct and incorrect social signals
+- use two local OpenAI-compatible endpoints to keep throughput high
+
+### Short fields in the current frontend
+
+| Field in the dialog | Example value | Why |
+|---|---|---|
+| `Project title` | `Mandela-Effect Reproduction and Truth-Preserving Collaboration` | Clear project title for cards, workspace headers, and later search |
+| `Project ID` | leave blank, or set `025` | Leave blank for automatic sequential ids; only pin it manually if you need a fixed id |
+| `Connector delivery` | `Local only` for the first run, or one QQ target if already configured | The current frontend allows at most one external connector target per quest |
+| `Reusable baseline` | empty for the first run, or the imported official baseline if already available | If selected, derived `baseline_mode` becomes `existing` |
+| `Research paper` | `On` | Keep paper-oriented analysis and writing in scope |
+| `Research intensity` | `Balanced` | Secure the baseline, then probe one justified direction |
+| `Decision mode` | `Autonomous` | Keep moving unless a real blocking decision depends on the user |
+| `Launch mode` | `Standard` | Start from the ordinary research graph |
+| `Language` | `English` | Use English for the kickoff prompt and user-facing artifacts |
+
+### Multi-line fields for the same example
+
+`Primary research request`
+
+```text
+Please reproduce the official Mandela-Effect repository and paper, then study how to improve truth-preserving collaboration under mixed correct and incorrect social signals.
+
+The core research question is: how can a multi-agent system remain factually robust under social influence while still learning from correct peers?
+
+Keep the task definition and evaluation protocol aligned with the original work. Focus on prompt-based or system-level methods that improve truth preservation without simply refusing all social information.
+```
+
+`Baseline links`
+
+```text
+https://github.com/bluedream02/Mandela-Effect
+```
+
+`Reference papers / repos`
+
+```text
+https://arxiv.org/abs/2602.00428
+```
+
+`Runtime constraints`
+
+```text
+- Keep the task definition and evaluation protocol aligned with the official baseline unless a change is explicitly justified.
+- Use two OpenAI-compatible local inference endpoints for throughput:
+  - `http://127.0.0.1:8004/v1`
+  - `http://127.0.0.1:8008/v1`
+- Use API key `1234` and model `/model/gpt-oss-120b` on both endpoints.
+- Keep generation settings close to the baseline unless a justified adjustment is required.
+- Implement asynchronous execution, automatic retry on request failure, and resumable scripts.
+- Split requests across both endpoints so throughput stays high without overloading the service.
+- Record failed, degraded, or inconclusive runs honestly instead of hiding them.
+```
+
+`Goals`
+
+```text
+1. Restore and verify the official Mandela-Effect baseline as a trustworthy starting point.
+2. Measure key metrics and failure modes on the designated `gpt-oss-120b` setup.
+3. Propose at least one literature-grounded direction for stronger truth-preserving collaboration.
+4. Produce experiment and analysis artifacts that are strong enough to support paper writing.
+```
+
+### What the frontend derives from this example
+
+If you leave `Reusable baseline` empty and choose `Balanced`, the current frontend derives:
+
+- `scope = baseline_plus_direction`
+- `baseline_mode = restore_from_url`
+- `resource_policy = balanced`
+- `time_budget_hours = 24`
+- `git_strategy = semantic_head_plus_controlled_integration`
+
+If you select a reusable baseline entry, only one derived field changes:
+
+- `baseline_mode = existing`
+
 ## Current frontend model
 
 ### `StartResearchTemplate`
@@ -75,6 +161,12 @@ The dialog submits:
   title,
   goal: compiled_prompt,
   quest_id,
+  requested_connector_bindings: [
+    {
+      connector,
+      conversation_id
+    }
+  ],
   requested_baseline_ref: {
     baseline_id,
     variant_id
@@ -129,6 +221,26 @@ The dialog submits:
 **`user_language`**
 
 - Declares the preferred user-facing language for kickoff and later interaction.
+
+### Connector delivery
+
+**`requested_connector_bindings`**
+
+- Submitted alongside the project create payload, not inside `startup_contract`.
+- The current frontend allows at most one external connector target per quest.
+- Typical shape:
+
+```ts
+[
+  {
+    connector: 'qq',
+    conversation_id: 'qq:private:openid-123'
+  }
+]
+```
+
+- If you keep the project local-only, this array is empty.
+- If the selected target is already bound to another quest, rebinding this project will replace the old binding.
 
 ### Baseline and references
 

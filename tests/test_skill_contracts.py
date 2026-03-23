@@ -43,6 +43,19 @@ def test_idea_skill_requires_survey_delta_and_memory_reuse_contract() -> None:
     assert "utility_score" in text
     assert "quality_score" in text
     assert "exploration_score" in text
+    assert "at least `5` and usually `5-10`" in text
+    assert "Do not write, promote, or submit a final idea" in text
+    assert "standard citation format" in text
+    assert "The selected idea draft must cite the survey papers" in text
+
+
+def test_system_prompt_hardens_idea_literature_floor_and_reference_requirement() -> None:
+    text = _system_prompt_text()
+
+    assert "before writing or submitting the final selected idea, durably map at least 5 and usually 5 to 10 related and usable papers" in text
+    assert "do not treat the literature floor as optional" in text
+    assert "that final idea draft must use one consistent standard citation format" in text
+    assert "a final idea draft that uses standard-format citations and a `References` or `Bibliography` section" in text
 
 
 def test_baseline_skill_requires_plan_checklist_and_source_reading() -> None:

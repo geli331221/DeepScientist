@@ -72,6 +72,12 @@ export function FileTreeNode({
   const { readOnly } = useFileTreeDragContext();
   const isDragging = node.isDragging;
   const uiMeta = node.data.uiMeta ?? null;
+  const onboardingId =
+    uiMeta?.emphasis === "diff"
+      ? "quest-scope-diff-file"
+      : node.data.path === "brief.md"
+        ? "quest-explorer-open-file"
+        : undefined;
 
   const handlePointerDown = React.useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -149,6 +155,7 @@ export function FileTreeNode({
       ref={dragRef}
       style={style}
       data-node-id={node.data.id}
+      data-onboarding-id={onboardingId}
       className={cn(
         "file-tree-node",
         isLatexFolder && "is-latex-folder",

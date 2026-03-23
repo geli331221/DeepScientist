@@ -286,6 +286,7 @@ export default function Hero() {
         source: 'web-react',
         auto_start: true,
         initial_message: payload.goal.trim(),
+        auto_bind_latest_connectors: false,
         requested_connector_bindings: payload.requested_connector_bindings,
         requested_baseline_ref: payload.requested_baseline_ref ?? undefined,
         startup_contract: payload.startup_contract ?? undefined,
@@ -349,7 +350,7 @@ export default function Hero() {
                 }`}
               >
                 <FadeContent duration={0.6} y={18} blur={false} className="min-w-0">
-                  <div className="space-y-6">
+                  <div className="space-y-6" data-onboarding-id="landing-hero">
                     <div className="inline-flex items-center gap-2 rounded-full border border-black/10 bg-white/60 px-3 py-1 text-xs uppercase tracking-[0.2em] text-[#7E8B97]">
                       Automated Research
                     </div>
@@ -371,8 +372,11 @@ export default function Hero() {
                           className="h-12 rounded-full bg-[#C7AD96] px-7 text-[#2D2A26] shadow-[0_12px_28px_-14px_rgba(45,42,38,0.55)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#D7C6AE]"
                           onClick={() => {
                             setCreateError(null)
-                            setCreateDialogOpen(true)
+                            window.setTimeout(() => {
+                              setCreateDialogOpen(true)
+                            }, 120)
                           }}
+                          data-onboarding-id="landing-start-research"
                         >
                           {HERO_COPY.primaryCta}
                         </Button>

@@ -111,13 +111,133 @@ Do not commit:
 
 ## Issues And Proposals
 
-When proposing a non-trivial change, include:
+DeepScientist uses GitHub Issues and GitHub Pull Requests as the default contribution path.
+No external contribution software is required.
+
+### Which Issue Type To Use
+
+Use one of these issue types:
+
+- `[Bug]` for crashes, regressions, broken behavior, connector failures, UI/TUI problems, or API mismatches
+- `[Feature]` for new capabilities, connector requests, workflow improvements, or UX improvements
+- `[RFC]` for non-trivial design changes that affect architecture, contracts, or multiple subsystems
+- `[Docs]` for missing, incorrect, outdated, or unclear documentation
+
+### What A Good Issue Should Include
+
+When opening an issue, include:
 
 - the problem being solved
 - the expected behavior
 - the main files or subsystems affected
 - any migration or compatibility concerns
 
+For bug reports, also include:
+
+- exact reproduction steps
+- the observed behavior
+- logs, screenshots, or stack traces when available
+- local environment details when relevant
+
+For feature requests, also include:
+
+- the user workflow being improved
+- why the current behavior is insufficient
+- the rough scope of the proposed change
+
+### When To Open An RFC First
+
+Open an `[RFC]` issue before writing a PR when the change is non-trivial, for example:
+
+- API contract changes
+- quest layout changes
+- connector contract changes
+- runner contract changes
+- prompt or skill workflow changes
+- cross-cutting refactors that touch multiple subsystems
+- large changes that are hard to review incrementally
+
+An RFC should explain:
+
+- the problem
+- the proposed design
+- alternatives considered
+- compatibility or migration impact
+- the expected implementation scope
+
+## Pull Request Process
+
+### Before Opening A PR
+
+Before opening a PR:
+
+- make sure the change has one clear purpose
+- open or reference an issue first
+- use an RFC issue first for non-trivial or cross-cutting changes
+- update tests and docs when behavior changes
+
+### PR Title Prefixes
+
+Use one of these prefixes in the PR title:
+
+- `[Bugfix]`
+- `[UI]`
+- `[TUI]`
+- `[Connector]`
+- `[Runner]`
+- `[Prompt/Skill]`
+- `[Docs]`
+- `[Core]`
+- `[CI/Build]`
+- `[Misc]`
+
+Examples:
+
+- `[Connector] Add Lingzhu one-step binding flow`
+- `[UI] Fix settings navigation state mismatch`
+- `[Docs] Clarify Lingzhu public URL requirements`
+
+### What A Good PR Should Include
+
+A pull request should clearly state:
+
+- what changed
+- why it changed
+- which issue it resolves or relates to
+- which tests were run
+- whether docs were updated
+- whether there is any breaking behavior or migration impact
+
+### AI-Assisted Contributions
+
+AI-assisted contributions are allowed, but the human contributor remains responsible for the result.
+
+If you use AI assistance:
+
+- review every changed line yourself
+- verify the behavior end to end
+- run the relevant tests yourself
+- disclose AI assistance in the PR description
+
+Do not submit large, unreviewed AI-generated changes.
+
+### Review States
+
+Maintainers may use labels or review comments such as:
+
+- `needs-triage`
+- `needs-rfc`
+- `action-required`
+- `ready-for-review`
+- `ready-to-merge`
+
+### Good First Contributions
+
+Issues labeled with these are the best starting points for new contributors:
+
+- `good first issue`
+- `help wanted`
+
 ## License
 
-By contributing to this repository, you agree that your contributions are licensed under the [MIT License](LICENSE).
+By contributing to this repository, you agree that your contributions are licensed under the [Apache License 2.0](LICENSE).

@@ -1,230 +1,99 @@
-# 04 Lingzhu 连接器指南：如何配置 Lingzhu
+# 04 Lingzhu 连接器指南：把 Rokid Glasses 绑定到 DeepScientist
 
-本文说明如何在 `Settings > Connectors > Lingzhu` 中完成 Lingzhu 伴生端点配置。
+Lingzhu 现在是一个极简的一步式绑定流程。
 
-适用范围：
+DeepScientist 会直接在自己的 daemon / Web 端口上提供 Lingzhu 兼容路由：
 
-- 仅包含配置教程
-- 面向 OpenClaw 兼容的 Lingzhu bridge 参数
-- 本地健康检查与 SSE 冒烟测试
-- 说明需要把哪些值填回 Lingzhu 平台
+- `GET /metis/agent/api/health`
+- `POST /metis/agent/api/sse`
 
-本文不展开讨论云部署架构。你只需要：
+真实设备要想接入，Rokid 平台里填写的地址必须就是外部可以访问到的 DeepScientist 公网地址，不能是 `127.0.0.1`、`localhost` 或私网地址。
 
-- 一个已经跑起来的 OpenClaw gateway
-- 一个眼镜端可访问的公网 IP 或公网域名
+参考：
 
-参考来源：
+- Rokid 开发者论坛：https://forum.rokid.com/post/detail/2831
+- Rokid 智能体平台：https://agent-develop.rokid.com/space
 
-- Rokid 论坛配置页面：https://forum.rokid.com/post/detail/2831
-- 仓库内置 bridge 目录：`assets/connectors/lingzhu/openclaw-bridge`
-- 仓库内置 OpenClaw 配置模板：`assets/connectors/lingzhu/openclaw.lingzhu.config.template.json`
+## 1. 绑定前提
 
-## 1. DeepScientist 现在会自动提供什么
+先确认：
 
-Lingzhu 设置卡会自动生成并校验：
+- DeepScientist 已正常启动
+- 你当前打开的 DeepScientist 网页地址就是最终对外可访问的公网地址
+- 如果当前网页地址是本地地址或私网地址，Lingzhu 不应直接保存
 
-- 本地 health URL
-- 本地 SSE URL
-- 公网 SSE URL
-- `auth_ak`
-- OpenClaw 配置片段
-- 本地探测 `curl`
+## 2. 页面里现在保留什么
 
-当前随包 bridge 还额外做了三件事：
+`Settings > Connectors > Lingzhu` 现在只保留必要内容：
 
-- 在模型真正开始生成前，先自动发送一条可见的“已收到”回执
-- 保留 SSE 注释心跳
-- 在上游长时间静默时补发轻量可见进度心跳
+- 一个 `Add Lingzhu (Rokid Glasses)` 入口
+- Rokid 平台创建表单截图
+- 自动生成的可复制字段
+- 中文绑定指引
+- 保存按钮
 
-需要明确的是：
+不再要求你先手动改 host、port、agent、OpenClaw 配置片段或额外调试步骤。
 
-- Lingzhu 在 DeepScientist 里被视为 companion endpoint
-- 它不是像 QQ 那样的完整双向聊天 connector
+## 3. 点击后会自动生成什么
 
-## 2. 开始前请先确认
+点击 `Add Lingzhu (Rokid Glasses)` 后，弹窗会自动显示这些值，并且每一项都可以直接复制：
 
-建议先确认下面几项：
+- 自定义智能体ID
+- 自定义智能体url
+- 自定义智能体AK
+- 智能体名称
+- 类别
+- 功能介绍
+- 开场白
+- 入参类型
+- 图标 PNG 地址
 
-- DeepScientist 已成功安装并运行
-- 本地 OpenClaw gateway 已启动
-- 你知道 OpenClaw HTTP gateway 的端口，通常是 `18789`
-- 你已经有公网 IP 或公网域名
+其中：
 
-重要提醒：
+- `Custom agent URL` 会自动生成成 `https://<你的公网地址>/metis/agent/api/sse`
+- `AK` 会自动随机生成，并在保存后长期复用，不会每次都变
+- logo 使用 DeepScientist 的 PNG 资源，方便直接上传到 Rokid
 
-- `127.0.0.1` 只能用于本地健康检查
-- Lingzhu 设备侧必须访问公网地址
+![Rokid 平台创建三方智能体](../images/lingzhu/rokid-agent-platform-create.png)
 
-## 3. 打开设置页
+## 4. 用户怎么做
 
-打开：
+在 Rokid 平台：
 
-- `Settings > Connectors > Lingzhu`
+1. 打开 `项目开发 -> 三方智能体 -> 创建`
+2. 选择“自定义智能体”
+3. 把弹窗里自动生成的字段逐项复制过去
+4. 图标上传 DeepScientist PNG logo
+5. Rokid 表单填写完成后，回到 DeepScientist 点击保存
 
-页面会分成几块：
+保存完成后，Lingzhu 绑定就算完成。
 
-- 网关端点
-- 鉴权与身份
-- 自动生成值
-- 探测与校验
-- 高级调试
+## 5. 后续怎么用
 
-![Lingzhu 设置概览](../images/lingzhu/lingzhu-settings-overview.svg)
+眼镜侧后续只需要请求：
 
-## 4. 先填写端点
+- `POST /metis/agent/api/sse`
 
-推荐值如下：
+并带上：
 
-| 字段 | 推荐值 | 说明 |
-| --- | --- | --- |
-| `Enabled` | `true` | 开启 companion 配置 |
-| `Transport` | `openclaw_sse` | 固定值，不要改 |
-| `Local host` | `127.0.0.1` | 只用于本地探测 |
-| `Gateway port` | `18789` | 与 OpenClaw gateway 保持一致 |
-| `Public base URL` | `http://<公网IP>:18789` | 必须是眼镜端真正能访问到的地址 |
+- `Authorization: Bearer <保存后的AK>`
 
-如果你不确定本地端点应该怎么填，可以直接点击：
+使用规则：
 
-- `Use local defaults`
+- 新任务必须以 `我现在的任务是 ...` 开头
+- 只有这个前缀后面的正文才会被当成新的 DeepScientist 任务
+- 如果只是想继续拿中间进展，不要重复这个前缀，直接说 `找DeepScientist` 或 `继续`
 
-## 5. 生成 AK 和身份值
+## 6. 常见问题
 
-建议如下：
+### 为什么不能用 `127.0.0.1`
 
-| 字段 | 推荐值 |
-| --- | --- |
-| `Auth AK` | 点击 `Generate AK` 自动生成 |
-| `Agent ID` | `main` |
-| `Lingzhu system prompt` | 可选 |
+因为 Rokid 平台和外部设备访问不到你的本地回环地址。Lingzhu 只应该注册公网地址。
 
-需要保证下面两处完全一致：
+### 为什么要自动生成 `AK`
 
-- OpenClaw Lingzhu 插件配置
-- Lingzhu 平台配置
+因为 `AK` 本质上就是这个外部接入口的 Bearer 密钥。系统生成并持久化，比手填更稳定，也更不容易出错。
 
-也就是：
+### 保存后还需要再手动配很多参数吗
 
-- `auth_ak`
-- `agent_id`
-
-## 6. 使用自动生成值
-
-DeepScientist 会直接展示你需要复制的内容：
-
-- 本地 health URL
-- 本地 SSE URL
-- 公网 SSE URL
-- OpenClaw 配置片段
-- 探测 curl
-
-其中真正要填回 Lingzhu 平台的是：
-
-- 公网 SSE URL
-- AK
-
-![Lingzhu 平台填写值](../images/lingzhu/lingzhu-platform-values.svg)
-
-## 7. 更新 OpenClaw
-
-你可以直接使用：
-
-- 设置页里自动生成的配置片段
-- 或仓库内置模板 `assets/connectors/lingzhu/openclaw.lingzhu.config.template.json`
-
-内置 bridge 的安装命令为：
-
-```bash
-openclaw plugins install ./assets/connectors/lingzhu/openclaw-bridge
-```
-
-至少应确保 OpenClaw 开启：
-
-```json
-{
-  "gateway": {
-    "port": 18789,
-    "http": {
-      "endpoints": {
-        "chatCompletions": {
-          "enabled": true
-        }
-      }
-    }
-  }
-}
-```
-
-DeepScientist 也会自动把完整的 Lingzhu 插件配置片段生成出来：
-
-![OpenClaw 配置片段](../images/lingzhu/lingzhu-openclaw-config.svg)
-
-## 8. 执行本地探测
-
-保存参数后，点击：
-
-- `Run Lingzhu probe`
-
-DeepScientist 会依次执行：
-
-1. `GET /metis/agent/api/health`
-2. `POST /metis/agent/api/sse`
-
-理想结果：
-
-- `Connection = reachable`
-- `Auth = ready`
-- 探测结果没有报错
-
-## 9. 需要填回 Lingzhu 平台的值
-
-只需要填：
-
-- `Public SSE URL`
-- `Auth AK`
-
-不要填：
-
-- `127.0.0.1`
-- 任意本地机器名
-
-## 10. 常见失败原因
-
-### Health 显示 offline
-
-通常说明：
-
-- OpenClaw 没启动
-- `gateway_port` 填错
-- `local_host` 填错
-
-### SSE probe 失败
-
-通常说明：
-
-- `auth_ak` 不一致
-- Lingzhu SSE 路径没有暴露出来
-- OpenClaw 的 `chatCompletions.enabled` 还没打开
-
-### 本地探测通过，但设备仍无法接入
-
-通常说明：
-
-- `Public base URL` 不是公网可达地址
-- 防火墙或反向代理还没有放行端口
-
-## 11. 说明
-
-这块配置保持 registry-first：
-
-- Lingzhu 仍然落在 `connectors.yaml`
-- 自动生成值来自同一份 structured config
-- 校验、测试、前端渲染都消费同一条 connector 记录
-
-对于长任务，更稳妥的实际策略是：
-
-- 先由 bridge 自动回执
-- 在上游静默阶段由 bridge 补发可见进度心跳
-- 通过 `per_user` 会话连续保持多轮上下文
-
-这会明显改善兼容性，但仍不能消除 Lingzhu 平台单次请求超时的硬限制。
+不需要。Lingzhu 现在的目标就是让用户只看到必要字段，复制过去，然后保存完成。

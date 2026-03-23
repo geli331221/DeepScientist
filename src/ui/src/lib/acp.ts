@@ -251,6 +251,40 @@ function appendHistoryItem(history: FeedItem[], item: FeedItem): FeedItem[] {
   return [...history, item].slice(-MAX_FEED_HISTORY)
 }
 
+function parseFeedItemTimestamp(item: FeedItem) {
+  const raw = typeof item.createdAt === 'string' ? item.createdAt : ''
+  if (!raw) return null
+  const parsed = Date.parse(raw)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function shouldInsertHistoryItemBefore(existing: FeedItem, incoming: FeedItem) {
+  const existingTs = parseFeedItemTimestamp(existing)
+  const incomingTs = parseFeedItemTimestamp(incoming)
+  if (existingTs == null || incomingTs == null) {
+    return false
+  }
+  if (existingTs > incomingTs) {
+    return true
+  }
+  if (existingTs < incomingTs) {
+    return false
+  }
+  return incoming.type === 'message' && incoming.role === 'assistant' && existing.type !== 'message'
+}
+
+function insertHistoryItemChronologically(history: FeedItem[], item: FeedItem): FeedItem[] {
+  if (history.some((existing) => existing.id === item.id)) {
+    return history
+  }
+  const insertIndex = history.findIndex((existing) => shouldInsertHistoryItemBefore(existing, item))
+  if (insertIndex < 0) {
+    return [...history, item].slice(-MAX_FEED_HISTORY)
+  }
+  const next = [...history.slice(0, insertIndex), item, ...history.slice(insertIndex)]
+  return next.slice(-MAX_FEED_HISTORY)
+}
+
 function prependHistoryItems(history: FeedItem[], incoming: FeedItem[]): FeedItem[] {
   if (incoming.length === 0) {
     return history
@@ -391,7 +425,7 @@ function sealPendingAssistantStreams(
     if (allowedRunIds && (!item.runId || !allowedRunIds.has(item.runId))) {
       return true
     }
-    nextHistory = appendHistoryItem(nextHistory, {
+    nextHistory = insertHistoryItemChronologically(nextHistory, {
       ...item,
       stream: false,
     })
@@ -418,7 +452,7 @@ function applyIncomingFeedUpdates(state: FeedState, incoming: FeedItem[]): FeedS
     if (item.type === 'message' && item.role === 'assistant' && item.runId) {
       const flushed = flushPendingAssistant(nextPending, item)
       nextPending = flushed.pending
-      nextHistory = appendHistoryItem(nextHistory, flushed.finalized)
+      nextHistory = insertHistoryItemChronologically(nextHistory, flushed.finalized)
       continue
     }
     if (item.type === 'message' && item.role === 'user') {
@@ -456,9 +490,39 @@ function shouldRefreshSessionSnapshot(item: FeedItem) {
   return (
     item.label === 'run_started' ||
     item.label === 'run_finished' ||
-    item.label === 'runner.turn_error' ||
+    item.label === 'run_failed' ||
     item.label === 'quest.control'
   )
+}
+
+function collectSealedAssistantRunIds(updates: Array<Record<string, unknown>>) {
+  const sealed = new Set<string>()
+  for (const update of updates) {
+    const eventType = String(update.event_type ?? '').trim()
+    const data = update.data
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      continue
+    }
+    const record = data as Record<string, unknown>
+    const runId = String(record.run_id ?? '').trim()
+    const previousRunId = String(record.previous_run_id ?? '').trim()
+    if (
+      eventType === 'runner.turn_finish' ||
+      eventType === 'runner.turn_error' ||
+      eventType === 'runner.turn_retry_scheduled' ||
+      eventType === 'runner.turn_retry_aborted' ||
+      eventType === 'runner.turn_retry_exhausted'
+    ) {
+      if (runId) {
+        sealed.add(runId)
+      }
+      continue
+    }
+    if (eventType === 'runner.turn_retry_started' && previousRunId) {
+      sealed.add(previousRunId)
+    }
+  }
+  return Array.from(sealed)
 }
 
 function findReplyTargetId(feed: FeedItem[]) {
@@ -792,17 +856,7 @@ export function useQuestWorkspace(questId: string | null) {
         return current == null ? nextValue : Math.max(current, nextValue)
       }, null)
       const normalized = updates.map((item) => normalizeUpdate(item))
-      const finishedRunIds = updates.flatMap((item) => {
-        if (String(item.event_type ?? '') !== 'runner.turn_finish') {
-          return []
-        }
-        const data = item.data
-        if (!data || typeof data !== 'object') {
-          return []
-        }
-        const runId = String((data as Record<string, unknown>).run_id ?? '').trim()
-        return runId ? [runId] : []
-      })
+      const sealedRunIds = collectSealedAssistantRunIds(updates)
       let nextState = applyIncomingFeedUpdates(
         {
           history: historyRef.current,
@@ -810,8 +864,8 @@ export function useQuestWorkspace(questId: string | null) {
         },
         normalized
       )
-      if (finishedRunIds.length > 0) {
-        nextState = sealPendingAssistantStreams(nextState, finishedRunIds)
+      if (sealedRunIds.length > 0) {
+        nextState = sealPendingAssistantStreams(nextState, sealedRunIds)
       }
       updateFeedState(nextState)
       if (highestCursor != null) {
@@ -847,7 +901,7 @@ export function useQuestWorkspace(questId: string | null) {
             item.type === 'artifact' ||
             (shouldRefreshWorkflow(item) &&
               item.type === 'event' &&
-              ['run_finished', 'runner.turn_error', 'quest.control'].includes(item.label || ''))
+              ['run_finished', 'run_failed', 'quest.control'].includes(item.label || ''))
         )
       ) {
         queueDetailsRefresh(targetQuestId)
@@ -898,11 +952,17 @@ export function useQuestWorkspace(questId: string | null) {
           return
         }
 
-        const normalized = (nextFeed.acp_updates ?? []).map((item) => normalizeUpdate(item.params.update))
+        const initialUpdates = (nextFeed.acp_updates ?? []).map((item) => item.params.update)
+        const normalized = initialUpdates.map((item) => normalizeUpdate(item))
+        const sealedRunIds = collectSealedAssistantRunIds(initialUpdates)
         const baseState: FeedState = reset
           ? { history: [], pending: [] }
           : { history: historyRef.current, pending: pendingFeedRef.current }
         let nextState = applyIncomingFeedUpdates(baseState, normalized)
+
+        if (sealedRunIds.length > 0) {
+          nextState = sealPendingAssistantStreams(nextState, sealedRunIds)
+        }
 
         if (hydrated.snapshot?.status && hydrated.snapshot.status !== 'running') {
           nextState = sealPendingAssistantStreams(nextState)

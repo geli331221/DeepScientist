@@ -1,6 +1,11 @@
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import React, { Component } from "react";
+import {
+  PDF_CMAP_PACKED,
+  PDF_CMAP_URL,
+  PDF_WORKER_SRC,
+} from "../../lib/pdf-utils";
 
 interface Props {
   /** See `GlobalWorkerOptionsType`. */
@@ -28,7 +33,9 @@ export class PdfLoader extends Component<Props, State> {
   };
 
   static defaultProps = {
-    workerSrc: "/pdf.worker.min.mjs",
+    workerSrc: PDF_WORKER_SRC,
+    cMapUrl: PDF_CMAP_URL,
+    cMapPacked: PDF_CMAP_PACKED,
   };
 
   documentRef = React.createRef<HTMLElement>();
@@ -80,8 +87,12 @@ export class PdfLoader extends Component<Props, State> {
         const document = {
           ...this.props,
           ownerDocument,
-          cMapUrl,
-          cMapPacked,
+          ...(cMapUrl
+            ? {
+                cMapUrl,
+                cMapPacked,
+              }
+            : {}),
         };
 
         return getDocument(document).promise.then((pdfDocument) => {

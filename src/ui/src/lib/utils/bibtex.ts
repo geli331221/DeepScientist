@@ -19,6 +19,9 @@ function getLastName(name: string): string {
  * }
  */
 export function generateBibTeX(paper: ArxivPaper): string {
+  if (paper.bibtex?.trim()) {
+    return paper.bibtex.trim();
+  }
   const authorStr = (paper.authors || []).join(" and ");
   const year =
     paper.publishedAt && !Number.isNaN(Date.parse(paper.publishedAt))

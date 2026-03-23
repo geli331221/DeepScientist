@@ -104,3 +104,24 @@ def test_baseline_registry_normalizes_explicit_metric_contract(temp_home: Path) 
     metrics = {item["metric_id"]: item for item in entry["metric_contract"]["metrics"]}
     assert metrics["acc"]["direction"] == "maximize"
     assert metrics["loss"]["direction"] == "minimize"
+
+
+def test_baseline_registry_delete_writes_tombstone_and_hides_entry(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    registry = BaselineRegistry(temp_home)
+
+    registry.publish(
+        {
+            "baseline_id": "baseline-delete-me",
+            "name": "Delete me",
+            "metrics_summary": {"accuracy": 0.9},
+        }
+    )
+
+    deleted = registry.delete("baseline-delete-me")
+
+    assert deleted["baseline_id"] == "baseline-delete-me"
+    assert deleted["status"] == "deleted"
+    assert registry.get("baseline-delete-me") is None
+    assert registry.get("baseline-delete-me", include_deleted=True)["status"] == "deleted"
+    assert registry.list_entries() == []

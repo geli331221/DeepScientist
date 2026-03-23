@@ -471,7 +471,7 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             context.require_quest_root(),
             campaign_title=campaign_title,
             campaign_goal=campaign_goal,
-            parent_run_id=parent_run_id or context.run_id,
+            parent_run_id=parent_run_id,
             slices=slices,
             campaign_origin=campaign_origin,
             selected_outline_ref=selected_outline_ref,
@@ -636,6 +636,7 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         summary: str | None = None,
         baseline_kind: str | None = None,
         metric_contract: dict[str, Any] | None = None,
+        metric_directions: dict[str, str] | None = None,
         metrics_summary: dict[str, Any] | None = None,
         primary_metric: dict[str, Any] | None = None,
         auto_advance: bool = True,
@@ -651,6 +652,7 @@ def build_artifact_server(context: McpContext) -> FastMCP:
                 summary=summary,
                 baseline_kind=baseline_kind,
                 metric_contract=metric_contract,
+                metric_directions=metric_directions,
                 metrics_summary=metrics_summary,
                 primary_metric=primary_metric,
                 auto_advance=auto_advance,
@@ -678,16 +680,23 @@ def build_artifact_server(context: McpContext) -> FastMCP:
     @server.tool(
         name="arxiv",
         description=(
-            "Read an identified arXiv paper by id. "
-            "Use full_text=false for the overview/abstract path and full_text=true when the full paper body is needed."
+            "Interact with the quest-local arXiv library. "
+            "Use mode='read' to read one paper by id with local-first automatic persistence, "
+            "or mode='list' to list the saved arXiv items for the current quest."
         ),
     )
     def arxiv(
-        paper_id: str,
+        paper_id: str | None = None,
+        mode: str = "read",
         full_text: bool = False,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return service.arxiv(paper_id, full_text=full_text)
+        return service.arxiv(
+            paper_id,
+            mode=mode,
+            full_text=full_text,
+            quest_root=context.require_quest_root(),
+        )
 
     @server.tool(name="refresh_summary", description="Refresh SUMMARY.md from recent artifact state.")
     def refresh_summary(

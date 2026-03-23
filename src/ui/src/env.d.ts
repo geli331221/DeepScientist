@@ -1,5 +1,10 @@
 export {}
 
+declare module '*.md?raw' {
+  const content: string
+  export default content
+}
+
 declare global {
   interface Window {
     __DEEPSCIENTIST_RUNTIME__?: {
@@ -9,7 +14,6 @@ declare global {
         productApis?: boolean
         socketIo?: boolean
         notifications?: boolean
-        broadcasts?: boolean
         points?: boolean
         arxiv?: boolean
         cliFrontend?: boolean

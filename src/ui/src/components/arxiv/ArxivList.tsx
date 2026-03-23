@@ -2,10 +2,8 @@
 
 import * as React from "react";
 import { Loader2 } from "lucide-react";
-import { ConfirmModal } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast";
-import { apiClient } from "@/lib/api/client";
-import { deleteFiles, downloadFileById } from "@/lib/api/files";
+import { downloadFileById } from "@/lib/api/files";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useArxivStore } from "@/lib/stores/arxiv-store";
 import { useFileTreeStore } from "@/lib/stores/file-tree";
@@ -23,6 +21,7 @@ function buildPlaceholder(arxivId: string, status: string): ArxivPaper {
   return {
     fileId: "",
     arxivId,
+    metadataStatus: status === "failed" ? null : "pending",
     title: "",
     authors: [],
     abstract: "",
@@ -43,14 +42,6 @@ function buildPdfFileName(paper: ArxivPaper): string {
   const base = sanitizeFileName(paper.displayName || paper.arxivId || "arxiv-paper");
   if (base.toLowerCase().endsWith(".pdf")) return base;
   return `${base}.pdf`;
-}
-
-function buildMarkdownFileName(paper: ArxivPaper): string {
-  const base = sanitizeFileName(paper.displayName || paper.arxivId || "arxiv-paper");
-  const lower = base.toLowerCase();
-  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return base;
-  if (lower.endsWith(".pdf")) return `${base.slice(0, -4)}.md`;
-  return `${base}.md`;
 }
 
 export type ArxivSortKey = "recent" | "title" | "year";
@@ -136,13 +127,10 @@ export function ArxivList({
   const importingIds = useArxivStore((s) => s.importingIds);
   const errors = useArxivStore((s) => s.errors);
   const isLoading = useArxivStore((s) => s.isLoading);
-  const refresh = useArxivStore((s) => s.refresh);
-  const removeArxiv = useArxivStore((s) => s.removeArxiv);
   const selectedPaperKey = useArxivStore((s) => s.selectedPaperKey);
   const setSelectedPaperKey = useArxivStore((s) => s.setSelectedPaperKey);
   const clearSelection = useFileTreeStore((s) => s.clearSelection);
   const setFocused = useFileTreeStore((s) => s.setFocused);
-  const refreshFileTree = useFileTreeStore((s) => s.refresh);
   const openTab = useTabsStore((s) => s.openTab);
   const tabs = useTabsStore((s) => s.tabs);
   const activeTabId = useTabsStore((s) => s.activeTabId);
@@ -152,11 +140,6 @@ export function ArxivList({
     position: { x: number; y: number };
   } | null>(null);
   const [infoOpen, setInfoOpen] = React.useState(false);
-  const [deleteState, setDeleteState] = React.useState<{
-    open: boolean;
-    paper: ArxivPaper | null;
-    loading: boolean;
-  }>({ open: false, paper: null, loading: false });
 
   const existingIds = React.useMemo(() => new Set(items.map((item) => item.arxivId)), [items]);
   const normalizedQuery = React.useMemo(() => normalizeSearch(query), [query]);
@@ -263,56 +246,6 @@ export function ArxivList({
     [addToast]
   );
 
-  const downloadMarkdown = React.useCallback(
-    async (paper: ArxivPaper) => {
-      if (!paper.fileId || paper.status !== "ready") {
-        addToast({
-          type: "error",
-          title: "Markdown unavailable",
-          description: "The markdown output is not ready yet.",
-          duration: 2200,
-        });
-        return;
-      }
-      try {
-        const response = await apiClient.get(`/api/v1/pdf/markdown/${paper.fileId}`, {
-          responseType: "text",
-        });
-        const markdown =
-          typeof response.data === "string" ? response.data : String(response.data ?? "");
-        const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        try {
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = buildMarkdownFileName(paper);
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-        } finally {
-          URL.revokeObjectURL(url);
-        }
-      } catch (error: any) {
-        const status = error?.response?.status;
-        const description =
-          status === 409
-            ? "The markdown output is still processing."
-            : status === 422
-            ? "The markdown parser reported an error."
-            : status === 404
-            ? "Markdown output not found."
-            : "Could not download the markdown file.";
-        addToast({
-          type: "error",
-          title: "Markdown unavailable",
-          description,
-          duration: 2400,
-        });
-      }
-    },
-    [addToast]
-  );
-
   const handleDownloadPdf = React.useCallback(
     (paper: ArxivPaper) => {
       setContextMenu(null);
@@ -320,62 +253,6 @@ export function ArxivList({
     },
     [downloadPdf]
   );
-
-  const handleDownloadMarkdown = React.useCallback(
-    (paper: ArxivPaper) => {
-      setContextMenu(null);
-      void downloadMarkdown(paper);
-    },
-    [downloadMarkdown]
-  );
-
-  const handleRequestDelete = React.useCallback(
-    (paper: ArxivPaper) => {
-      setContextMenu(null);
-      if (readOnly) return;
-      if (!paper.fileId) {
-        addToast({
-          type: "error",
-          title: "Delete unavailable",
-          description: "This item has not finished initializing yet.",
-          duration: 2000,
-        });
-        return;
-      }
-      setDeleteState({ open: true, paper, loading: false });
-    },
-    [addToast, readOnly]
-  );
-
-  const handleConfirmDelete = React.useCallback(async () => {
-    const target = deleteState.paper;
-    if (!target || deleteState.loading) return;
-    if (!target.fileId) {
-      setDeleteState({ open: false, paper: null, loading: false });
-      return;
-    }
-    try {
-      setDeleteState((state) => ({ ...state, loading: true }));
-      await deleteFiles([target.fileId]);
-      removeArxiv(target.arxivId, target.fileId);
-      await Promise.allSettled([refresh(), refreshFileTree()]);
-      addToast({
-        type: "success",
-        title: "Deleted",
-        description: target.displayName || target.arxivId,
-        duration: 1800,
-      });
-      setDeleteState({ open: false, paper: null, loading: false });
-    } catch (error) {
-      addToast({
-        type: "error",
-        title: "Delete failed",
-        description: "Could not delete the file.",
-        duration: 2000,
-      });
-      setDeleteState((state) => ({ ...state, loading: false }));
-    }
-  }, [addToast, deleteState, refresh, refreshFileTree, removeArxiv]);
 
   const pending = React.useMemo(
     () => Array.from(importingIds).filter((id) => !existingIds.has(id)),
@@ -441,10 +318,31 @@ export function ArxivList({
     }
   }, [addToast, selectedPaper]);
 
+  const handleCopyBibtexForPaper = React.useCallback(
+    async (paper: ArxivPaper) => {
+      const bibtex = generateBibTeX(paper);
+      const success = await copyToClipboard(bibtex);
+      setContextMenu(null);
+      addToast({
+        type: success ? "success" : "error",
+        title: success ? "BibTeX copied" : "Copy failed",
+        description: success ? paper.title || paper.arxivId : "Please try again.",
+        duration: 1800,
+      });
+    },
+    [addToast]
+  );
+
+  const handleOpenArxivForPaper = React.useCallback((paper: ArxivPaper) => {
+    setContextMenu(null);
+    if (!paper.arxivId) return;
+    window.open(`https://arxiv.org/abs/${paper.arxivId}`, "_blank", "noopener,noreferrer");
+  }, []);
+
   const menuPaper = contextMenu?.paper || null;
   const canDownloadPdf = Boolean(menuPaper?.fileId) && menuPaper?.status === "ready";
-  const canDownloadMarkdown = Boolean(menuPaper?.fileId) && menuPaper?.status === "ready";
-  const canDelete = Boolean(menuPaper?.fileId);
+  const canOpenArxiv = Boolean(menuPaper?.arxivId);
+  const canCopyBibtex = Boolean(menuPaper);
 
   const isEmpty = visibleItems.length === 0;
   const isInitialLoading =
@@ -457,7 +355,7 @@ export function ArxivList({
   return (
     <>
       <div className="flex h-full min-h-0 flex-col">
-        <div className="file-tree-scroll flex-1 min-h-0 overflow-y-auto">
+        <div className="file-tree-scroll flex-1 min-h-0 overflow-x-hidden overflow-y-auto">
           {showHeader ? (
             <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,1fr)_80px] items-center gap-2 border-b border-white/10 bg-[var(--bg-panel-left)] px-2 py-1 text-[10px] uppercase tracking-wide text-[var(--text-muted-on-dark)]">
               <div className="flex items-center gap-1.5">
@@ -514,30 +412,16 @@ export function ArxivList({
           position={contextMenu.position}
           onClose={() => setContextMenu(null)}
           onDownloadPdf={() => handleDownloadPdf(menuPaper)}
-          onDownloadMarkdown={() => handleDownloadMarkdown(menuPaper)}
-          onDelete={() => handleRequestDelete(menuPaper)}
+          onCopyBibtex={() => void handleCopyBibtexForPaper(menuPaper)}
+          onOpenArxiv={() => handleOpenArxivForPaper(menuPaper)}
+          onDelete={() => {}}
           canDownloadPdf={canDownloadPdf}
-          canDownloadMarkdown={canDownloadMarkdown}
-          canDelete={canDelete}
-          readOnly={readOnly}
+          canCopyBibtex={canCopyBibtex}
+          canOpenArxiv={canOpenArxiv}
+          canDelete={false}
+          readOnly
         />
       )}
-
-      <ConfirmModal
-        open={deleteState.open}
-        onClose={() => setDeleteState({ open: false, paper: null, loading: false })}
-        onConfirm={handleConfirmDelete}
-        title="Delete arXiv file"
-        description={
-          deleteState.paper
-            ? `“${deleteState.paper.displayName || deleteState.paper.arxivId}” will be moved to trash (soft delete).`
-            : "This item will be deleted."
-        }
-        confirmText="Delete"
-        cancelText="Cancel"
-        variant="danger"
-        loading={deleteState.loading}
-      />
 
       <ArxivInfoModal
         open={infoOpen}

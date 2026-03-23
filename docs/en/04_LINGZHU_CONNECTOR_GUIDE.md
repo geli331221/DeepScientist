@@ -1,216 +1,99 @@
-# 04 Lingzhu Connector Guide: Configure Lingzhu for DeepScientist
+# 04 Lingzhu Connector Guide: Bind Rokid Glasses to DeepScientist
 
-This guide explains how to configure the Lingzhu companion endpoint from `Settings > Connectors > Lingzhu`.
+Lingzhu now uses a minimal one-step binding flow.
 
-Scope:
+DeepScientist serves the Lingzhu-compatible routes directly on its own daemon / web port:
 
-- configuration only
-- OpenClaw-compatible Lingzhu bridge values
-- local probe and SSE smoke test
-- what to paste into the Lingzhu platform
+- `GET /metis/agent/api/health`
+- `POST /metis/agent/api/sse`
 
-This guide does not cover cloud deployment architecture. You only need one working OpenClaw gateway and one public IP or public domain that the glasses can reach.
+For a real device binding, the address registered on Rokid must be the public DeepScientist address that external devices can reach. It cannot be `127.0.0.1`, `localhost`, or a private-network address.
 
-Reference sources:
+References:
 
-- Rokid forum setup page: https://forum.rokid.com/post/detail/2831
-- packaged bridge root: `assets/connectors/lingzhu/openclaw-bridge`
-- packaged OpenClaw config template: `assets/connectors/lingzhu/openclaw.lingzhu.config.template.json`
+- Rokid developer forum: https://forum.rokid.com/post/detail/2831
+- Rokid agent platform: https://agent-develop.rokid.com/space
 
-## 1. What DeepScientist now provides
+## 1. Prerequisites
 
-The Lingzhu settings card now generates and validates:
+Make sure:
 
-- local health URL
-- local SSE URL
-- public SSE URL
-- `auth_ak`
-- OpenClaw config snippet
-- local probe `curl`
+- DeepScientist is already running
+- the DeepScientist page you opened is the final public address that external devices should use
+- if the current page is local-only or private-network-only, Lingzhu should not be saved yet
 
-The packaged bridge is configured to:
+## 2. What the UI keeps now
 
-- emit one immediate visible receipt acknowledgement before the model starts
-- keep comment heartbeats alive
-- emit lightweight visible progress heartbeats during long silent upstream phases
+`Settings > Connectors > Lingzhu` now keeps only the necessary pieces:
 
-DeepScientist treats Lingzhu as a companion endpoint, not as a full bidirectional chat connector like QQ.
+- one `Add Lingzhu (Rokid Glasses)` entry point
+- the Rokid platform screenshot
+- the auto-generated copyable fields
+- concise binding instructions
+- one save action
 
-## 2. Before you start
+You no longer need to manually edit host, port, agent, OpenClaw snippets, or extra probe steps in the main flow.
 
-Make sure these are already true:
+## 3. What is auto-generated
 
-- DeepScientist is installed and running
-- your OpenClaw gateway is already running locally
-- the OpenClaw HTTP gateway port is known, usually `18789`
-- you have a public IP or public domain
+After you click `Add Lingzhu (Rokid Glasses)`, the popup shows these copyable values:
 
-Important:
+- Custom agent ID
+- Custom agent URL
+- Custom agent AK
+- Agent name
+- Category
+- Capability summary
+- Opening message
+- Input type
+- Icon PNG URL
 
-- `127.0.0.1` only works for local health checks
-- Lingzhu devices need a public address
+Important details:
 
-## 3. Open the settings page
+- `Custom agent URL` is generated as `https://<your-public-address>/metis/agent/api/sse`
+- `AK` is generated automatically and reused after saving
+- the logo uses a PNG DeepScientist asset so it can be uploaded directly to Rokid
 
-Open:
+![Rokid third-party agent creation form](../images/lingzhu/rokid-agent-platform-create.png)
 
-- `Settings > Connectors > Lingzhu`
+## 4. What the user does
 
-The card is organized into:
+On the Rokid platform:
 
-- gateway endpoint
-- auth and identity
-- generated values
-- probe and verify
-- advanced debug
+1. Open `Project Development -> Third-party Agent -> Create`
+2. Choose `Custom Agent`
+3. Copy each generated field from the popup into the matching Rokid field
+4. Upload the DeepScientist PNG logo
+5. Return to DeepScientist and click Save
 
-![Lingzhu settings overview](../images/lingzhu/lingzhu-settings-overview.svg)
+After Save, the Lingzhu binding is complete.
 
-## 4. Fill the endpoint fields
+## 5. How it is used afterward
 
-Recommended values:
+The glasses or platform only need to call:
 
-| Field | Recommended value | Notes |
-| --- | --- | --- |
-| `Enabled` | `true` | turn on the companion config |
-| `Transport` | `openclaw_sse` | fixed, do not change |
-| `Local host` | `127.0.0.1` | used only for local probe |
-| `Gateway port` | `18789` | match your OpenClaw gateway |
-| `Public base URL` | `http://<public-ip>:18789` | must be reachable from the glasses |
+- `POST /metis/agent/api/sse`
 
-If you do not know what to fill for the local endpoint, click:
+with:
 
-- `Use local defaults`
+- `Authorization: Bearer <saved-AK>`
 
-## 5. Generate the AK and identity values
+Usage rules:
 
-Fill or keep:
+- a new task must start with `我现在的任务是 ...`
+- only the text after that prefix is treated as a fresh DeepScientist task
+- if you only want buffered progress, do not repeat the prefix; just say `找DeepScientist` or `继续`
 
-| Field | Recommended value |
-| --- | --- |
-| `Auth AK` | click `Generate AK` |
-| `Agent ID` | `main` |
-| `Lingzhu system prompt` | optional |
+## 6. Common questions
 
-Use the same `auth_ak` and `agent_id` in both places:
+### Why can’t I use `127.0.0.1`?
 
-- OpenClaw Lingzhu plugin config
-- Lingzhu platform config
+Because Rokid and external devices cannot reach your local loopback address. Lingzhu must register a public address.
 
-## 6. Use the generated values
+### Why is `AK` generated automatically?
 
-DeepScientist shows the exact values you need:
+Because `AK` is the Bearer secret for this external entrypoint. Generating and persisting it is safer and more reliable than asking users to type it manually.
 
-- local health URL
-- local SSE URL
-- public SSE URL
-- OpenClaw config snippet
-- probe curl
+### Do I still need to tune a lot of extra parameters after saving?
 
-The public value is the one you should paste into the Lingzhu platform.
-
-![Lingzhu platform values](../images/lingzhu/lingzhu-platform-values.svg)
-
-## 7. Update OpenClaw
-
-Use either:
-
-- the generated snippet in the settings page
-- or the packaged template at `assets/connectors/lingzhu/openclaw.lingzhu.config.template.json`
-
-Install the packaged bridge with:
-
-```bash
-openclaw plugins install ./assets/connectors/lingzhu/openclaw-bridge
-```
-
-At minimum, OpenClaw must expose:
-
-```json
-{
-  "gateway": {
-    "port": 18789,
-    "http": {
-      "endpoints": {
-        "chatCompletions": {
-          "enabled": true
-        }
-      }
-    }
-  }
-}
-```
-
-DeepScientist also generates the full Lingzhu plugin block for you:
-
-![OpenClaw config snippet](../images/lingzhu/lingzhu-openclaw-config.svg)
-
-## 8. Run the local probe
-
-After saving the values, click:
-
-- `Run Lingzhu probe`
-
-DeepScientist performs:
-
-1. `GET /metis/agent/api/health`
-2. `POST /metis/agent/api/sse`
-
-Expected result:
-
-- `Connection = reachable`
-- `Auth = ready`
-- probe result returns no errors
-
-## 9. What to paste into the Lingzhu platform
-
-Use:
-
-- `Public SSE URL`
-- `Auth AK`
-
-Do not paste:
-
-- `127.0.0.1`
-- any local-only host name
-
-## 10. Common failure causes
-
-### Health is offline
-
-Usually means:
-
-- OpenClaw is not running
-- wrong `gateway_port`
-- wrong `local_host`
-
-### SSE probe fails
-
-Usually means:
-
-- `auth_ak` mismatch
-- Lingzhu endpoint path is not exposed
-- OpenClaw `chatCompletions.enabled` is still off
-
-### Device still cannot connect
-
-Usually means:
-
-- `Public base URL` is not public
-- firewall or reverse proxy still blocks the port
-
-## 11. Practical note
-
-This settings surface is intentionally registry-first:
-
-- Lingzhu stays in `connectors.yaml`
-- generated values come from the same structured config
-- validation, testing, and frontend rendering consume the same connector record
-
-For long-running tasks, the most stable practical behavior is:
-
-- immediate bridge-level receipt acknowledgement
-- visible progress heartbeats from the bridge during silent upstream phases
-- preserved per-user session continuity across follow-up turns
-
-This improves Lingzhu compatibility, but it still does not remove the platform-side single-request timeout limit.
+No. The goal of the current Lingzhu flow is to show only the necessary values, let the user copy them, and finish with one save.

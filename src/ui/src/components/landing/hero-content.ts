@@ -147,7 +147,7 @@ export const HERO_RESEARCH_STEPS: HeroResearchStep[] = [
     title: 'Write and publish',
     subtitle: 'Draft, visualize, and export',
     body: 'Generate figures, assemble the manuscript, and export a reproducible package.',
-    tags: ['AutoFigure', 'LaTeX export', 'Repro package'],
+    tags: ['Figures', 'LaTeX export', 'Repro package'],
     icon: 'File',
     tone: 'warm',
     terminal: [
@@ -177,27 +177,13 @@ export const HERO_FEATURES: HeroFeature[] = [
     tone: 'warm',
   },
   {
-    id: 'autofigure',
-    kicker: 'AutoFigure',
-    title: 'AutoFigure turns papers into editable scientific visuals',
-    body: 'Import a paper, draft a layout, iterate with AI, then render and export.',
-    bullets: [
-      'Draft, iterate, and render in a single workflow',
-      'Multiple iterations with a clean final export',
-      'Saved to the project file tree automatically',
-    ],
-    chips: ['Draft', 'Iterate', 'Render'],
-    icon: assetUrl('logo.svg'),
-    tone: 'cool',
-  },
-  {
     id: 'workspace',
     kicker: 'Projects / Workspace',
     title: 'One project holds the full research system',
     body: 'Notebook, PDF, LaTeX, code, and collaboration stay unified from start to finish.',
     bullets: [
       'Unified file tree',
-      'Multi-plugin workflow (Notebook / AutoFigure / PDF / Copilot)',
+      'Multi-plugin workflow (Notebook / PDF / LaTeX / Copilot)',
       'Shareable and reproducible by default',
     ],
     chips: ['Notebook', 'PDF', 'LaTeX', 'Copilot'],

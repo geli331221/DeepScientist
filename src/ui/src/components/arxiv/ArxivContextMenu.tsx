@@ -1,17 +1,19 @@
 "use client";
 
 import * as React from "react";
-import { Download, FileText, Trash2 } from "lucide-react";
+import { ClipboardCopy, Download, ExternalLink, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ArxivContextMenuProps {
   position: { x: number; y: number };
   onClose: () => void;
   onDownloadPdf: () => void;
-  onDownloadMarkdown: () => void;
+  onCopyBibtex: () => void;
+  onOpenArxiv: () => void;
   onDelete: () => void;
   canDownloadPdf?: boolean;
-  canDownloadMarkdown?: boolean;
+  canCopyBibtex?: boolean;
+  canOpenArxiv?: boolean;
   canDelete?: boolean;
   readOnly?: boolean;
 }
@@ -53,10 +55,12 @@ export function ArxivContextMenu({
   position,
   onClose,
   onDownloadPdf,
-  onDownloadMarkdown,
+  onCopyBibtex,
+  onOpenArxiv,
   onDelete,
   canDownloadPdf = false,
-  canDownloadMarkdown = false,
+  canCopyBibtex = true,
+  canOpenArxiv = true,
   canDelete = false,
   readOnly = false,
 }: ArxivContextMenuProps) {
@@ -121,10 +125,16 @@ export function ArxivContextMenu({
         disabled={!canDownloadPdf}
       />
       <MenuItem
-        icon={FileText}
-        label="Download Markdown"
-        onClick={onDownloadMarkdown}
-        disabled={!canDownloadMarkdown}
+        icon={ClipboardCopy}
+        label="Copy BibTeX"
+        onClick={onCopyBibtex}
+        disabled={!canCopyBibtex}
+      />
+      <MenuItem
+        icon={ExternalLink}
+        label="Open arXiv"
+        onClick={onOpenArxiv}
+        disabled={!canOpenArxiv}
       />
       {!readOnly && (
         <>

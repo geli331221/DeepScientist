@@ -153,8 +153,69 @@ class QuestStageViewBuilder:
                 return candidate
         return self.quest_root
 
+    def _infer_stage_from_branch_name(self) -> str | None:
+        normalized = str(self.branch_name or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized.startswith("analysis/"):
+            return "analysis"
+        if normalized.startswith("run/"):
+            return "experiment"
+        if normalized.startswith("idea/"):
+            return "idea"
+        if normalized.startswith("paper/") or normalized.startswith("write/"):
+            return "paper"
+        if normalized.startswith("baseline/"):
+            return "baseline"
+        return None
+
+    def _has_paper_state(self) -> bool:
+        paper_root = self._paper_root()
+        return bool(
+            self._paper_candidates()
+            or (paper_root / "selected_outline.json").exists()
+            or (paper_root / "draft.md").exists()
+            or self._paper_bundle_manifest()
+        )
+
+    def _resolve_effective_stage_key(self) -> str:
+        normalized = normalize_stage_key(self.stage_key)
+        if normalized in {"baseline", "idea", "experiment", "analysis", "paper"}:
+            return normalized
+        if normalized != "general":
+            return normalized
+
+        inferred = self._infer_stage_from_branch_name()
+        if inferred:
+            return inferred
+        if self._analysis_stage_items(None):
+            return "analysis"
+        if self._experiment_stage_items():
+            return "experiment"
+        if self._idea_stage_items():
+            return "idea"
+        if self._has_paper_state():
+            return "paper"
+        if self._baseline_stage_items():
+            return "baseline"
+        return normalized
+
+    @staticmethod
+    def _artifact_detail(item: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(payload, dict) or not payload:
+            return None
+        record = dict(item or {})
+        return {
+            "artifact_id": payload.get("artifact_id") or payload.get("id"),
+            "artifact_kind": payload.get("kind"),
+            "artifact_path": record.get("path"),
+            "payload": payload,
+        }
+
     def build(self) -> dict[str, Any]:
-        if str(self.selection.get("selection_type") or "").strip() == "branch_node":
+        selection_type = str(self.selection.get("selection_type") or "").strip()
+        self.stage_key = self._resolve_effective_stage_key()
+        if selection_type == "branch_node" and self.stage_key not in {"experiment", "analysis", "paper"}:
             return self._build_branch()
         if self.stage_key == "baseline":
             return self._build_baseline()
@@ -331,6 +392,52 @@ class QuestStageViewBuilder:
             body = read_text(path, "")
         text = str(body or "").strip()
         return text or None
+
+    def _recent_trace_actions(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        raw_actions = self.trace.get("actions") if isinstance(self.trace, dict) else []
+        if not isinstance(raw_actions, list) or not raw_actions:
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in raw_actions[-limit:]:
+            if not isinstance(item, dict):
+                continue
+            summary = _compact(item.get("summary") or item.get("output") or item.get("args"), limit=1000)
+            normalized.append(
+                {
+                    "action_id": item.get("action_id"),
+                    "title": item.get("title") or item.get("tool_name") or item.get("raw_event_type") or item.get("kind"),
+                    "summary": summary,
+                    "status": item.get("status"),
+                    "created_at": item.get("created_at"),
+                    "tool_name": item.get("tool_name"),
+                    "artifact_kind": item.get("artifact_kind"),
+                }
+            )
+        return normalized
+
+    def _trace_summary(self) -> str | None:
+        if not isinstance(self.trace, dict):
+            return None
+        return _compact(
+            self.trace.get("summary")
+            or self.selection.get("summary")
+            or self.trace.get("title"),
+            limit=600,
+        )
+
+    def _trace_markdown(self, *, limit: int = 5) -> str | None:
+        items = self._recent_trace_actions(limit=limit)
+        if not items:
+            return None
+        lines: list[str] = []
+        for item in items:
+            title = str(item.get("title") or "Trace").strip() or "Trace"
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                lines.append(f"- **{title}**: {summary}")
+            else:
+                lines.append(f"- **{title}**")
+        return "\n".join(lines) if lines else None
 
     def _file_entry(
         self,
@@ -728,6 +835,8 @@ class QuestStageViewBuilder:
             or self.snapshot.get("active_idea_draft_path")
             or str(Path(worktree_root) / "memory" / "ideas" / idea_id / "draft.md")
         )
+        idea_markdown = self._markdown_body_for_path(idea_md_path)
+        idea_md_rel_path = self._relative_path_or_raw(idea_md_path)
         draft_md_rel_path = self._relative_path_or_raw(draft_md_path)
         draft_markdown = self._markdown_body_for_path(draft_md_path)
         lineage_intent = str(payload.get("lineage_intent") or details.get("lineage_intent") or "").strip() or None
@@ -800,10 +909,14 @@ class QuestStageViewBuilder:
                     "risks": details.get("risks") or [],
                     "evidence_paths": details.get("evidence_paths") or [],
                     "lineage_intent": lineage_intent,
+                    "idea_path": idea_md_rel_path,
+                    "idea_markdown": idea_markdown,
                     "draft_path": draft_md_rel_path,
                     "draft_markdown": draft_markdown,
                     "literature_files": literature_files,
-                }
+                    "decision_reason": payload.get("reason"),
+                },
+                "latest_artifact": self._artifact_detail(latest, payload),
             },
             lineage_intent=lineage_intent,
             idea_draft_path=draft_md_rel_path,
@@ -869,6 +982,7 @@ class QuestStageViewBuilder:
             if isinstance(latest_experiment_payload.get("paths"), dict)
             else {}
         )
+        latest_run_markdown = self._markdown_body_for_path(latest_experiment_paths.get("run_md"))
         latest_result_payload = (
             read_json(Path(str(latest_experiment_paths.get("result_json"))), {})
             if str(latest_experiment_paths.get("result_json") or "").strip()
@@ -904,6 +1018,7 @@ class QuestStageViewBuilder:
             if str(analysis_manifest.get("campaign_id") or "").strip()
             else None
         )
+        analysis_summary_markdown = self._markdown_body_for_path(analysis_summary_path)
 
         branch_items = [
             item
@@ -1008,6 +1123,11 @@ class QuestStageViewBuilder:
                     "next_target": next_target,
                     "idea_draft_path": idea_draft_rel_path,
                     "idea_draft_markdown": idea_draft_markdown,
+                    "idea_hypothesis": latest_idea_details.get("hypothesis"),
+                    "idea_mechanism": latest_idea_details.get("mechanism"),
+                    "idea_expected_gain": latest_idea_details.get("expected_gain"),
+                    "idea_risks": latest_idea_details.get("risks") or [],
+                    "decision_reason": latest_idea_payload.get("reason"),
                     "latest_main_experiment": {
                         "run_id": latest_run_id,
                         "summary": latest_experiment_payload.get("summary"),
@@ -1017,11 +1137,16 @@ class QuestStageViewBuilder:
                         "progress_eval": latest_progress_eval,
                         "evaluation_summary": latest_evaluation_summary,
                         "run_md_path": latest_experiment_paths.get("run_md"),
+                        "run_markdown": latest_run_markdown,
                         "result_json_path": latest_experiment_paths.get("result_json"),
+                        "result_payload": latest_result_payload,
                     }
                     if latest_run_id
                     else None,
-                }
+                    "analysis_summary_path": self._relative_path_or_raw(analysis_summary_path),
+                    "analysis_summary_markdown": analysis_summary_markdown,
+                },
+                "latest_artifact": self._artifact_detail(latest_experiment_item or latest_idea_item, latest_experiment_payload or latest_idea_payload),
             },
             lineage_intent=lineage_intent,
             idea_draft_path=idea_draft_rel_path,
@@ -1057,8 +1182,17 @@ class QuestStageViewBuilder:
         baseline_ref = payload.get("baseline_ref") or result_payload.get("baseline_ref") or {}
         evaluation_summary = _evaluation_summary(payload.get("evaluation_summary") or result_payload.get("evaluation_summary"))
         run_id = str(payload.get("run_id") or "pending").strip() or "pending"
+        run_markdown = self._markdown_body_for_path(paths.get("run_md"))
+        trace_summary = self._trace_summary()
+        trace_markdown = self._trace_markdown()
         note = (
-            str(payload.get("summary") or result_payload.get("conclusion") or (progress_eval or {}).get("reason") or "").strip()
+            str(
+                payload.get("summary")
+                or result_payload.get("conclusion")
+                or (progress_eval or {}).get("reason")
+                or trace_summary
+                or ""
+            ).strip()
             or "No durable main experiment result has been recorded yet."
         )
         title = f"Experiment · {run_id}"
@@ -1119,8 +1253,15 @@ class QuestStageViewBuilder:
                     "metrics_summary": metrics_summary,
                     "progress_eval": progress_eval,
                     "evaluation_summary": evaluation_summary,
+                    "run_path": self._relative_path_or_raw(paths.get("run_md")),
+                    "run_markdown": run_markdown,
+                    "result_json_path": self._relative_path_or_raw(paths.get("result_json")),
                     "result_payload": result_payload,
-                }
+                    "trace_summary": trace_summary,
+                    "trace_markdown": trace_markdown,
+                    "trace_actions": self._recent_trace_actions(),
+                },
+                "latest_artifact": self._artifact_detail(latest, payload),
             },
         )
 
@@ -1145,7 +1286,9 @@ class QuestStageViewBuilder:
             flow_type = str(payload.get("flow_type") or "").strip()
             if flow_type not in {"analysis_campaign", "analysis_slice"}:
                 continue
-            if campaign_id and str(payload.get("campaign_id") or "").strip() != campaign_id:
+            if campaign_id:
+                if str(payload.get("campaign_id") or "").strip() == campaign_id:
+                    items.append(item)
                 continue
             if self._branch_matches(payload, allow_parent=True, include_unscoped=False):
                 items.append(item)
@@ -1228,13 +1371,23 @@ class QuestStageViewBuilder:
                     "plan_path": item.get("plan_path"),
                     "result_path": item.get("result_path"),
                     "mirror_path": item.get("mirror_path"),
+                    "plan_markdown": self._markdown_body_for_path(item.get("plan_path")),
+                    "result_markdown": self._markdown_body_for_path(item.get("result_path")),
+                    "mirror_markdown": self._markdown_body_for_path(item.get("mirror_path")),
                 }
             )
         title = f"Analysis · {campaign_id}"
+        trace_summary = self._trace_summary()
         note = (
-            str(latest_payload.get("summary") or manifest.get("goal") or "").strip()
+            str(latest_payload.get("summary") or manifest.get("goal") or trace_summary or "").strip()
             or "No durable analysis campaign has been created yet."
         )
+        summary_path = (
+            self.quest_root / "experiments" / "analysis-results" / campaign_id / "SUMMARY.md"
+            if campaign_id != "pending"
+            else None
+        )
+        summary_markdown = self._markdown_body_for_path(summary_path) if summary_path else None
         key_files = self._dedupe_files(
             [
                 self._file_entry(manifest.get("_manifest_path"), label="Campaign Manifest", description="Structured analysis campaign manifest."),
@@ -1293,8 +1446,17 @@ class QuestStageViewBuilder:
                     "summary": latest_payload.get("summary"),
                     "manifest_path": manifest.get("_manifest_path"),
                     "charter_path": manifest.get("charter_path"),
+                    "charter_markdown": self._markdown_body_for_path(manifest.get("charter_path")),
                     "todo_manifest_path": manifest.get("todo_manifest_path"),
-                }
+                    "todo_manifest_markdown": self._markdown_body_for_path(manifest.get("todo_manifest_path")),
+                    "summary_path": self._relative_path_or_raw(summary_path) if summary_path else None,
+                    "summary_markdown": summary_markdown,
+                    "manifest_payload": manifest,
+                    "trace_summary": trace_summary,
+                    "trace_markdown": self._trace_markdown(),
+                    "trace_actions": self._recent_trace_actions(),
+                },
+                "latest_artifact": self._artifact_detail(latest, latest_payload),
             },
         )
 
@@ -1435,6 +1597,7 @@ class QuestStageViewBuilder:
                         "latex_root_path": latex_root_rel,
                         "main_tex_path": main_tex_rel,
                     },
-                }
+                },
+                "latest_artifact": self._artifact_detail(paper_items[-1] if paper_items else None, self._payload(paper_items[-1] if paper_items else {})),
             },
         )

@@ -421,40 +421,6 @@ write_global_wrapper() {
   cat >"$target_path" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-WRAPPER_PATH="\${BASH_SOURCE[0]}"
-WRAPPER_DIR="\$(cd "\$(dirname "\$WRAPPER_PATH")" && pwd)"
-PREFERRED_COMMAND="$command_name"
-LOOKUP_PATH=""
-OLD_IFS="\$IFS"
-IFS=:
-for ENTRY in \$PATH; do
-  if [ -z "\$ENTRY" ]; then
-    continue
-  fi
-  ENTRY_REAL="\$ENTRY"
-  if ENTRY_CANONICAL="\$(cd "\$ENTRY" 2>/dev/null && pwd)"; then
-    ENTRY_REAL="\$ENTRY_CANONICAL"
-  fi
-  if [ "\$ENTRY_REAL" = "\$WRAPPER_DIR" ]; then
-    continue
-  fi
-  if [ -z "\$LOOKUP_PATH" ]; then
-    LOOKUP_PATH="\$ENTRY"
-  else
-    LOOKUP_PATH="\$LOOKUP_PATH:\$ENTRY"
-  fi
-done
-IFS="\$OLD_IFS"
-if [ -n "\$LOOKUP_PATH" ]; then
-  if RESOLVED_LAUNCHER="\$(PATH="\$LOOKUP_PATH" command -v "\$PREFERRED_COMMAND" 2>/dev/null)"; then
-    if [ -n "\$RESOLVED_LAUNCHER" ] && [ "\$RESOLVED_LAUNCHER" != "\$WRAPPER_PATH" ]; then
-      if [ -z "\${DEEPSCIENTIST_HOME:-}" ]; then
-        export DEEPSCIENTIST_HOME="$BASE_DIR"
-      fi
-      exec "\$RESOLVED_LAUNCHER" "\$@"
-    fi
-  fi
-fi
 if [ -z "\${DEEPSCIENTIST_HOME:-}" ]; then
   export DEEPSCIENTIST_HOME="$BASE_DIR"
 fi

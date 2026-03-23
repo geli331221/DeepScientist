@@ -163,6 +163,31 @@ test('buildUpdateStatus suppresses stale busy state when the target is not newer
   assert.equal(status.target_version, null);
 });
 
+test('parseYesNoAnswer accepts y/yes and n/no with a default fallback', () => {
+  assert.equal(__internal.parseYesNoAnswer('y', false), true);
+  assert.equal(__internal.parseYesNoAnswer('YES', false), true);
+  assert.equal(__internal.parseYesNoAnswer('n', true), false);
+  assert.equal(__internal.parseYesNoAnswer('No', true), false);
+  assert.equal(__internal.parseYesNoAnswer('', false), false);
+  assert.equal(__internal.parseYesNoAnswer('maybe', true), true);
+});
+
+test('normalizeLauncherRelaunchArgs rewrites home flags and appends --skip-update-check', () => {
+  const args = __internal.normalizeLauncherRelaunchArgs(
+    ['--here', '--port', '20999', '--home', '/tmp/old-home', '--both'],
+    '/tmp/new-home'
+  );
+
+  assert.deepEqual(args, ['--home', '/tmp/new-home', '--port', '20999', '--both', '--skip-update-check']);
+});
+
+test('officialRepositoryLine points to the public GitHub repository', () => {
+  assert.equal(
+    __internal.stripAnsi(__internal.officialRepositoryLine()),
+    'Official open-source repository: https://github.com/ResearAI/DeepScientist'
+  );
+});
+
 test('resolveUvBinary prefers the DeepScientist-local uv install over PATH', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-uv-home-'));
   const localUv = __internal.runtimeUvBinaryPath(home);
@@ -202,12 +227,12 @@ test('parseMigrateArgs accepts target, --yes, and --restart', () => {
   assert.equal(parsed.restart, true);
 });
 
-test('resolveHome uses the current working directory when --here is present', () => {
+test('resolveHome uses ./DeepScientist under the current working directory when --here is present', () => {
   const originalCwd = process.cwd();
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-here-'));
   process.chdir(tempDir);
   try {
-    assert.equal(__internal.resolveHome(['--here']), tempDir);
+    assert.equal(__internal.resolveHome(['--here']), path.join(tempDir, 'DeepScientist'));
   } finally {
     process.chdir(originalCwd);
     fs.rmSync(tempDir, { recursive: true, force: true });

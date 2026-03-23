@@ -2,6 +2,8 @@
 import * as React from "react";
 import { AlertCircle, ChevronDown, ClipboardCopy, ExternalLink, FileText, Loader2 } from "lucide-react";
 import type { ArxivPaper } from "@/lib/types/arxiv";
+import MarkdownRenderer from "@/lib/plugins/markdown-viewer/components/MarkdownRenderer";
+import { getArxivSummaryDisplayMarkdown, hasArxivOverview } from "@/lib/arxiv-summary";
 import { cn } from "@/lib/utils";
 
 function formatError(code: string): string {
@@ -67,6 +69,8 @@ export function ArxivDetailPanel({
     : isProcessing
     ? "bg-amber-500/20 text-amber-100"
     : "bg-emerald-500/20 text-emerald-100";
+  const summaryMarkdown = getArxivSummaryDisplayMarkdown(paper);
+  const showOverview = hasArxivOverview(paper);
   const [isExpanded, setIsExpanded] = React.useState(true);
 
   return (
@@ -136,10 +140,17 @@ export function ArxivDetailPanel({
 
             <div className="rounded-md border border-white/10 bg-white/[0.05] p-2">
               <div className="text-[11px] font-semibold text-[var(--text-muted-on-dark)]">
-                Abstract
+                {showOverview ? "Summary" : "Abstract"}
               </div>
               <div className="mt-1 text-xs leading-relaxed text-[var(--text-on-dark)]">
-                {paper.abstract || "No abstract available."}
+                {showOverview ? (
+                  <MarkdownRenderer
+                    content={summaryMarkdown}
+                    className="text-xs leading-relaxed text-[var(--text-on-dark)]"
+                  />
+                ) : (
+                  paper.abstract || "No abstract available."
+                )}
               </div>
             </div>
           </div>

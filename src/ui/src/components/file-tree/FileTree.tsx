@@ -511,7 +511,7 @@ export function FileTree({
                 data={visibleNodes}
                 idAccessor="id"
                 childrenAccessor="children"
-                openByDefault={false}
+                openByDefault={Boolean(nodesOverride?.length)}
                 className="file-tree-scroll"
                 width={dimensions.width}
                 height={typeof dimensions.height === "number" ? dimensions.height : 400}

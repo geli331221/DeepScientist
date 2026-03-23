@@ -7,6 +7,7 @@ from deepscientist.bridges import register_builtin_connector_bridges
 from deepscientist.config import ConfigManager
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
+from deepscientist.connector.lingzhu_support import generate_lingzhu_auth_ak
 
 
 def test_config_show_includes_help_markdown_and_testability(temp_home: Path) -> None:
@@ -137,19 +138,109 @@ def test_connectors_config_test_uses_system_probe(monkeypatch, temp_home: Path) 
     assert item["details"]["identity"] == "DeepScientistBot"
 
 
-def test_connectors_config_validate_lingzhu_requires_auth_ak_and_warns_about_public_base_url(temp_home: Path) -> None:
+def test_connectors_config_validate_lingzhu_requires_auth_ak_after_public_url_is_filled(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["public_base_url"] = "https://deepscientist.example.com"
+
+    result = manager.validate_named_payload("connectors", connectors)
+
+    assert result["ok"] is False
+    assert any("requires `auth_ak`" in item for item in result["errors"])
+
+
+def test_connectors_config_validate_weixin_requires_bot_token_after_partial_qr_fill(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["weixin"]["account_id"] = "wx-account"
+
+    result = manager.validate_named_payload("connectors", connectors)
+
+    assert result["ok"] is False
+    assert any("requires `bot_token`" in item for item in result["errors"])
+
+
+def test_connectors_normalization_auto_enables_ready_weixin_and_lingzhu(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["weixin"]["enabled"] = False
+    connectors["weixin"]["bot_token"] = "weixin-token"
+    connectors["weixin"]["account_id"] = "wx-account"
+    connectors["lingzhu"]["enabled"] = False
+    connectors["lingzhu"]["auth_ak"] = generate_lingzhu_auth_ak()
+    connectors["lingzhu"]["public_base_url"] = "https://deepscientist.example.com"
+
+    normalized = manager._normalize_named_payload("connectors", connectors)
+
+    assert normalized["weixin"]["enabled"] is True
+    assert normalized["lingzhu"]["enabled"] is True
+
+
+def test_connectors_config_save_generates_and_persists_lingzhu_auth_ak(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["lingzhu"]["enabled"] = True
-    connectors["lingzhu"]["gateway_port"] = 18789
+    connectors["lingzhu"]["public_base_url"] = "https://deepscientist.example.com"
+
+    result = manager.save_named_payload("connectors", connectors)
+
+    assert result["ok"] is True
+    saved = manager.load_named("connectors")
+    assert str(saved["lingzhu"]["auth_ak"]).strip()
+
+
+def test_connectors_config_save_rotates_example_lingzhu_auth_ak(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["public_base_url"] = "https://deepscientist.example.com"
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+
+    result = manager.save_named_payload("connectors", connectors)
+
+    assert result["ok"] is True
+    saved = manager.load_named("connectors")
+    assert str(saved["lingzhu"]["auth_ak"]).strip()
+    assert saved["lingzhu"]["auth_ak"] != "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+
+
+def test_connectors_config_validate_lingzhu_rejects_local_public_base_url(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["public_base_url"] = "http://127.0.0.1:20999"
 
     result = manager.validate_named_payload("connectors", connectors)
 
     assert result["ok"] is False
-    assert any("lingzhu: requires `auth_ak`" in item for item in result["errors"])
-    assert any("public_base_url" in item for item in result["warnings"])
+    assert any("public IP or public domain" in item for item in result["errors"])
+
+
+def test_connectors_config_validate_lingzhu_rejects_example_auth_ak(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["public_base_url"] = "https://deepscientist.example.com"
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+
+    result = manager.validate_named_payload("connectors", connectors)
+
+    assert result["ok"] is False
+    assert any("bundled example token" in item for item in result["errors"])
 
 
 def test_config_test_api_route_returns_items(monkeypatch, temp_home: Path) -> None:
@@ -181,8 +272,9 @@ def test_connectors_config_test_supports_lingzhu_probe(monkeypatch, temp_home: P
     manager = ConfigManager(temp_home)
     manager.ensure_files()
     connectors = manager.load_named("connectors")
+    auth_ak = generate_lingzhu_auth_ak()
     connectors["lingzhu"]["enabled"] = True
-    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    connectors["lingzhu"]["auth_ak"] = auth_ak
     connectors["lingzhu"]["gateway_port"] = 18789
     connectors["lingzhu"]["public_base_url"] = "http://203.0.113.10:18789"
 
@@ -544,6 +636,130 @@ def test_codex_probe_omits_reasoning_effort_flag_when_runner_sets_none(monkeypat
     assert result["ok"] is True
     assert result["details"]["reasoning_effort"] is None
     assert not any("model_reasoning_effort=" in part for part in command)
+
+
+def test_codex_probe_missing_binary_includes_explicit_install_guidance(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: None)
+
+    result = manager._probe_codex_runner({"binary": "codex", "model": "gpt-5.4"})
+
+    assert result["ok"] is False
+    assert "npm install -g @openai/codex" in "\n".join(result["guidance"])
+    assert "codex --login" in "\n".join(result["guidance"])
+
+
+def test_codex_probe_failure_guidance_mentions_login_doctor_and_model(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "Please login first"
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner({"binary": "codex", "model": "gpt-5.4"})
+
+    assert result["ok"] is False
+    guidance_text = "\n".join(result["guidance"])
+    error_text = "\n".join(result["errors"])
+    assert "codex --login" in guidance_text
+    assert "ds doctor" in guidance_text
+    assert "configured model" in guidance_text
+    assert "codex --login" in error_text
+
+
+def test_codex_probe_falls_back_to_codex_default_model_when_configured_model_is_unavailable(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    seen_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        seen_commands.append(list(command))
+        if any(str(part) == "--model" for part in command):
+            class FirstResult:
+                returncode = 1
+                stdout = ""
+                stderr = "Model not found: gpt-5.4"
+
+            return FirstResult()
+
+        class SecondResult:
+            returncode = 0
+            stdout = '{"type":"item.completed","item":{"text":"HELLO"}}'
+            stderr = ""
+
+        return SecondResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner({"binary": "codex", "model": "gpt-5.4"})
+
+    assert result["ok"] is True
+    assert result["details"]["model_fallback_attempted"] is True
+    assert result["details"]["model_fallback_used"] is True
+    assert result["details"]["effective_model"] == "inherit"
+    assert any("--model" in command for command in seen_commands)
+    assert any("--model" not in command for command in seen_commands)
+
+
+def test_codex_bootstrap_fallback_persists_runner_model_as_inherit(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.setattr(
+        manager,
+        "_probe_codex_runner",
+        lambda config: {
+            "ok": True,
+            "summary": "Codex startup probe completed with Codex default model fallback.",
+            "warnings": ["Configured Codex model `gpt-5.4` is not available."],
+            "errors": [],
+            "details": {
+                "binary": "codex",
+                "resolved_binary": "/tmp/fake-codex",
+                "model": "gpt-5.4",
+                "requested_model": "gpt-5.4",
+                "effective_model": "inherit",
+                "model_fallback_attempted": True,
+                "model_fallback_used": True,
+                "approval_policy": "on-request",
+                "sandbox_mode": "workspace-write",
+                "reasoning_effort": "xhigh",
+                "checked_at": "2026-03-22T00:00:00+00:00",
+                "exit_code": 0,
+                "stdout_excerpt": '{"item":{"text":"HELLO"}}',
+                "stderr_excerpt": "",
+            },
+            "guidance": [
+                "DeepScientist switched the Codex runner model to `inherit` so future runs keep using the current Codex default model."
+            ],
+        },
+    )
+
+    result = manager.probe_codex_bootstrap(persist=True)
+    runners = manager.load_named_normalized("runners")
+
+    assert result["ok"] is True
+    assert runners["codex"]["model"] == "inherit"
 
 
 def test_codex_bootstrap_probe_persists_success_state(monkeypatch, temp_home: Path) -> None:

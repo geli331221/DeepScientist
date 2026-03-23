@@ -1044,7 +1044,7 @@ Preferred artifact choices:
 - use `approval` when the user explicitly confirms a submission-critical choice
 - use `artifact.submit_paper_outline(mode='candidate'|'select'|'revise', ...)` for the real outline lifecycle instead of leaving outline choice only in prose
 - use `artifact.submit_paper_bundle(...)` before leaving the writing stage when the draft, plan, references, and packaging evidence are durable enough
-- continue writing on the parent idea branch/worktree after analysis slices finish; do not open a separate paper-only branch unless a recovery situation explicitly requires it
+- continue writing on the dedicated `paper/*` branch/worktree after analysis slices finish; treat the parent run or idea branch as the evidence source, not the drafting surface
 
 Keep each writing artifact tightly linked to evidence paths.
 

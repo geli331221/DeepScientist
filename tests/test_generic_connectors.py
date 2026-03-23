@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from deepscientist.config import ConfigManager
+from deepscientist.connector.lingzhu_support import lingzhu_passive_conversation_id
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.quest import QuestService
@@ -24,15 +25,19 @@ def _enable_system_connectors(home: Path, *names: str) -> None:
     write_yaml(manager.path_for("config"), config)
 
 
-def test_default_connectors_include_feishu_whatsapp_and_lingzhu(temp_home: Path) -> None:
+def test_default_connectors_include_weixin_feishu_whatsapp_and_lingzhu(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
     connectors = manager.load_named("connectors")
 
+    assert "weixin" in connectors
     assert "whatsapp" in connectors
     assert "feishu" in connectors
     assert "lingzhu" in connectors
+    assert connectors["weixin"]["transport"] == "ilink_long_poll"
+    assert connectors["weixin"]["base_url"] == "https://ilinkai.weixin.qq.com"
+    assert connectors["weixin"]["cdn_base_url"] == "https://novac2c.cdn.weixin.qq.com/c2c"
     assert connectors["whatsapp"]["dm_policy"] == "pairing"
     assert connectors["whatsapp"]["transport"] == "local_session"
     assert connectors["feishu"]["transport"] == "long_connection"
@@ -44,7 +49,7 @@ def test_default_connectors_include_feishu_whatsapp_and_lingzhu(temp_home: Path)
     assert connectors["lingzhu"]["visible_progress_heartbeat_sec"] == 10
 
 
-@pytest.mark.parametrize("connector_name", ["telegram", "discord", "slack", "feishu", "whatsapp"])
+@pytest.mark.parametrize("connector_name", ["weixin", "telegram", "discord", "slack", "feishu", "whatsapp"])
 def test_generic_new_command_replies_with_bound_quest_and_restore_hint(
     temp_home: Path,
     connector_name: str,
@@ -92,7 +97,7 @@ def test_generic_new_command_replies_with_bound_quest_and_restore_hint(
     assert history[-1]["source"] == f"{connector_name}:direct:{connector_name}-user-1"
 
 
-@pytest.mark.parametrize("connector_name", ["telegram", "discord", "slack", "feishu", "whatsapp"])
+@pytest.mark.parametrize("connector_name", ["weixin", "telegram", "discord", "slack", "feishu", "whatsapp"])
 def test_generic_new_command_uses_previous_bound_quest_id_in_restore_hint(
     temp_home: Path,
     connector_name: str,
@@ -248,16 +253,15 @@ def test_system_disabled_connectors_are_hidden_from_statuses_and_availability(te
 
     assert "qq" in connector_statuses
     assert "telegram" not in connector_statuses
-    assert "lingzhu" not in connector_statuses
+    assert "lingzhu" in connector_statuses
     assert "telegram" not in availability_names
-    assert "lingzhu" not in availability_names
+    assert "lingzhu" in availability_names
 
 
 def test_handlers_connectors_include_lingzhu_snapshot(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
-    _enable_system_connectors(temp_home, "lingzhu")
     connectors = manager.load_named("connectors")
     connectors["lingzhu"]["enabled"] = True
     connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
@@ -277,6 +281,138 @@ def test_handlers_connectors_include_lingzhu_snapshot(temp_home: Path, monkeypat
     assert connector_statuses["lingzhu"]["connection_state"] == "reachable"
     assert connector_statuses["lingzhu"]["auth_state"] == "ready"
     assert connector_statuses["lingzhu"]["details"]["public_endpoint_url"] == "http://203.0.113.10:18789/metis/agent/api/sse"
+
+
+def test_lingzhu_snapshot_exposes_passive_target_after_auth_ak_save(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    connectors["lingzhu"]["agent_id"] = "DeepScientist"
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    save_result = manager.save_named_payload("connectors", connectors)
+    assert save_result["ok"] is True
+    app = DaemonApp(temp_home)
+    monkeypatch.setattr(
+        app.config_manager,
+        "_probe_lingzhu_health",
+        lambda config, timeout=1.5: {"ok": True, "status": "ok", "payload": {"status": "ok"}},
+    )
+
+    connector_statuses = {item["name"]: item for item in app.handlers.connectors()}
+    passive_conversation_id = lingzhu_passive_conversation_id(connectors["lingzhu"])
+    lingzhu_status = connector_statuses["lingzhu"]
+
+    assert lingzhu_status["target_count"] >= 1
+    assert lingzhu_status["default_target"]["conversation_id"] == passive_conversation_id
+    assert any(item["conversation_id"] == passive_conversation_id for item in lingzhu_status["discovered_targets"])
+
+
+def test_lingzhu_passive_binding_routes_real_messages_without_creating_extra_targets(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    connectors["lingzhu"]["agent_id"] = "DeepScientist"
+    connectors["lingzhu"]["public_base_url"] = "http://example.com:20999"
+    save_result = manager.save_named_payload("connectors", connectors)
+    assert save_result["ok"] is True
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("lingzhu passive binding quest")
+    quest_id = quest["quest_id"]
+    passive_conversation_id = lingzhu_passive_conversation_id(connectors["lingzhu"])
+
+    bound = app.update_quest_binding(quest_id, passive_conversation_id, force=True)
+    assert isinstance(bound, dict)
+    assert bound["ok"] is True
+
+    response = app.handle_connector_inbound(
+        "lingzhu",
+        {
+            "chat_type": "direct",
+            "sender_id": "glass-passive-1",
+            "sender_name": "Rokid Glasses",
+            "text": "状态",
+        },
+    )
+
+    assert response["accepted"] is True
+    assert response["reply"]["payload"]["quest_id"] == quest_id
+    bindings = app.list_connector_bindings("lingzhu")
+    assert bindings == [
+        {
+            "conversation_id": passive_conversation_id,
+            "profile_id": None,
+            "profile_label": None,
+            "quest_id": quest_id,
+            "updated_at": bindings[0]["updated_at"],
+        }
+    ]
+    assert app.quest_service.binding_sources(quest_id) == ["local:default", passive_conversation_id]
+
+
+def test_lingzhu_connector_inbound_is_allowed_by_default(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    response = app.handle_connector_inbound(
+        "lingzhu",
+        {
+            "chat_type": "direct",
+            "sender_id": "glass-1",
+            "sender_name": "Rokid Glasses",
+            "text": "/new capture notes from the device",
+        },
+    )
+
+    assert response["accepted"] is True
+    assert response["normalized"]["conversation_id"] == "lingzhu:direct:glass-1"
+    assert response["reply"]["payload"]["quest_id"]
+
+
+def test_lingzhu_connector_inbound_is_allowed_even_if_system_gate_is_false(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    runtime_connectors = config.get("connectors") if isinstance(config.get("connectors"), dict) else {}
+    system_enabled = runtime_connectors.get("system_enabled") if isinstance(runtime_connectors.get("system_enabled"), dict) else {}
+    system_enabled["lingzhu"] = False
+    runtime_connectors["system_enabled"] = system_enabled
+    config["connectors"] = runtime_connectors
+    write_yaml(manager.path_for("config"), config)
+
+    connectors = manager.load_named("connectors")
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    response = app.handle_connector_inbound(
+        "lingzhu",
+        {
+            "chat_type": "direct",
+            "sender_id": "glass-1",
+            "sender_name": "Rokid Glasses",
+            "text": "/new continue from glasses",
+        },
+    )
+
+    assert response["accepted"] is True
+    assert response["normalized"]["conversation_id"] == "lingzhu:direct:glass-1"
 
 
 def test_generic_connector_persists_multiple_recent_conversations_for_latest_quest_rebind(temp_home: Path) -> None:
@@ -313,8 +449,12 @@ def test_generic_connector_persists_multiple_recent_conversations_for_latest_que
     latest = app.create_quest(goal="whatsapp newest quest with many users", source="web")
     latest_id = latest["quest_id"]
     bindings = app.list_connector_bindings("whatsapp")
-    assert any(item["conversation_id"] == "whatsapp:direct:+15550001111" and item["quest_id"] == latest_id for item in bindings)
-    assert any(item["conversation_id"] == "whatsapp:direct:+15550002222" and item["quest_id"] == latest_id for item in bindings)
+    rebound = [
+        item["conversation_id"]
+        for item in bindings
+        if item["quest_id"] == latest_id
+    ]
+    assert rebound == ["whatsapp:direct:+15550002222"]
 
 
 def test_create_quest_with_preferred_connector_conversation_binds_only_selected_target(temp_home: Path) -> None:
@@ -367,7 +507,7 @@ def test_create_quest_with_preferred_connector_conversation_binds_only_selected_
     assert "whatsapp:direct:+15550001111" not in latest_sources
 
 
-def test_create_quest_with_requested_connector_bindings_binds_selected_targets_per_connector(temp_home: Path) -> None:
+def test_create_quest_with_requested_connector_bindings_rejects_multiple_external_targets(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
@@ -375,53 +515,18 @@ def test_create_quest_with_requested_connector_bindings_binds_selected_targets_p
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["telegram"]["enabled"] = True
-    connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
-    connectors["telegram"]["auto_bind_dm_to_active_quest"] = True
     write_yaml(manager.path_for("connectors"), connectors)
-
-    older_quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create(
-        "multi connector requested binding"
-    )
     app = DaemonApp(temp_home)
 
-    whatsapp_reply = app.handle_connector_inbound(
-        "whatsapp",
-        {
-            "chat_type": "direct",
-            "sender_id": "+15550003333",
-            "sender_name": "Carol",
-            "text": "Keep this conversation available.",
-        },
-    )
-    assert whatsapp_reply["accepted"] is True
-    assert older_quest["quest_id"] in whatsapp_reply["reply"]["payload"]["text"]
-
-    telegram_reply = app.handle_connector_inbound(
-        "telegram",
-        {
-            "chat_type": "direct",
-            "sender_id": "tg-user-1",
-            "sender_name": "Dave",
-            "text": "Keep this conversation available.",
-        },
-    )
-    assert telegram_reply["accepted"] is True
-    assert older_quest["quest_id"] in telegram_reply["reply"]["payload"]["text"]
-
-    latest = app.create_quest(
-        goal="requested connector bindings quest",
-        source="web",
-        requested_connector_bindings=[
-            {"connector": "whatsapp", "conversation_id": "whatsapp:direct:+15550003333"},
-            {"connector": "telegram", "conversation_id": "telegram:direct:tg-user-1"},
-        ],
-    )
-    latest_sources = app.quest_service.binding_sources(latest["quest_id"])
-    older_sources = app.quest_service.binding_sources(older_quest["quest_id"])
-    assert "whatsapp:direct:+15550003333" in latest_sources
-    assert "telegram:direct:tg-user-1" in latest_sources
-    assert "whatsapp:direct:+15550003333" not in older_sources
-    assert "telegram:direct:tg-user-1" not in older_sources
+    with pytest.raises(ValueError, match="A quest may bind at most one external connector target."):
+        app.create_quest(
+            goal="requested connector bindings quest",
+            source="web",
+            requested_connector_bindings=[
+                {"connector": "whatsapp", "conversation_id": "whatsapp:direct:+15550003333"},
+                {"connector": "telegram", "conversation_id": "telegram:direct:tg-user-1"},
+            ],
+        )
 
 
 def test_generic_connector_supports_terminal_command_and_restore(temp_home: Path) -> None:

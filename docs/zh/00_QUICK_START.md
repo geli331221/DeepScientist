@@ -1,67 +1,155 @@
 # 00 快速开始：启动 DeepScientist 并运行第一个项目
 
-这份文档面向第一次使用 DeepScientist 的用户，目标是让你从安装直接走到“成功启动并跑起来一个项目”。
+可以把 DeepScientist 理解成一个长期运行在本地的科研工作区：你定义任务，准备资源，它持续往前推进，并把文件、分支、笔记和结果都留在你的机器上。
+
+这份文档面向第一次使用 DeepScientist 的用户，写法尽量偏“照着做”：一步做什么、为什么这么做，都讲清楚。
 
 你只需要完成四步：
 
 1. 安装 DeepScientist
 2. 启动本地运行时
-3. 在首页创建一个新项目
-4. 从项目列表重新打开已有任务
+3. 打开首页
+4. 用一个真实示例创建第一个项目
 
 本文中的截图直接使用当前在线页面 `deepscientist.cc:20999` 作为示例。你本地运行后的页面 `127.0.0.1:20999` 通常会与它保持一致或非常接近。
 
-## 1. 安装
+当前平台支持：DeepScientist 目前仅支持 Linux 和 macOS，当前版本暂不支持 Windows。
 
-全局安装 DeepScientist：
+## 安全建议：先隔离，再启动
+
+在你第一次启动 DeepScientist 前，强烈建议先接受下面这条原则：
+
+- 如果环境允许，优先在 Docker 容器、虚拟机或同等级隔离环境中运行
+- 一律使用非 root 账号启动，不要直接用 root 运行
+- 不要优先拿生产机、重要服务器或带敏感数据的宿主机做首次试跑
+- 不要轻易把 `0.0.0.0` 端口、反向代理地址或网页入口公开分享给别人
+- 如果后面会绑定微信、QQ、Lingzhu 等 connector，更不要把这个站点当成可随意共享的网页
+
+原因很直接：DeepScientist 具备自动执行命令、改文件、安装依赖、发送外部消息和读写项目数据的能力。一旦权限给大了，或者站点被错误暴露，后果可能包括服务器损坏、数据丢失、密钥泄露、connector 被盗用，甚至研究结果被错误伪造却未被及时发现。
+
+完整说明见：
+
+- [11 协议与风险说明](./11_LICENSE_AND_RISK.md)
+
+## 0. 开始前先准备什么
+
+建议你先准备好这些：
+
+- 安装好 Node.js `>=18.18` 和 npm `>=9`；请优先参考官方页面安装：https://nodejs.org/en/download
+- 一个已经完成认证的 Codex CLI；第一次运行 `ds` 前，请先执行 `codex --login`（或 `codex`）并完成认证
+- 模型或 API 凭证
+- 如果任务比较重，准备好 GPU 或远程服务器
+- 如果你要长期运行，优先准备 Docker 或其他隔离环境，并准备一个非 root 账号专门启动 DeepScientist
+- 如果要从已有工作开始，准备好代码仓库、数据或 baseline 链接
+- 如果你希望在网页之外接收进展，也可以先配置一个 connector，例如 QQ
+
+如果你还在选择合适的 Coding Plan / 订阅方案，可以先看这些官方页面：
+
+- ChatGPT 定价：https://openai.com/chatgpt/pricing/
+- ChatGPT Plus 帮助页：https://help.openai.com/en/articles/6950777-what-is-chatgpt-plus%3F.eps
+- MiniMax Coding Plan：https://platform.minimaxi.com/docs/guides/pricing-codingplan
+- GLM Coding Plan：https://docs.bigmodel.cn/cn/coding-plan/overview
+- 阿里百炼 Coding Plan：https://help.aliyun.com/zh/model-studio/coding-plan
+- 火山引擎 Ark Coding Plan：https://www.volcengine.com/docs/82379/1925115?lang=zh
+
+## 1. 先安装 Node.js，再安装 DeepScientist
+
+DeepScientist 目前仅支持 Linux 和 macOS。
+
+在安装 DeepScientist 本身之前，请先从 Node.js 官方页面安装 Node.js：
+
+https://nodejs.org/en/download
+
+请确保你的环境满足：
+
+- Node.js `>=18.18`
+- npm `>=9`
+
+运行：
 
 ```bash
 npm install -g @researai/deepscientist
 ```
 
-如果你后续还要在本地编译论文 PDF，也可以顺手安装轻量级 LaTeX 运行时：
+这一步会把 `ds` 命令安装到你的机器上。
+
+DeepScientist 依赖一个可用的 Codex CLI。npm 包会尽量把随包的 Codex 依赖一起装好，但如果安装完成后 `codex` 仍然不可用，请显式修复：
+
+```bash
+npm install -g @openai/codex
+```
+
+如果你后面还要在本地编译论文 PDF，可以再运行：
 
 ```bash
 ds latex install-runtime
 ```
 
-## 2. 启动 DeepScientist
+这一步会安装一个轻量级 TinyTeX 运行时。
 
-启动本地 daemon 与 Web 工作区：
+## 2. 第一次运行 `ds` 前，先完成 Codex 配置
+
+运行：
+
+```bash
+codex --login
+```
+
+如果你的 Codex CLI 版本没有 `--login`，就运行：
+
+```bash
+codex
+```
+
+然后在交互式界面里完成认证。
+
+接着先做一次环境确认：
+
+```bash
+ds doctor
+```
+
+DeepScientist 会在启动前强制做一次真实的 Codex hello 探测。当前版本里，这个探测会先尝试 `~/DeepScientist/config/runners.yaml` 中配置的 runner 模型，默认是 `gpt-5.4`。如果你的 Codex 账号或本地 CLI 配置不能访问它，DeepScientist 会自动回退到当前 Codex 默认模型，并把后续运行持久化为 `model: inherit`。
+
+## 3. 启动本地运行时
+
+运行：
 
 ```bash
 ds
 ```
 
-DeepScientist 现在使用 `uv` 管理锁定的本地 Python 运行时。如果你已经激活了 conda 环境，且其中的 Python 满足 `>=3.11`，`ds` 会优先使用它；否则 `uv` 会自动在 DeepScientist home 下准备受管 Python。
+这会启动本地 daemon 和网页工作区。
 
-如果你的机器上还没有 `uv`，第一次运行 `ds` 时会自动在本地安装一份。npm 包本身也已经带上了 Codex CLI 依赖，因此不需要再单独执行 `npm install -g @openai/codex`；但你后续仍然可能需要手动运行一次 `codex` 完成登录。
+再次强调：
 
-默认情况下，DeepScientist home 在 macOS / Linux 上是 `~/DeepScientist`，在 Windows 上是 `%USERPROFILE%\\DeepScientist`。如果你希望放到别的路径，可以直接使用 `ds --home <path>`。
+- 推荐优先在 Docker 或其他隔离环境里运行
+- 推荐始终使用非 root 用户启动
+- 如果只是第一次试跑，不要先把服务暴露到公网
 
-如果你希望直接把“当前工作目录”作为 DeepScientist home，可以运行：
+DeepScientist 现在使用 `uv` 管理锁定的本地 Python 运行时。如果你已经激活了 conda 环境，且其中的 Python 满足 `>=3.11`，`ds` 会优先使用它；否则会自动在 DeepScientist home 下准备一份受管 Python。
+
+默认情况下，DeepScientist home 是：
+
+- macOS / Linux：`~/DeepScientist`
+
+如果你希望把 DeepScientist home 放到当前目录下，可以运行：
 
 ```bash
 ds --here
 ```
 
-它等价于 `ds --home "$PWD"`。
+它等价于 `ds --home "$PWD/DeepScientist"`。
 
-如果你是从源码仓库安装，并希望把默认的 CLI 安装基路径改到别的位置，可以使用：
-
-```bash
-bash install.sh --dir /data/DeepScientist
-```
-
-如果你已经有一个正在使用的 DeepScientist home，之后又想安全迁移到别的路径，可以使用：
+如果你想换一个端口，可以运行：
 
 ```bash
-ds migrate /data/DeepScientist
+ds --port 21000
 ```
 
-`ds migrate` 会先显示当前绝对路径和目标绝对路径，停止托管 daemon，要求二次确认，校验复制结果，并在确认迁移成功后才删除旧路径。
+这会把网页界面放到 `21000` 端口。
 
-默认情况下，网页会运行在：
+默认情况下，本地网页地址是：
 
 ```text
 http://127.0.0.1:20999
@@ -69,84 +157,194 @@ http://127.0.0.1:20999
 
 如果浏览器没有自动打开，就手动访问这个地址。
 
-如果你想改端口，可以直接运行：
-
-```bash
-ds --port 21000
-```
-
-如果你希望绑定到所有网卡地址：
-
-```bash
-ds --host 0.0.0.0 --port 21000
-```
-
-## 3. 认识首页
+## 4. 打开首页
 
 启动完成后，先打开 `/` 首页。
 
 ![DeepScientist 首页](../images/quickstart/00-home.png)
 
-首页故意做得很简单，核心只有两个按钮：
+运行 12 小时之后，你的项目首页更可能像下面这样：
 
-- `Start Research`：创建一个新的项目，并立刻启动新的研究任务
-- `打开项目`：打开已有项目列表，重新进入已经存在的任务
+![DeepScientist 项目首页](../assets/branding/projects.png)
 
-如果你是第一次使用，建议先从 `Start Research` 开始。
+你最先会看到两个入口：
 
-## 4. 使用 Start Research 创建新项目
+- `Start Research`：创建一个新项目，并立刻开始新的研究任务
+- `Open Project`：重新打开已有项目
 
-点击 `Start Research`，会弹出启动表单。
+第一次使用时，先点击 `Start Research`。
+
+## 5. 用一个真实示例创建第一个项目
+
+这里使用一个经过整理的真实示例，它来自 quest `025` 的启动输入，但我把它改得更正式、更适合公开文档。
+
+这个示例项目的目标是：
+
+- 复现官方的 Mandela-Effect baseline
+- 保持原论文的任务定义与评测协议
+- 研究在混合正确 / 错误社会信号下，如何实现更强的 truth-preserving collaboration
+- 使用两个本地推理端点提高吞吐量
+
+点击 `Start Research`，打开启动弹窗。
 
 ![Start Research 弹窗](../images/quickstart/01-start-research.png)
 
-这个弹窗不只是“新建任务”，它还会为 agent 写入本次研究的启动合同。
+### 5.1 先填简短字段
 
-最重要的字段是：
+先用这些值：
 
-- `项目 ID`：通常会自动按顺序生成，例如 `00`、`01`、`02`
-- `Primary request` / 研究目标：你真正希望 agent 完成的科研任务
-- `Reuse Baseline`：可选；如果你要复用已有 baseline，就在这里选择
-- `Research intensity`：本次研究的投入强度
-- `Decision mode`：`Autonomous` 表示除非真的需要审批，否则 agent 默认持续自主推进
-- `Research paper`：是否要求本次任务同时产出论文式结果
-- `Language`：本次运行希望使用的用户侧语言
+| 界面字段 | 示例值 | 为什么这样填 |
+|---|---|---|
+| `Project title` | `Mandela-Effect Reproduction and Truth-Preserving Collaboration` | 标题简短、明确，后面在项目列表里也好认 |
+| `Project ID` | 留空，或填 `025` | 想自动编号就留空；只有你明确想固定项目编号时才手动填写 |
+| `Connector delivery` | 第一次建议用 `Local only` | 先把本地工作流跑通；如果你已经配好了 QQ 等 connector，也可以在这里直接绑定一个目标 |
 
-第一次测试时，建议你这样填写：
+### 5.2 填写主研究请求
 
-- 写一个清晰、单一的研究问题
-- 如果还没有 baseline，就先留空
-- 强度选择 `Balanced` 或 `Sprint`
-- 决策模式保持 `Autonomous`
+把下面这段内容粘贴到 `Primary research request`：
 
-最后点击弹窗底部的 `Start Research` 即可正式启动。
+```text
+Please reproduce the official Mandela-Effect repository and paper, then study how to improve truth-preserving collaboration under mixed correct and incorrect social signals.
 
-## 5. 使用“打开项目”重新进入已有任务
+The core research question is: how can a multi-agent system remain factually robust under social influence while still learning from correct peers?
 
-点击首页上的 `打开项目`，会打开项目列表。
+Keep the task definition and evaluation protocol aligned with the original work. Focus on prompt-based or system-level methods that improve truth preservation without simply refusing all social information.
+```
+
+这段写法是比较好的，因为它同时做了四件事：
+
+- 明确告诉系统要复现什么 baseline
+- 把核心研究问题单独说清楚
+- 说明边界：不要换任务，不要乱改评测协议
+- 给出研究方向提示，但没有把实现路线写死
+
+### 5.3 填写 baseline 和参考资料
+
+如果这是你第一次跑这个任务，`Reusable baseline` 先留空。
+
+如果你已经把官方 baseline 导入过 registry，那么这里就直接选择它。这样 DeepScientist 会优先 attach 这个可信 baseline，而不是重新从零恢复。
+
+把下面内容粘贴到 `Baseline links`：
+
+```text
+https://github.com/bluedream02/Mandela-Effect
+```
+
+把下面内容粘贴到 `Reference papers / repos`：
+
+```text
+https://arxiv.org/abs/2602.00428
+```
+
+这两项的作用很直接：
+
+- `Baseline links` 告诉系统 baseline 从哪里恢复
+- `Reference papers / repos` 告诉系统哪篇论文和哪套方法定义了这个任务
+
+### 5.4 填写运行约束
+
+把下面内容粘贴到 `Runtime constraints`：
+
+```text
+- Keep the task definition and evaluation protocol aligned with the official baseline unless a change is explicitly justified.
+- Use two OpenAI-compatible local inference endpoints for throughput:
+  - `http://127.0.0.1:8004/v1`
+  - `http://127.0.0.1:8008/v1`
+- Use API key `1234` and model `/model/gpt-oss-120b` on both endpoints.
+- Keep generation settings close to the baseline unless a justified adjustment is required.
+- Implement asynchronous execution, automatic retry on request failure, and resumable scripts.
+- Split requests across both endpoints so throughput stays high without overloading the service.
+- Record failed, degraded, or inconclusive runs honestly instead of hiding them.
+```
+
+这个字段非常重要。很多用户会把运行细节散落在聊天里，但真正稳妥的做法，是把它们写成项目的硬约束。
+
+### 5.5 填写研究目标
+
+把下面内容粘贴到 `Goals`：
+
+```text
+1. Restore and verify the official Mandela-Effect baseline as a trustworthy starting point.
+2. Measure key metrics and failure modes on the designated `gpt-oss-120b` setup.
+3. Propose at least one literature-grounded direction for stronger truth-preserving collaboration.
+4. Produce experiment and analysis artifacts that are strong enough to support paper writing.
+```
+
+这里不要写成“做出一个很厉害的方法”这种空话。更好的写法是把“第一轮真正要交付什么”拆成几条明确结果。
+
+### 5.6 选择策略字段
+
+这个例子里，建议你使用下面这些选项：
+
+| 界面字段 | 示例值 | 实际含义 |
+|---|---|---|
+| `Research paper` | `On` | 这个项目默认继续推进到分析和论文式产出 |
+| `Research intensity` | `Balanced` | 先把 baseline 立稳，再测试一个合理方向 |
+| `Decision mode` | `Autonomous` | 普通路线选择默认自己推进，除非真的需要用户决定 |
+| `Launch mode` | `Standard` | 按默认科研主线启动 |
+| `Language` | `English` | 默认用英文组织 kickoff prompt 和用户侧产物 |
+
+你在前端里选完这些以后，系统还会自动推导出一组真正提交的合同字段：
+
+- `scope = baseline_plus_direction`
+- 如果没有选 `Reusable baseline`，则 `baseline_mode = restore_from_url`
+- 如果选了 `Reusable baseline`，则 `baseline_mode = existing`
+- `resource_policy = balanced`
+- `time_budget_hours = 24`
+- `git_strategy = semantic_head_plus_controlled_integration`
+
+这就是为什么 `Start Research` 不只是“新建项目表单”。它还会写入一份结构化的 `startup_contract`，后续 prompt builder 会持续读取它。
+
+### 5.7 检查预览，然后创建项目
+
+点击创建之前，先检查右侧的 prompt 预览。
+
+至少确认这几件事都在里面：
+
+- 研究请求是否清楚
+- baseline 链接是否对
+- 参考论文是否对
+- 运行约束是否完整
+- 目标是否写成了可执行结果
+- 决策模式和交付模式是否符合预期
+
+确认没问题之后，点击 `Create project`。
+
+这时前端实际会提交：
+
+- 一段编译好的 kickoff prompt
+- 一个可选的 `requested_baseline_ref`
+- 一个可选的 `requested_connector_bindings`
+- 一份结构化的 `startup_contract`
+
+如果你想进一步理解这些字段的真实提交结构，请继续看 [02 Start Research 参考](./02_START_RESEARCH_GUIDE.md)。
+
+## 6. 重新打开已有项目
+
+点击首页上的 `Open Project`，会打开项目列表。
 
 ![打开项目 弹窗](../images/quickstart/02-list-quest.png)
 
-这个列表适合以下场景：
+你可以用它来：
 
-- 重新进入一个已经在运行中的项目
-- 打开一个以前已经完成或已经创建过的项目
-- 按项目标题或项目 ID 搜索目标任务
+- 重新进入一个正在运行中的项目
+- 重新打开以前完成过的项目
+- 按项目标题或项目 ID 搜索目标项目
 
-列表中的每一行都对应一个项目仓库。点击对应卡片即可进入该项目的工作区。
+列表中的每一行都对应一个项目仓库。点击卡片即可进入。
 
-## 6. 打开项目之后会发生什么
+## 7. 打开项目之后会发生什么
 
-创建或打开项目后，DeepScientist 会进入这个项目的工作区页面。
+创建或打开项目后，DeepScientist 会进入这个项目的工作区。
 
-通常你会在里面做这些事情：
+通常第一轮你会做这些事情：
 
-1. 在 Copilot / Studio 中观察 agent 的实时进展
-2. 查看文件、笔记和生成出来的 artifact
-3. 在 Canvas 中理解当前项目的图结构与阶段进展
-4. 只有在你明确想中断时，才主动停止任务
+1. 在 Copilot / Studio 里看进展
+2. 检查文件、笔记和 artifact
+3. 在 Canvas 中理解项目图结构与阶段进展
+4. 除非你明确想打断，否则先让任务继续推进
 
-## 7. 常用运行命令
+## 8. 常用运行命令
 
 查看当前状态：
 
@@ -154,21 +352,64 @@ ds --host 0.0.0.0 --port 21000
 ds --status
 ```
 
-停止当前本地 daemon：
+这会告诉你本地运行时是否正常在线。
+
+停止 daemon：
 
 ```bash
 ds --stop
 ```
 
-如果启动异常或环境有问题，运行诊断：
+这会停止当前本地 DeepScientist daemon。
+
+运行诊断：
 
 ```bash
 ds doctor
 ```
 
-## 8. 下一步该看什么
+当你怀疑是启动、配置、runner 或 connector 出问题时，用这个命令排查。
 
-- [01 设置参考：如何配置 DeepScientist](./01_SETTINGS_REFERENCE.md)
-- [02 Start Research 参考：如何填写科研启动合同](./02_START_RESEARCH_GUIDE.md)
-- [03 QQ 连接器指南：如何用 QQ 与 DeepScientist 沟通](./03_QQ_CONNECTOR_GUIDE.md)
-- [05 TUI 使用指南：如何使用终端界面](./05_TUI_GUIDE.md)
+## 9. 下一步该看什么
+
+- [文档总览](./README.md)
+- [12 引导式工作流教程](./12_GUIDED_WORKFLOW_TOUR.md)
+- [02 Start Research 参考](./02_START_RESEARCH_GUIDE.md)
+- [13 核心架构说明](./13_CORE_ARCHITECTURE_GUIDE.md)
+- [01 设置参考](./01_SETTINGS_REFERENCE.md)
+- [03 QQ 连接器指南](./03_QQ_CONNECTOR_GUIDE.md)
+- [05 TUI 使用指南](./05_TUI_GUIDE.md)
+
+## 10. 简短 FAQ
+
+### 如果我是从源码仓库安装，想装到另一个目录里，怎么做？
+
+运行：
+
+```bash
+bash install.sh --dir /data/DeepScientist
+```
+
+这个命令适合你在源码 checkout 里工作，但希望把 DeepScientist 安装到另一个独立运行目录时使用。
+
+### 如果我已经有一个 DeepScientist home，想安全迁移到新路径，怎么做？
+
+运行：
+
+```bash
+ds migrate /data/DeepScientist
+```
+
+这是迁移现有 DeepScientist home 的正式方式。
+
+### 如果我确实需要监听所有网卡，怎么启动？
+
+运行：
+
+```bash
+ds --host 0.0.0.0 --port 21000
+```
+
+只有在你确实需要外部访问时才这样做，而且建议先看风险说明：
+
+- [11 协议与风险说明](./11_LICENSE_AND_RISK.md)

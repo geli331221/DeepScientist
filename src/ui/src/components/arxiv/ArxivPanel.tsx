@@ -2,8 +2,13 @@
 
 import * as React from "react";
 import { BookOpen, ChevronDown, Loader2, Search } from "lucide-react";
+import { isDemoProjectId } from "@/demo/projects";
 import { acquireSocket } from "@/lib/plugins/notebook/lib/socket";
 import { useArxivStore } from "@/lib/stores/arxiv-store";
+import { useFileTreeStore } from "@/lib/stores/file-tree";
+import { useTabsStore } from "@/lib/stores/tabs";
+import { BUILTIN_PLUGINS } from "@/lib/types/plugin";
+import { useToast } from "@/components/ui/toast";
 import { ArxivImportBar } from "./ArxivImportBar";
 import { ArxivList, type ArxivSortKey } from "./ArxivList";
 import { cn } from "@/lib/utils";
@@ -42,6 +47,7 @@ async function emitWithAck(
 }
 
 function useArxivSocket(projectId: string, readOnly: boolean) {
+  const isDemoProject = isDemoProjectId(projectId);
   const refresh = useArxivStore((s) => s.refresh);
   const markImported = useArxivStore((s) => s.markImported);
   const markFailed = useArxivStore((s) => s.markFailed);
@@ -68,6 +74,7 @@ function useArxivSocket(projectId: string, readOnly: boolean) {
 
   React.useEffect(() => {
     if (!projectId) return;
+    if (isDemoProject) return;
     const { socket, release } = acquireSocket();
 
     const handleImported = (payload: any) => {
@@ -135,7 +142,7 @@ function useArxivSocket(projectId: string, readOnly: boolean) {
       socket.emit("space:leave", { spaceType: "workspace", spaceId: projectId });
       release();
     };
-  }, [projectId, readOnly, refresh, markImported, markFailed, setBatchProgress]);
+  }, [isDemoProject, projectId, readOnly, refresh, markImported, markFailed, setBatchProgress]);
 }
 
 export function ArxivPanel({
@@ -147,11 +154,18 @@ export function ArxivPanel({
   onCollapsedChange,
   variant = "full",
 }: ArxivPanelProps) {
+  const { addToast } = useToast();
   const load = useArxivStore((s) => s.load);
   const isLoading = useArxivStore((s) => s.isLoading);
   const items = useArxivStore((s) => s.items);
   const importingIds = useArxivStore((s) => s.importingIds);
   const errors = useArxivStore((s) => s.errors);
+  const pendingOpenArxivId = useArxivStore((s) => s.pendingOpenArxivId);
+  const setPendingOpenArxivId = useArxivStore((s) => s.setPendingOpenArxivId);
+  const setSelectedPaperKey = useArxivStore((s) => s.setSelectedPaperKey);
+  const clearSelection = useFileTreeStore((s) => s.clearSelection);
+  const setFocused = useFileTreeStore((s) => s.setFocused);
+  const openTab = useTabsStore((s) => s.openTab);
   const contentId = React.useId();
   const searchSectionId = React.useId();
   const isCollapsed = Boolean(collapsible && collapsed);
@@ -159,10 +173,86 @@ export function ArxivPanel({
   const [query, setQuery] = React.useState("");
   const [isSearchOpen, setIsSearchOpen] = React.useState(false);
   const [sortKey, setSortKey] = React.useState<ArxivSortKey>("recent");
+  const itemStatusRef = React.useRef<Map<string, string>>(new Map());
+  const itemHydratedRef = React.useRef(false);
 
   React.useEffect(() => {
     void load(projectId);
   }, [projectId, load]);
+
+  React.useEffect(() => {
+    if (!projectId || !pendingOpenArxivId) return;
+    const paper = items.find((item) => item.arxivId === pendingOpenArxivId);
+    if (!paper || paper.status !== "ready" || !paper.fileId) return;
+    setSelectedPaperKey(paper.fileId || paper.arxivId);
+    clearSelection();
+    setFocused(null);
+    openTab({
+      pluginId: BUILTIN_PLUGINS.PDF_VIEWER,
+      context: {
+        type: "file",
+        resourceId: paper.fileId,
+        resourceName: paper.displayName || paper.arxivId,
+        customData: {
+          projectId,
+          arxiv: { ...paper },
+        },
+      },
+      title: paper.displayName || paper.arxivId,
+    });
+    setPendingOpenArxivId(null);
+  }, [
+    clearSelection,
+    items,
+    openTab,
+    pendingOpenArxivId,
+    projectId,
+    setFocused,
+    setPendingOpenArxivId,
+    setSelectedPaperKey,
+  ]);
+
+  React.useEffect(() => {
+    const nextMap = new Map(items.map((item) => [item.arxivId, `${item.status}:${item.metadataStatus || "none"}`]));
+    if (!itemHydratedRef.current) {
+      itemStatusRef.current = nextMap;
+      itemHydratedRef.current = true;
+      return;
+    }
+    for (const item of items) {
+      const previous = itemStatusRef.current.get(item.arxivId) || "";
+      const current = `${item.status}:${item.metadataStatus || "none"}`;
+      if (previous === current) {
+        continue;
+      }
+      if (!previous.startsWith("ready:") && item.status === "ready") {
+        addToast({
+          type: "success",
+          title: "arXiv PDF ready",
+          description: item.title || item.arxivId,
+          duration: 2200,
+        });
+      } else if (
+        item.metadataStatus === "pending" &&
+        !previous.endsWith(":pending")
+      ) {
+        addToast({
+          type: "warning",
+          title: "Metadata pending",
+          description: item.absUrl || `https://arxiv.org/abs/${item.arxivId}`,
+          duration: 2600,
+        });
+      } else if (!previous.startsWith("failed:") && item.status === "failed") {
+        addToast({
+          type: "error",
+          title: "arXiv import failed",
+          description: item.title || item.arxivId,
+          duration: 2600,
+        });
+      }
+    }
+    itemStatusRef.current = nextMap;
+  }, [addToast, items]);
 
   useArxivSocket(projectId, readOnly);
 
@@ -205,8 +295,9 @@ export function ArxivPanel({
 
   return (
     <div
+      data-onboarding-id="workspace-arxiv"
       className={cn(
-        "flex flex-col border-t border-[var(--border-dark)] px-3",
+        "flex min-w-0 flex-col overflow-hidden border-t border-[var(--border-dark)] px-3",
         isCollapsed ? "py-1.5" : "py-2",
         className
       )}
@@ -230,7 +321,7 @@ export function ArxivPanel({
           {isCompact ? (
             <>
               <ArxivImportBar disabled={readOnly} />
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 overflow-hidden">
                 <ArxivList
                   projectId={projectId}
                   readOnly={readOnly}
@@ -299,7 +390,7 @@ export function ArxivPanel({
                 </div>
                 <ArxivImportBar disabled={readOnly} />
               </div>
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 overflow-hidden">
                 <ArxivList
                   projectId={projectId}
                   readOnly={readOnly}

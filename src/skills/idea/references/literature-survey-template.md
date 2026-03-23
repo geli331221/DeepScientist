@@ -11,6 +11,11 @@ The purpose is to make related-work coverage durable, searchable, and reusable s
 - baseline id or method name
 - task / dataset / metric contract
 - current investigation target
+- survey minimum gate status
+  - related and usable papers found so far
+  - how many are direct task-modeling papers
+  - how many are adjacent but translatable papers
+  - whether the hard floor of at least `5` and usually `5-10` usable papers has been satisfied
 - why the survey is being run now
   - first idea build
   - idea refinement
@@ -66,9 +71,11 @@ For each paper, include:
 - year
 - identifier or arXiv id
 - URL
+- standard citation string or citation key
 - short mechanism summary
 - task / dataset / metric overlap
 - what it means for the current idea
+- whether it is directly usable for the current idea, only a novelty check, or only an adjacent inspiration
 - status:
   - `new_this_pass`
   - `known_before`
@@ -80,6 +87,7 @@ Recommended columns:
 
 - identifier
 - year
+- standard citation key
 - mechanism overlap
 - task overlap
 - dataset overlap
@@ -129,3 +137,19 @@ Close with:
 - the rejected ideas and why
 - what still needs more search before selection
 - whether the stage is ready for `idea` selection, more `scout`, or a user decision
+
+## 10. Citation-ready shortlist for the selected idea
+
+Before the final idea draft is written, extract the papers that materially support the winning idea.
+
+For each such paper, include:
+
+- standard citation entry in the format you plan to use later
+- what part of the idea it supports:
+  - problem motivation
+  - closest prior work
+  - mechanism inspiration
+  - claim boundary
+- whether it must appear inline in the idea draft or only in the references section
+
+The final selected idea should not be written or submitted until this shortlist is ready.

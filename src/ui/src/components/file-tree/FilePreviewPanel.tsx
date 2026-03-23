@@ -105,6 +105,7 @@ export function FilePreviewPanel({ projectId, className }: FilePreviewPanelProps
   const highlightTimerRef = React.useRef<number | null>(null)
 
   const isPdf = isPdfFile(selectedFile)
+  const isArxivPdf = isPdf && filePath.startsWith('literature/arxiv/pdfs/')
   const isImage = selectedFile ? isImageMime(selectedFile.mimeType) : false
   const isText = isTextFile(selectedFile)
   const canAnalyze = Boolean(selectedFile) && (isText || isPdf)
@@ -266,6 +267,15 @@ export function FilePreviewPanel({ projectId, className }: FilePreviewPanelProps
 
   const handleExtractPdfText = React.useCallback(async () => {
     if (!selectedFile) return
+    if (isArxivPdf) {
+      addToast({
+        type: 'info',
+        title: 'Unavailable for arXiv PDFs',
+        description: 'Use the arXiv panel summary or open the arXiv page directly.',
+        duration: 1800,
+      })
+      return
+    }
     try {
       const response = await apiClient.get(`/api/v1/pdf/markdown/${selectedFile.id}`, {
         responseType: 'text',
@@ -301,15 +311,24 @@ export function FilePreviewPanel({ projectId, className }: FilePreviewPanelProps
         duration: 1600,
       })
     }
-  }, [addToast, selectedFile])
+  }, [addToast, isArxivPdf, selectedFile])
 
   const handleOpenMarkdown = React.useCallback(() => {
     if (!selectedFile) return
+    if (isArxivPdf) {
+      addToast({
+        type: 'info',
+        title: 'Unavailable for arXiv PDFs',
+        description: 'Use the arXiv panel summary or open the arXiv page directly.',
+        duration: 1800,
+      })
+      return
+    }
     void openFileInTab(selectedFile, {
       pluginId: BUILTIN_PLUGINS.PDF_MARKDOWN,
       customData: { projectId },
     })
-  }, [openFileInTab, projectId, selectedFile])
+  }, [addToast, isArxivPdf, openFileInTab, projectId, selectedFile])
 
   const runAction = React.useCallback(
     (action: FileActionKey) => {
@@ -480,22 +499,28 @@ export function FilePreviewPanel({ projectId, className }: FilePreviewPanelProps
                     <span>{formatFileSize(selectedFile.size) || 'n/a'}</span>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={handleExtractPdfText}
-                    className="rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 text-[11px] text-[var(--text-on-dark)] hover:bg-white/[0.12]"
-                  >
-                    Extract text
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleOpenMarkdown}
-                    className="rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 text-[11px] text-[var(--text-on-dark)] hover:bg-white/[0.12]"
-                  >
-                    To Markdown
-                  </button>
-                </div>
+                {isArxivPdf ? (
+                  <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] text-white/70">
+                    This PDF is managed by the arXiv library. Use the arXiv panel to view summary metadata or open the paper directly on arXiv.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleExtractPdfText}
+                      className="rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 text-[11px] text-[var(--text-on-dark)] hover:bg-white/[0.12]"
+                    >
+                      Extract text
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOpenMarkdown}
+                      className="rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 text-[11px] text-[var(--text-on-dark)] hover:bg-white/[0.12]"
+                    >
+                      To Markdown
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-xs text-[var(--text-muted-on-dark)]">

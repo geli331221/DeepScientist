@@ -13,7 +13,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n/useI18n";
-import { PDF_WORKER_SRC, PDF_CMAP_URL } from "../lib/pdf-utils";
+import { PDF_CMAP_PACKED, PDF_CMAP_URL, PDF_WORKER_SRC } from "../lib/pdf-utils";
 
 // ============================================================
 // Types
@@ -181,13 +181,17 @@ export function PdfLoader({
       const loadingTask = pdfjsLib.getDocument({
         url,
         httpHeaders,
-        cMapUrl: PDF_CMAP_URL,
-        cMapPacked: true,
         // Enable range requests for large files
         disableRange: false,
         disableStream: false,
         // Enable auto-fetch for better performance
         disableAutoFetch: false,
+        ...(PDF_CMAP_URL
+          ? {
+              cMapUrl: PDF_CMAP_URL,
+              cMapPacked: PDF_CMAP_PACKED,
+            }
+          : {}),
       });
 
       // Load document

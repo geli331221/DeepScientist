@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useToast } from '@/components/ui/toast'
-import { getBashLogs, getBashSession } from '@/lib/api/bash'
+import { getBashLogs, getBashSession, listBashSessions } from '@/lib/api/bash'
 import { useBashLogStream } from '@/lib/hooks/useBashLogStream'
 import { useBashSessionStream } from '@/lib/hooks/useBashSessionStream'
 import { useBashSessionResolver } from '@/lib/hooks/useBashSessionResolver'
@@ -32,6 +32,72 @@ const BASH_RESULT_KEYS = [
   'exit_code',
   'stop_reason',
 ]
+
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+const asString = (value: unknown) => (typeof value === 'string' ? value : '')
+
+const asStringArray = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : []
+
+const compactCommand = (value: unknown, maxLength = 140) => {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return 'bash_exec'
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
+}
+
+const formatBashHistoryLine = (sessionLike: Record<string, unknown>) => {
+  const timestamp =
+    asString(sessionLike.started_at) ||
+    asString(sessionLike.updated_at) ||
+    asString(sessionLike.finished_at) ||
+    'unknown-time'
+  const bashId = asString(sessionLike.bash_id) || asString(sessionLike.id) || 'unknown-id'
+  return `${timestamp} | ${compactCommand(sessionLike.command)} | ${bashId}`
+}
+
+const buildSyntheticBashCommand = (mode: string, bashId: string) => {
+  const parts = [`mode='${mode || 'detach'}'`]
+  if (bashId && mode !== 'list' && mode !== 'history') {
+    parts.push(`id='${bashId}'`)
+  }
+  return `bash_exec(${parts.join(', ')})`
+}
+
+const formatStructuredBashOutput = (mode: string, payload: Record<string, unknown>) => {
+  if (mode === 'history') {
+    const lines = asStringArray(payload.lines)
+    if (lines.length > 0) return lines.join('\n')
+    const historyLines = asStringArray(payload.history_lines)
+    if (historyLines.length > 0) return historyLines.join('\n')
+    const items = Array.isArray(payload.items)
+      ? payload.items.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
+      : []
+    if (items.length > 0) return items.map((item) => formatBashHistoryLine(item)).join('\n')
+    if (payload.count === 0) return 'No bash session history recorded for this quest yet.'
+    return ''
+  }
+  if (mode === 'list') {
+    const historyLines = asStringArray(payload.history_lines)
+    if (historyLines.length > 0) return historyLines.join('\n')
+    const items = Array.isArray(payload.items)
+      ? payload.items.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
+      : []
+    if (items.length > 0) return items.map((item) => formatBashHistoryLine(item)).join('\n')
+    if (payload.count === 0) return 'No bash sessions recorded for this quest yet.'
+    return ''
+  }
+  return ''
+}
 
 const parseJsonRecord = (value: string): Record<string, unknown> | null => {
   const trimmed = value.trim()
@@ -189,7 +255,7 @@ function BashSessionListView({ toolContent, projectId, sessionId, panelMode, chr
       status: 'called',
       args: {
         command: selectedSession.command,
-        workdir: selectedSession.workdir,
+        workdir: selectedSession.cwd ?? selectedSession.workdir,
       },
       content: {
         result: {
@@ -254,7 +320,7 @@ function BashSessionListView({ toolContent, projectId, sessionId, panelMode, chr
                   {session.command}
                 </div>
                 <div className="mt-1 break-words text-[11px] text-[var(--text-tertiary)] [overflow-wrap:anywhere]">
-                  {session.workdir || '~'}
+                  {session.cwd || session.workdir || '~'}
                   {progressPercent != null ? ` · ${progressPercent.toFixed(0)}%` : ''}
                   {progressLabel ? ` · ${progressLabel}` : ''}
                   {progressMeta ? ` · ${progressMeta}` : ''}
@@ -288,7 +354,7 @@ export function McpBashExecView(props: ToolViewProps) {
   const rawMode = typeof args?.mode === 'string' ? args.mode : 'detach'
   const normalizedMode = rawMode.trim().toLowerCase()
   const mode = normalizedMode === 'create' ? 'await' : normalizedMode || 'detach'
-  if (mode === 'list') {
+  if (mode === 'list' && !props.preferBashTerminalRender) {
     return <BashSessionListView {...props} />
   }
   return <McpBashExecSessionView {...props} />
@@ -300,17 +366,11 @@ function McpBashExecSessionView({
   sessionId,
   panelMode,
   chrome = 'default',
+  preferBashTerminalRender = false,
   onLiveStateChange,
 }: ToolViewProps) {
   const { addToast } = useToast()
   const args = toolContent.args as Record<string, unknown>
-  const command =
-    typeof args?.command === 'string'
-      ? args.command
-      : typeof args?.cmd === 'string'
-        ? args.cmd
-        : ''
-  const workdir = typeof args?.workdir === 'string' ? args.workdir : ''
   const rawMode = typeof args?.mode === 'string' ? args.mode : 'detach'
   const normalizedMode = rawMode.trim().toLowerCase()
   const mode = normalizedMode === 'create' ? 'await' : normalizedMode || 'detach'
@@ -319,29 +379,37 @@ function McpBashExecSessionView({
   const chatScrollState = useChatScrollState()
   const isChatNearBottom = chatScrollState?.isNearBottom ?? true
   const content = toolContent.content as Record<string, unknown> | undefined
+  const contentRecord = asRecord(content)
+  const nestedResult = asRecord(contentRecord?.result)
+  const metadata = asRecord(toolContent.metadata)
+  const requestedCommand =
+    typeof args?.command === 'string'
+      ? args.command
+      : typeof args?.cmd === 'string'
+        ? args.cmd
+        : ''
+  const requestedWorkdir = typeof args?.workdir === 'string' ? args.workdir : ''
+  const requestedBashId = typeof args?.id === 'string' ? args.id : ''
   const resultPayload = useMemo(() => extractBashResult(content), [content])
   const resultBashId =
-    typeof resultPayload.bash_id === 'string'
-      ? resultPayload.bash_id
-      : typeof (resultPayload as Record<string, unknown>).bashId === 'string'
-        ? String((resultPayload as Record<string, unknown>).bashId)
-        : typeof (content?.result as Record<string, unknown>)?.bash_id === 'string'
-          ? String((content?.result as Record<string, unknown>)?.bash_id)
-          : typeof (content?.result as Record<string, unknown>)?.bashId === 'string'
-            ? String((content?.result as Record<string, unknown>)?.bashId)
-            : typeof (content as Record<string, unknown>)?.bash_id === 'string'
-              ? String((content as Record<string, unknown>)?.bash_id)
-              : typeof (content as Record<string, unknown>)?.bashId === 'string'
-                ? String((content as Record<string, unknown>)?.bashId)
-                : ''
+    asString(resultPayload.bash_id) ||
+    asString((resultPayload as Record<string, unknown>).bashId) ||
+    asString(nestedResult?.bash_id) ||
+    asString(nestedResult?.bashId) ||
+    asString(contentRecord?.bash_id) ||
+    asString(contentRecord?.bashId)
+  const metadataBashId = asString(metadata?.bash_id) || asString(metadata?.bashId)
+  const resultCommand = asString(resultPayload.command)
+  const resultWorkdir = asString(resultPayload.workdir)
+  const resultCwd = asString(resultPayload.cwd)
   const resultLog =
-    typeof resultPayload.log === 'string'
-      ? resultPayload.log
-      : typeof (resultPayload as Record<string, unknown>).output === 'string'
-        ? String((resultPayload as Record<string, unknown>).output)
-        : typeof (resultPayload as Record<string, unknown>).content === 'string'
-          ? String((resultPayload as Record<string, unknown>).content)
-          : ''
+    asString(resultPayload.log) ||
+    asString((resultPayload as Record<string, unknown>).output) ||
+    asString((resultPayload as Record<string, unknown>).content)
+  const structuredHistoryOutput = useMemo(
+    () => formatStructuredBashOutput(mode, resultPayload),
+    [mode, resultPayload]
+  )
   const initialStatus =
     typeof resultPayload.status === 'string' ? (resultPayload.status as BashSessionStatus) : null
   const initialExitCode =
@@ -349,15 +417,18 @@ function McpBashExecSessionView({
   const initialStopReason =
     typeof resultPayload.stop_reason === 'string' ? resultPayload.stop_reason : ''
   const agentInstanceId =
-    typeof toolContent.metadata?.agent_instance_id === 'string'
-      ? toolContent.metadata?.agent_instance_id
+    typeof metadata?.agent_instance_id === 'string'
+      ? metadata.agent_instance_id
       : null
-  const agentId =
-    typeof toolContent.metadata?.agent_id === 'string' ? toolContent.metadata?.agent_id : null
+  const agentId = typeof metadata?.agent_id === 'string' ? metadata.agent_id : null
   const metadataSessionId =
-    typeof toolContent.metadata?.session_id === 'string' ? toolContent.metadata?.session_id : null
+    typeof metadata?.session_id === 'string' ? metadata.session_id : null
+  const metadataCommand = asString(metadata?.command) || asString(metadata?.bash_command)
+  const metadataWorkdir = asString(metadata?.workdir) || asString(metadata?.bash_workdir)
+  const metadataCwd = asString(metadata?.cwd)
   const isCalling = toolContent.status === 'calling'
-  const keepResolverAlive = isCalling || (mode === 'detach' && !resultBashId)
+  const keepResolverAlive =
+    isCalling || (mode === 'detach' && !resultBashId && !metadataBashId && !requestedBashId)
   const resolverSessionId = sessionId || metadataSessionId
 
   const resolver = useBashSessionResolver({
@@ -365,18 +436,43 @@ function McpBashExecSessionView({
     chatSessionId: resolverSessionId,
     agentInstanceId,
     agentId,
-    command,
-    workdir,
+    command: requestedCommand,
+    workdir: requestedWorkdir,
     timestamp: toolContent.timestamp,
     enabled: Boolean(
-      projectId && !resultBashId && mode !== 'read' && mode !== 'kill'
+      projectId &&
+        !resultBashId &&
+        !metadataBashId &&
+        !requestedBashId &&
+        mode !== 'read' &&
+        mode !== 'kill' &&
+        mode !== 'list' &&
+        mode !== 'history'
     ),
     keepAlive: keepResolverAlive,
     preferChatSession: false,
   })
 
-  const bashId = resultBashId || resolver.bashId || ''
-  const showTerminal = mode !== 'read' && mode !== 'kill'
+  const bashId = resultBashId || metadataBashId || requestedBashId || resolver.bashId || ''
+  const [sessionDetails, setSessionDetails] = useState<BashSession | null>(null)
+  const [fallbackOutput, setFallbackOutput] = useState('')
+  const resolvedSession = sessionDetails ?? resolver.session ?? null
+  const command =
+    requestedCommand ||
+    resultCommand ||
+    metadataCommand ||
+    resolvedSession?.command ||
+    buildSyntheticBashCommand(mode, bashId)
+  const workdir =
+    requestedWorkdir ||
+    resultWorkdir ||
+    resultCwd ||
+    metadataWorkdir ||
+    metadataCwd ||
+    resolvedSession?.cwd ||
+    resolvedSession?.workdir ||
+    ''
+  const showTerminal = mode !== 'kill' && (preferBashTerminalRender || mode !== 'read')
   const [sessionStatus, setSessionStatus] = useState<BashSessionStatus | null>(initialStatus)
   const [exitCode, setExitCode] = useState<number | null>(initialExitCode)
   const [stopReason, setStopReason] = useState<string>(initialStopReason)
@@ -445,14 +541,52 @@ function McpBashExecSessionView({
   }, [initialExitCode, initialStatus, initialStopReason, bashId])
 
   useEffect(() => {
-    if (resolver.session?.status) {
-      setSessionStatus(resolver.session.status as BashSessionStatus)
+    setSessionDetails(null)
+    if (!projectId || !bashId || mode === 'list' || mode === 'history') return
+    let active = true
+    const fetchSession = async () => {
+      try {
+        const session = await getBashSession(projectId, bashId)
+        if (!active) return
+        setSessionDetails(session)
+        if (session.status) {
+          setSessionStatus(session.status as BashSessionStatus)
+        }
+        if (typeof session.exit_code === 'number') {
+          setExitCode(session.exit_code)
+        }
+        if (typeof session.stop_reason === 'string') {
+          setStopReason(session.stop_reason)
+        }
+        if (session.last_progress) {
+          setProgress(session.last_progress)
+        }
+      } catch {
+        // Ignore session fetch errors; old events can still render from local payloads.
+      }
     }
-  }, [resolver.session?.status])
+    void fetchSession()
+    return () => {
+      active = false
+    }
+  }, [bashId, mode, projectId])
+
+  useEffect(() => {
+    if (resolvedSession?.status) {
+      setSessionStatus(resolvedSession.status as BashSessionStatus)
+    }
+    if (typeof resolvedSession?.exit_code === 'number') {
+      setExitCode(resolvedSession.exit_code)
+    }
+    if (typeof resolvedSession?.stop_reason === 'string') {
+      setStopReason(resolvedSession.stop_reason)
+    }
+  }, [resolvedSession?.exit_code, resolvedSession?.status, resolvedSession?.stop_reason])
 
   useEffect(() => {
     setProgress(null)
-  }, [bashId])
+    setFallbackOutput('')
+  }, [bashId, mode])
 
   useEffect(() => {
     onLiveStateChange?.({
@@ -470,32 +604,43 @@ function McpBashExecSessionView({
       'last_progress' in resultPayload
         ? (resultPayload as { last_progress?: BashProgress | null }).last_progress ?? null
         : null
-    const fromResolver = resolver.session?.last_progress ?? null
-    const nextProgress = fromResult ?? fromResolver
+    const nextProgress = fromResult ?? resolvedSession?.last_progress ?? null
     if (nextProgress) {
       setProgress(nextProgress)
     }
-  }, [resolver.session?.last_progress, resultPayload])
+  }, [resolvedSession?.last_progress, resultPayload])
 
   useEffect(() => {
-    if (!projectId || !bashId) return
+    if (!projectId || !preferBashTerminalRender) return
+    if (mode !== 'list' && mode !== 'history') return
+    if (structuredHistoryOutput) return
     let active = true
-    const fetchProgress = async () => {
+    const fetchListing = async () => {
       try {
-        const session = await getBashSession(projectId, bashId)
+        const sessions = await listBashSessions(projectId, {
+          limit: mode === 'history' ? 200 : 80,
+        })
         if (!active) return
-        if (session.last_progress) {
-          setProgress(session.last_progress)
+        if (sessions.length === 0) {
+          setFallbackOutput(
+            mode === 'history'
+              ? 'No bash session history recorded for this quest yet.'
+              : 'No bash sessions recorded for this quest yet.'
+          )
+          return
         }
+        setFallbackOutput(sessions.map((session) => formatBashHistoryLine(session as Record<string, unknown>)).join('\n'))
       } catch {
-        // Ignore progress fetch errors.
+        if (active) {
+          setFallbackOutput('')
+        }
       }
     }
-    void fetchProgress()
+    void fetchListing()
     return () => {
       active = false
     }
-  }, [bashId, projectId])
+  }, [mode, preferBashTerminalRender, projectId, structuredHistoryOutput])
 
   useEffect(() => {
     resetTerminal()
@@ -608,11 +753,14 @@ function McpBashExecSessionView({
   )
 
   const loadInitialLogs = useCallback(async () => {
-    if (!projectId || !bashId || mode === 'read' || mode === 'kill') return
+    if (!projectId || !bashId || mode === 'kill' || mode === 'list' || mode === 'history') return
     initialLoadAttemptedRef.current = true
     setLoadingLogs(true)
     try {
-      const { entries, meta } = await getBashLogs(projectId, bashId, { limit: 200, order: 'desc' })
+      const { entries, meta } = await getBashLogs(projectId, bashId, {
+        limit: mode === 'read' ? 1000 : 200,
+        order: 'desc',
+      })
       const ordered = [...entries].reverse()
       setLogMeta(meta)
       if (meta?.tailStartSeq && meta.tailStartSeq > 1) {
@@ -671,21 +819,50 @@ function McpBashExecSessionView({
   ])
 
   useEffect(() => {
-    if (mode !== 'read' || !resultLog) return
+    const staticTerminalOutput =
+      mode === 'read'
+        ? filterMarkerLines(resultLog)
+        : mode === 'list' || mode === 'history'
+          ? structuredHistoryOutput || fallbackOutput
+          : ''
+    if (!staticTerminalOutput) return
     if (!showTerminal) return
     resetTerminal()
     const prompt = resolvePromptLabel(workdir)
     appendToTerminal(`${prompt}% ${command || 'bash_exec'}\n\n`)
-    appendToTerminal(resultLog)
-  }, [appendToTerminal, command, mode, resetTerminal, resultLog, showTerminal, workdir])
+    appendToTerminal(staticTerminalOutput)
+    if (!staticTerminalOutput.endsWith('\n')) {
+      appendToTerminal('\n')
+    }
+  }, [
+    appendToTerminal,
+    command,
+    fallbackOutput,
+    mode,
+    resetTerminal,
+    resultLog,
+    showTerminal,
+    structuredHistoryOutput,
+    workdir,
+  ])
 
-  const streamEnabled = Boolean(projectId && bashId && showTerminal)
+  const sanitizedLog = filterMarkerLines(resultLog)
+  const streamEnabled = Boolean(
+    projectId &&
+      bashId &&
+      showTerminal &&
+      mode !== 'read' &&
+      mode !== 'kill' &&
+      mode !== 'list' &&
+      mode !== 'history'
+  )
   useEffect(() => {
-    if (!projectId || !bashId || mode === 'read' || mode === 'kill') return
+    if (!projectId || !bashId || mode === 'kill' || mode === 'list' || mode === 'history') return
+    if (mode === 'read' && sanitizedLog) return
     if (streamEnabled || loadingLogs) return
     if (lastSeq != null) return
     void loadInitialLogs()
-  }, [bashId, lastSeq, loadInitialLogs, loadingLogs, mode, projectId, streamEnabled])
+  }, [bashId, lastSeq, loadInitialLogs, loadingLogs, mode, projectId, sanitizedLog, streamEnabled])
   const streamConnection = useBashLogStream({
     projectId,
     bashId,
@@ -731,7 +908,7 @@ function McpBashExecSessionView({
     },
   })
   useEffect(() => {
-    if (!streamEnabled || !bashId || mode === 'read' || mode === 'kill') return
+    if (!streamEnabled || !bashId) return
     if (hasSnapshotRef.current || initialLoadAttemptedRef.current) return
     if (snapshotTimerRef.current != null) return
     snapshotTimerRef.current = window.setTimeout(() => {
@@ -746,14 +923,14 @@ function McpBashExecSessionView({
         snapshotTimerRef.current = null
       }
     }
-  }, [bashId, loadInitialLogs, mode, streamEnabled])
+  }, [bashId, loadInitialLogs, streamEnabled])
   useEffect(() => {
-    if (!streamEnabled || !bashId || mode === 'read' || mode === 'kill') return
+    if (!streamEnabled || !bashId) return
     if (hasSnapshotRef.current || initialLoadAttemptedRef.current) return
     if (streamConnection.status !== 'error') return
     initialLoadAttemptedRef.current = true
     void loadInitialLogs()
-  }, [bashId, loadInitialLogs, mode, streamConnection.status, streamEnabled])
+  }, [bashId, loadInitialLogs, streamConnection.status, streamEnabled])
 
   const statusLabel = sessionStatus ?? (toolContent.status === 'calling' ? 'running' : 'completed')
   const exitCodeLabel = exitCode == null ? '' : ` | exit ${exitCode}`
@@ -770,6 +947,8 @@ function McpBashExecSessionView({
     !bashId &&
     mode !== 'read' &&
     mode !== 'kill' &&
+    mode !== 'list' &&
+    mode !== 'history' &&
     !keepResolverAlive &&
     (resolver.exhausted || Boolean(resolver.error))
   const inlineExit = exitCode == null ? '' : `exit ${exitCode}`
@@ -787,7 +966,6 @@ function McpBashExecSessionView({
       : 'flex-1 min-h-[220px]'
     : ''
   const promptLabel = resolvePromptLabel(workdir)
-  const sanitizedLog = filterMarkerLines(resultLog)
   const readOutput = sanitizedLog
     ? `${promptLabel}% ${command || 'bash_exec'}\n\n${sanitizedLog}`
     : `${promptLabel}% ${command || 'bash_exec'}\n\nNo log output returned.`
@@ -865,13 +1043,13 @@ function McpBashExecSessionView({
               terminalClearRef.current = handlers.clear
               terminalScrollRef.current = handlers.scrollToBottom
               terminalIsAtBottomRef.current = handlers.isScrolledToBottom ?? (() => true)
-            terminalReadyRef.current = true
-            if (pendingOutputRef.current) {
-              const shouldAutoScroll = isInline
-                ? isChatNearBottomRef.current
-                : (handlers.isScrolledToBottom?.() ?? true)
-              handlers.write(pendingOutputRef.current, () => {
-                if (shouldAutoScroll) {
+              terminalReadyRef.current = true
+              if (pendingOutputRef.current) {
+                const shouldAutoScroll = isInline
+                  ? isChatNearBottomRef.current
+                  : (handlers.isScrolledToBottom?.() ?? true)
+                handlers.write(pendingOutputRef.current, () => {
+                  if (shouldAutoScroll) {
                     handlers.scrollToBottom()
                   }
                 })

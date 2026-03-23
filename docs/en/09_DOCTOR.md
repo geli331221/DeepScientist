@@ -10,21 +10,35 @@ Use `ds doctor` when DeepScientist does not start cleanly after installation.
    npm install -g @researai/deepscientist
    ```
 
-2. Try to start DeepScientist:
+2. Make sure Codex is installed and authenticated:
+
+   ```bash
+   codex --login
+   ```
+
+   If `codex` is missing, repair it explicitly with:
+
+   ```bash
+   npm install -g @openai/codex
+   ```
+
+   If your Codex CLI version does not expose `--login`, run `codex` and finish the interactive setup there.
+
+3. Try to start DeepScientist:
 
    ```bash
    ds
    ```
 
-3. If startup fails or looks unhealthy, run:
+4. If startup fails or looks unhealthy, run:
 
    ```bash
    ds doctor
    ```
 
-4. Read the checks from top to bottom and fix the failed items first.
+5. Read the checks from top to bottom and fix the failed items first.
 
-5. Run `ds doctor` again until all checks are healthy, then run `ds`.
+6. Run `ds doctor` again until all checks are healthy, then run `ds`.
 
 ## What `ds doctor` checks
 
@@ -49,15 +63,37 @@ Run the package install again so the bundled Codex dependency is present:
 npm install -g @researai/deepscientist
 ```
 
+If `codex` is still unavailable afterward, install it explicitly:
+
+```bash
+npm install -g @openai/codex
+```
+
 ### Codex is installed but not logged in
 
 Run:
 
 ```bash
-codex
+codex --login
 ```
 
+If your Codex CLI version does not expose `--login`, run `codex` and finish the interactive setup there.
+
 Finish login once, then rerun `ds doctor`.
+
+### The configured Codex model is unavailable
+
+DeepScientist blocks startup until Codex passes a real startup hello probe. In the current release, that probe first uses the runner model configured in:
+
+```text
+~/DeepScientist/config/runners.yaml
+```
+
+The default is `gpt-5.4`. If your Codex account or CLI config cannot access that model, DeepScientist now retries with the current Codex default model and persists `model: inherit` for future runs. If you still want a specific model, edit the runner config manually and rerun:
+
+```bash
+ds doctor
+```
 
 ### `uv` is missing
 

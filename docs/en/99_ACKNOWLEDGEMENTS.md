@@ -13,8 +13,11 @@ We especially thank the following projects for their ideas, research direction, 
 - EvoScientist
 - Orchestra-Research
 - Orchestra-Research/AI-Research-SKILLs
+- Overleaf / overleaf/overleaf
+- Monaco Editor / microsoft/monaco-editor
+- Novel / steven-tey/novel
 
-These projects have been important references for thinking about automated research, open-ended exploration, evolutionary search, experiment organization, and long-horizon research agents.
+These projects have been important references for thinking about automated research, open-ended exploration, evolutionary search, experiment organization, long-horizon research agents, collaborative LaTeX editing workflows, browser-based code editing experiences, and rich notebook-style writing interactions.
 
 ## Personal acknowledgements
 

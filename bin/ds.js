@@ -81,7 +81,7 @@ Launcher flags:
   --stop                Stop the managed daemon
   --restart             Restart the managed daemon
   --home <path>         Use a custom DeepScientist home
-  --here                Use the current working directory as DeepScientist home
+  --here                Create/use ./DeepScientist under the current working directory as home
   --proxy <url>         Use an outbound HTTP/WS proxy for npm and Python runtime traffic
   --yolo                Run Codex in YOLO mode: approval_policy=never and sandbox_mode=danger-full-access
   --quest-id <id>       Open the TUI on one quest directly
@@ -467,7 +467,7 @@ function resolveHome(args) {
     return path.resolve(args[index + 1]);
   }
   if (args.includes('--here')) {
-    return process.cwd();
+    return path.join(process.cwd(), 'DeepScientist');
   }
   if (process.env.DEEPSCIENTIST_HOME) {
     return path.resolve(process.env.DEEPSCIENTIST_HOME);
@@ -564,6 +564,12 @@ function colorize(code, text) {
   return `${code}${text}\u001B[0m`;
 }
 
+const OFFICIAL_REPOSITORY_URL = 'https://github.com/ResearAI/DeepScientist';
+
+function officialRepositoryLine() {
+  return `Official open-source repository: ${hyperlink(OFFICIAL_REPOSITORY_URL, OFFICIAL_REPOSITORY_URL)}`;
+}
+
 function renderBrandArtwork() {
   const brandPath = path.join(repoRoot, 'assets', 'branding', 'deepscientist-mark.png');
   const chafa = resolveExecutableOnPath('chafa');
@@ -638,10 +644,10 @@ function renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo }) {
 
   console.log(colorize('\u001B[1;38;5;39m', 'Quick Flags'));
   renderKeyValueRows([
-    ['ds --yolo --port 20999 --here', 'Start in the current directory with YOLO Codex access'],
+    ['ds --yolo --port 20999 --here', 'Start in ./DeepScientist under the current directory with YOLO Codex access'],
     ['ds --port 21000', 'Change the web port'],
     ['ds --host 0.0.0.0 --port 21000', 'Bind on all interfaces'],
-    ['ds --here', 'Use the current directory as home'],
+    ['ds --here', 'Use ./DeepScientist under the current directory as home'],
     ['ds --both', 'Start web + TUI together'],
     ['ds --tui', 'Start the terminal workspace only'],
     ['ds --no-browser', 'Do not auto-open the browser'],
@@ -668,7 +674,10 @@ function printLaunchCard({
   const width = Math.max(72, Math.min(process.stdout.columns || 100, 108));
   const divider = colorize('\u001B[38;5;245m', '─'.repeat(Math.max(36, width - 6)));
   const title = colorize('\u001B[1;38;5;39m', 'ResearAI');
-  const subtitle = colorize('\u001B[38;5;110m', 'Local-first research operating system');
+  const subtitleLines = [
+    colorize('\u001B[38;5;110m', 'DeepScientist is not just a fully open-source autonomous scientific discovery system.'),
+    colorize('\u001B[38;5;110m', 'It is also a research map that keeps growing from every round.'),
+  ];
   const versionLine = colorize('\u001B[38;5;245m', `Version ${packageJson.version}`);
   const urlLabel = colorize('\u001B[1;38;5;45m', hyperlink(url, url));
   const workspaceMode =
@@ -711,7 +720,9 @@ function printLaunchCard({
   for (const line of wordmark) {
     console.log(centerText(colorize('\u001B[1;38;5;39m', line), width));
   }
-  console.log(centerText(subtitle, width));
+  for (const line of subtitleLines) {
+    console.log(centerText(line, width));
+  }
   console.log('');
   console.log(centerText(divider, width));
   console.log(centerText(colorize('\u001B[1m', workspaceMode), width));
@@ -721,6 +732,7 @@ function printLaunchCard({
   console.log(centerText(nextStep, width));
   console.log(centerText('Run ds --stop to stop the managed daemon.', width));
   console.log(centerText('Need to move this installation later? Use ds migrate /new/path.', width));
+  console.log(centerText(officialRepositoryLine(), width));
   console.log('');
   renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo });
 }
@@ -802,8 +814,8 @@ function writeCodexPreflightReport(home, probe) {
     <main class="page">
       <section class="panel">
         <h1>DeepScientist could not start Codex</h1>
-        <p class="meta">DeepScientist blocked startup because the Codex hello probe did not pass. Please run <code>codex</code>, complete login, then launch <code>ds</code> again.</p>
-        <p class="meta">DeepScientist 启动前进行了 Codex 可用性检查，但 hello 探测没有通过。请先手动运行 <code>codex</code> 并完成登录，再重新启动 <code>ds</code>。</p>
+        <p class="meta">DeepScientist blocked startup because the Codex hello probe did not pass. In most installs, <code>npm install -g @researai/deepscientist</code> also installs the bundled Codex dependency. If <code>codex</code> is still missing, repair it with <code>npm install -g @openai/codex</code>. Then run <code>codex --login</code> (or <code>codex</code>), finish authentication, run <code>ds doctor</code>, and launch <code>ds</code> again.</p>
+        <p class="meta">DeepScientist 启动前进行了 Codex 可用性检查，但 hello 探测没有通过。正常情况下，<code>npm install -g @researai/deepscientist</code> 也会一并安装 bundled Codex 依赖；如果此后 <code>codex</code> 仍不可用，请再执行 <code>npm install -g @openai/codex</code> 修复。然后运行 <code>codex --login</code>（或 <code>codex</code>）完成认证，再执行 <code>ds doctor</code>，最后重新启动 <code>ds</code>。</p>
 
         <h2>Summary</h2>
         <p>${escapeHtml(probe?.summary || 'Codex startup probe failed.')}</p>
@@ -1002,6 +1014,8 @@ Flags:
   --force-check      Ignore the cached version probe
   --remind-later     Defer prompts for the current published version
   --skip-version     Skip reminders for the current published version
+
+Without \`--yes\`, \`ds update\` will ask for a \`Y/N\` confirmation on interactive terminals.
 `);
 }
 
@@ -2769,6 +2783,33 @@ function printUpdateStatus(status, { compact = false } = {}) {
   }
 }
 
+function parseYesNoAnswer(answer, defaultValue = false) {
+  const normalized = String(answer || '').trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (normalized === 'y' || normalized === 'yes') {
+    return true;
+  }
+  if (normalized === 'n' || normalized === 'no') {
+    return false;
+  }
+  return defaultValue;
+}
+
+async function promptYesNo(question, { defaultValue = false } = {}) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return defaultValue;
+  }
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(parseYesNoAnswer(answer, defaultValue));
+    });
+  });
+}
+
 function spawnDetachedNode(args, options = {}) {
   const out = options.logPath ? fs.openSync(options.logPath, 'a') : 'ignore';
   const child = spawn(process.execPath, args, {
@@ -2965,6 +3006,50 @@ async function performSelfUpdate(home, options = {}) {
   };
 }
 
+function normalizeLauncherRelaunchArgs(rawArgs, home) {
+  const normalized = [];
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const arg = rawArgs[index];
+    if (arg === '--home') {
+      index += 1;
+      continue;
+    }
+    if (arg === '--here' || arg === '--skip-update-check') {
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return ['--home', home, ...normalized, '--skip-update-check'];
+}
+
+function relaunchLauncherAfterUpdate(rawArgs, home) {
+  const launcherPath = resolveLauncherPath();
+  if (!launcherPath) {
+    return {
+      ok: false,
+      exitCode: 1,
+      message: 'DeepScientist was updated, but the new launcher path could not be resolved for relaunch.',
+    };
+  }
+  const result = spawnSync(process.execPath, [launcherPath, ...normalizeLauncherRelaunchArgs(rawArgs, home)], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) {
+    return {
+      ok: false,
+      exitCode: 1,
+      message: result.error.message,
+    };
+  }
+  return {
+    ok: true,
+    exitCode: result.status ?? 0,
+    message: null,
+  };
+}
+
 async function maybeHandleStartupUpdate(home, rawArgs, options = {}) {
   if (options.skipUpdateCheck || process.env.DS_SKIP_UPDATE_PROMPT === '1') {
     return false;
@@ -2978,8 +3063,43 @@ async function maybeHandleStartupUpdate(home, rawArgs, options = {}) {
   }
 
   printUpdateStatus(status, { compact: true });
-  markUpdateDeferred(home, status.latest_version);
-  return false;
+  if (!status.can_self_update || !process.stdin.isTTY || !process.stdout.isTTY) {
+    markUpdateDeferred(home, status.latest_version);
+    return false;
+  }
+
+  const confirmed = await promptYesNo(`Install DeepScientist ${status.latest_version} now? [y/N]: `, {
+    defaultValue: false,
+  });
+  if (!confirmed) {
+    markUpdateDeferred(home, status.latest_version);
+    console.log(`DeepScientist will remind you later about ${status.latest_version || 'the next release'}.`);
+    return false;
+  }
+
+  console.log('Updating DeepScientist now...');
+  const payload = await performSelfUpdate(home, {
+    host: options.host,
+    port: options.port,
+    restartDaemon: false,
+  });
+  console.log(payload.message);
+  if (payload.log_path) {
+    console.log(`Update log: ${payload.log_path}`);
+  }
+  if (!payload.ok) {
+    console.log('DeepScientist will continue launching with the current session.');
+    return false;
+  }
+
+  console.log('Relaunching DeepScientist...');
+  const relaunch = relaunchLauncherAfterUpdate(rawArgs, home);
+  if (!relaunch.ok) {
+    console.error(relaunch.message);
+    process.exit(relaunch.exitCode || 1);
+  }
+  process.exit(relaunch.exitCode || 0);
+  return true;
 }
 
 async function startBackgroundUpdateWorker(home, options = {}) {
@@ -3244,14 +3364,27 @@ function handleCodexPreflightFailure(error) {
   if (!error || error.code !== 'DS_CODEX_PREFLIGHT') {
     return false;
   }
+  const errorLabel = colorize('\u001B[1;38;5;196m', 'ERROR');
+  const warningLabel = colorize('\u001B[1;38;5;214m', 'WARNING');
   console.error('');
-  console.error('DeepScientist could not start because Codex is not ready yet.');
+  console.error(`${errorLabel} DeepScientist could not start because Codex is not ready yet.`);
   console.error(`Report: ${error.reportPath}`);
   if (Array.isArray(error.probe?.errors)) {
     for (const item of error.probe.errors) {
-      console.error(`  - ${item}`);
+      console.error(`${errorLabel} ${item}`);
     }
   }
+  if (Array.isArray(error.probe?.warnings)) {
+    for (const item of error.probe.warnings) {
+      console.error(`${warningLabel} ${item}`);
+    }
+  }
+  console.error(`${warningLabel} Recommended fix:`);
+  console.error(`${warningLabel} 1. In most installs, \`npm install -g @researai/deepscientist\` also installs the bundled Codex dependency.`);
+  console.error(`${warningLabel} 2. If \`codex\` is still missing, run \`npm install -g @openai/codex\`.`);
+  console.error(`${warningLabel} 3. Run \`codex --login\` (or \`codex\`) and finish authentication.`);
+  console.error(`${warningLabel} 4. Run \`ds doctor\` and confirm the Codex check passes.`);
+  console.error(`${warningLabel} 5. Run \`ds\` again.`);
   openBrowser(error.reportUrl);
   process.exit(1);
   return true;
@@ -3375,7 +3508,29 @@ async function updateMain(rawArgs) {
     process.exit(0);
   }
   printUpdateStatus(status, { compact: true });
-  process.exit(0);
+  if (!status.can_self_update) {
+    process.exit(0);
+  }
+
+  const confirmed = await promptYesNo(`Install DeepScientist ${status.latest_version} now? [y/N]: `, {
+    defaultValue: false,
+  });
+  if (!confirmed) {
+    const payload = markUpdateDeferred(home, status.latest_version);
+    console.log(`DeepScientist will remind you later about ${payload.latest_version || 'the next release'}.`);
+    process.exit(0);
+  }
+
+  const payload = await performSelfUpdate(home, {
+    host: options.host,
+    port: options.port,
+    restartDaemon: options.restartDaemon,
+  });
+  console.log(payload.message);
+  if (payload.log_path) {
+    console.log(`Update log: ${payload.log_path}`);
+  }
+  process.exit(payload.ok ? 0 : 1);
 }
 
 async function migrateMain(rawArgs) {
@@ -3680,6 +3835,10 @@ module.exports = {
     detectInstallMode,
     updateManualCommand,
     buildUpdateStatus,
+    parseYesNoAnswer,
+    normalizeLauncherRelaunchArgs,
+    officialRepositoryLine,
+    stripAnsi,
   },
 };
 

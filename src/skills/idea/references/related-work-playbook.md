@@ -52,6 +52,9 @@ Try to cover these buckets before final selection:
 - papers focused on the same failure mode
 - papers with the same task but different mechanism families
 
+For a normal selected-idea decision, the survey should durably cover at least `5` and usually `5-10` related and usable papers.
+Prefer direct task-modeling papers first; if that pool is truly small, fill the rest with the closest adjacent and translatable work instead of pretending the literature is empty.
+
 If the area is active, recent work matters a lot.
 If the area is stable, seminal work may matter more than recency.
 
@@ -132,4 +135,5 @@ The related-work search is good enough to stop when:
 - the strongest obvious nearby papers are mapped
 - the closest-prior-work table is complete enough to compare seriously
 - each top candidate has an explicit novelty or value verdict
+- the usable-paper floor for the selected idea has been satisfied or the shortage is explicitly documented
 - the remaining uncertainty is recorded rather than hidden

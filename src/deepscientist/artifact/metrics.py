@@ -506,9 +506,7 @@ def _normalize_metric_entry(metric: object, *, fallback_id: str | None = None) -
     metric_id = as_metric_id(
         metric.get("metric_id") or metric.get("id") or metric.get("name") or fallback_id,
     )
-    direction = str(metric.get("direction") or "").strip().lower()
-    if direction not in {"maximize", "minimize"}:
-        direction = infer_metric_direction(metric_id)
+    direction = normalize_metric_direction(metric.get("direction"), metric_id=metric_id)
     decimals_raw = metric.get("decimals")
     decimals = int(decimals_raw) if isinstance(decimals_raw, int) else None
     chart_group = str(metric.get("chart_group") or "default").strip() or "default"

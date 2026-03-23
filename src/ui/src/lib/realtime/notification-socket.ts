@@ -1,13 +1,11 @@
 import { io, type Socket } from 'socket.io-client'
 import { useAuthStore } from '@/lib/stores/auth'
 import type { SystemNotification } from '@/lib/types/notification'
-import type { BroadcastMessage } from '@/lib/types/broadcast'
 import { resolveApiBaseUrl } from '@/lib/api/client'
 import { supportsSocketIo } from '@/lib/runtime/quest-runtime'
 
 export interface NotificationServerEvents {
   'notification:new': (payload: { notification: SystemNotification }) => void
-  broadcast: (payload: BroadcastMessage) => void
 }
 
 export interface NotificationClientEvents {

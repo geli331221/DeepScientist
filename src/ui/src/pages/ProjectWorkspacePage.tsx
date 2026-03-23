@@ -4,6 +4,7 @@ import { useParams } from 'react-router-dom'
 import { Noise } from '@/components/react-bits'
 import { WorkspaceLayout } from '@/components/workspace/WorkspaceLayout'
 import { Button } from '@/components/ui/button'
+import { resolveDemoProject } from '@/demo/projects'
 import { getProject, type Project } from '@/lib/api/projects'
 import { useI18n } from '@/lib/i18n/useI18n'
 
@@ -27,6 +28,7 @@ export function ProjectWorkspacePage() {
   const { projectId = '' } = useParams()
   const { t } = useI18n('workspace')
   const { t: tCommon } = useI18n('common')
+  const demoProject = resolveDemoProject(projectId)
 
   const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
@@ -40,6 +42,26 @@ export function ProjectWorkspacePage() {
   useEffect(() => {
     if (!projectId) {
       setError(t('page_project_not_found'))
+      setLoading(false)
+      return
+    }
+
+    if (demoProject) {
+      setProject({
+        id: demoProject.projectId,
+        name: demoProject.title,
+        owner_id: 'local',
+        is_public: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        settings: {
+          source: 'demo',
+          demo_scenario_id: demoProject.scenarioId,
+        },
+        storage_used: 0,
+        file_count: 0,
+      })
+      setError(null)
       setLoading(false)
       return
     }
@@ -71,7 +93,7 @@ export function ProjectWorkspacePage() {
     return () => {
       cancelled = true
     }
-  }, [projectId, t])
+  }, [demoProject, projectId, t])
 
   if (loading) {
     return (
@@ -109,6 +131,11 @@ export function ProjectWorkspacePage() {
       projectSource={
         typeof project?.settings?.source === 'string'
           ? project.settings.source
+          : null
+      }
+      demoScenarioId={
+        typeof project?.settings?.demo_scenario_id === 'string'
+          ? project.settings.demo_scenario_id
           : null
       }
     />

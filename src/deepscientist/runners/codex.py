@@ -35,6 +35,17 @@ def _compact_text(value: object, *, limit: int = 1200) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _structured_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except TypeError:
+        return str(value)
+
+
 def _iter_event_texts(event: dict[str, Any]) -> list[str]:
     texts: list[str] = []
     for key in ("text", "content", "message"):
@@ -184,7 +195,24 @@ def _tool_name(event: dict[str, Any], item: dict[str, Any]) -> str:
     return "tool"
 
 
+def _is_bash_exec_item(event: dict[str, Any], item: dict[str, Any]) -> bool:
+    server = str(item.get("server") or event.get("server") or "").strip()
+    tool = str(item.get("tool") or event.get("tool") or "").strip()
+    return server == "bash_exec" and tool == "bash_exec"
+
+
 def _tool_args(event: dict[str, Any], item: dict[str, Any]) -> str:
+    if _is_bash_exec_item(event, item):
+        for value in (
+            item.get("arguments"),
+            event.get("arguments"),
+            item.get("input"),
+            event.get("input"),
+        ):
+            text = _structured_text(value)
+            if text:
+                return text
+        return ""
     for value in (
         item.get("command"),
         item.get("query"),
@@ -204,6 +232,21 @@ def _tool_args(event: dict[str, Any], item: dict[str, Any]) -> str:
 
 
 def _tool_output(event: dict[str, Any], item: dict[str, Any]) -> str:
+    if _is_bash_exec_item(event, item):
+        for value in (
+            item.get("result"),
+            item.get("output"),
+            item.get("content"),
+            event.get("result"),
+            event.get("output"),
+            event.get("content"),
+            item.get("aggregated_output"),
+            event.get("aggregated_output"),
+        ):
+            text = _structured_text(value)
+            if text:
+                return text
+        return ""
     for value in (
         item.get("aggregated_output"),
         item.get("changes"),
@@ -253,10 +296,12 @@ def _mcp_tool_metadata(
             metadata["workdir"] = arguments.get("workdir")
         if isinstance(arguments.get("mode"), str):
             metadata["mode"] = arguments.get("mode")
-        if isinstance(arguments.get("timeout_seconds"), int):
+        if arguments.get("timeout_seconds") is not None:
             metadata["timeout_seconds"] = arguments.get("timeout_seconds")
         if "comment" in arguments:
             metadata["comment"] = arguments.get("comment")
+        if server == "bash_exec" and tool == "bash_exec" and isinstance(arguments.get("id"), str):
+            metadata["bash_id"] = arguments.get("id")
     metadata["session_id"] = f"quest:{quest_id}"
     metadata["agent_id"] = "pi"
     metadata["agent_instance_id"] = run_id
@@ -266,12 +311,18 @@ def _mcp_tool_metadata(
         for key in (
             "bash_id",
             "status",
+            "command",
+            "workdir",
+            "cwd",
+            "kind",
+            "comment",
             "started_at",
             "finished_at",
             "exit_code",
             "stop_reason",
             "last_progress",
             "log_path",
+            "watchdog_after_seconds",
         ):
             if key in result_payload:
                 metadata[key] = result_payload.get(key)
@@ -758,6 +809,7 @@ class CodexRunner:
         workspace_root = request.worktree_root or request.quest_root
         resolved_binary = resolve_runner_binary(self.binary, runner_name="codex")
         resolved_runner_config = runner_config if isinstance(runner_config, dict) else self._load_runner_config()
+        normalized_model = str(request.model or "").strip()
         command = [
             resolved_binary or self.binary,
             "--search",
@@ -766,9 +818,9 @@ class CodexRunner:
             "--cd",
             str(workspace_root),
             "--skip-git-repo-check",
-            "--model",
-            request.model,
         ]
+        if normalized_model.lower() not in {"", "inherit", "default", "codex-default"}:
+            command.extend(["--model", normalized_model])
         if request.approval_policy:
             command.extend(["-c", f'approval_policy="{request.approval_policy}"'])
         reasoning_effort = request.reasoning_effort

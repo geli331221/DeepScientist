@@ -325,6 +325,141 @@ def test_git_branch_canvas_dedupes_mirrored_main_experiment_counts(temp_home: Pa
     assert nodes["run/main-dedupe-001"]["parent_ref"] == parent["branch"]
 
 
+def test_git_branch_canvas_preserves_structured_main_result_over_later_unstructured_run(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("branch canvas structured result quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-structured-result")
+
+    artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Structured result route",
+        problem="Canvas should keep the recorded experiment metrics visible.",
+        hypothesis="A later bookkeeping run must not overwrite the measured result payload.",
+        mechanism="Prefer structured experiment artifacts over plain follow-up run records.",
+        decision_reason="Open the route for a measured experiment.",
+    )
+    main_result = artifact.record_main_experiment(
+        quest_root,
+        run_id="main-structured-001",
+        title="Structured main run",
+        hypothesis="The structured run provides the real branch result.",
+        setup="Use the confirmed baseline recipe.",
+        execution="Ran the comparable validation pass once.",
+        results="The structured main result improved the primary metric.",
+        conclusion="Keep this durable result visible on the branch canvas.",
+        metric_rows=[{"metric_id": "acc", "value": 0.91, "direction": "higher_better"}],
+        evaluation_summary={
+            "takeaway": "The structured main result is the real branch result.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "write",
+        },
+    )
+    run_worktree_root = str(main_result["artifact"]["record"]["worktree_root"])
+    artifact.record(
+        quest_root,
+        {
+            "kind": "run",
+            "run_id": "agent-followup-001",
+            "run_kind": "idea",
+            "branch": main_result["branch"],
+            "worktree_root": run_worktree_root,
+            "status": "completed",
+            "summary": "A later follow-up agent run wrote notes on the same branch.",
+        },
+        checkpoint=False,
+        workspace_root=Path(run_worktree_root),
+    )
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+    run_node = nodes[main_result["branch"]]
+
+    assert run_node["run_id"] == "main-structured-001"
+    assert run_node["run_kind"] == "main_experiment"
+    assert run_node["latest_result"]["run_id"] == "main-structured-001"
+    assert run_node["latest_result"]["metrics_summary"] == {"acc": 0.91}
+    assert run_node["latest_result"]["evaluation_summary"]["next_action"] == "write"
+    assert run_node["latest_metric"]["key"] == "acc"
+    assert run_node["latest_metric"]["value"] == pytest.approx(0.91)
+    assert run_node["latest_summary"] == "A later follow-up agent run wrote notes on the same branch."
+
+
+def test_git_branch_canvas_keeps_latest_metric_aligned_with_selected_structured_result(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("branch canvas metric alignment quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-metric-alignment")
+
+    artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Metric alignment route",
+        problem="Canvas metric badges should match the selected structured branch result.",
+        hypothesis="A later weaker run with its own metric must not replace the branch metric badge.",
+        mechanism="Force latest_metric to follow the chosen structured branch result when one exists.",
+        decision_reason="Open the route for a measured experiment.",
+    )
+    main_result = artifact.record_main_experiment(
+        quest_root,
+        run_id="main-metric-align-001",
+        title="Metric alignment main run",
+        hypothesis="The measured branch result should remain the source of truth.",
+        setup="Use the confirmed baseline recipe.",
+        execution="Ran the comparable validation pass once.",
+        results="The structured main result improved the primary metric.",
+        conclusion="Keep the branch metric aligned with this durable result.",
+        metric_rows=[{"metric_id": "acc", "value": 0.91, "direction": "higher_better"}],
+        evaluation_summary={
+            "takeaway": "The structured main result should own the branch metric badge.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "write",
+        },
+    )
+    run_worktree_root = str(main_result["artifact"]["record"]["worktree_root"])
+    artifact.record(
+        quest_root,
+        {
+            "kind": "run",
+            "run_id": "agent-followup-metric-001",
+            "run_kind": "idea",
+            "branch": main_result["branch"],
+            "worktree_root": run_worktree_root,
+            "status": "completed",
+            "summary": "A later follow-up run reported a lower temporary metric.",
+            "metric_rows": [{"metric_id": "acc", "value": 0.55, "direction": "higher_better"}],
+            "metrics_summary": {"acc": 0.55},
+        },
+        checkpoint=False,
+        workspace_root=Path(run_worktree_root),
+    )
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+    run_node = nodes[main_result["branch"]]
+
+    assert run_node["latest_result"]["run_id"] == "main-metric-align-001"
+    assert run_node["latest_metric"]["key"] == "acc"
+    assert run_node["latest_metric"]["value"] == pytest.approx(0.91)
+
+
 def test_file_change_diff_falls_back_to_run_commit_range_for_quest_root(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -603,6 +738,114 @@ def test_metrics_timeline_dedupes_mirrored_run_records_and_keeps_numeric_metric_
     assert series_by_id["raw_false"]["points"][0]["value"] == pytest.approx(0.2063)
 
 
+def test_git_branch_canvas_analysis_slice_exposes_metrics_from_metric_id_rows(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("analysis slice metric rows quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    baseline_root = quest_root / "baselines" / "local" / "baseline-analysis-metrics"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Baseline\n", encoding="utf-8")
+    artifact.confirm_baseline(
+        quest_root,
+        baseline_path=str(baseline_root),
+        baseline_id="baseline-analysis-metrics",
+        summary="Baseline for analysis metric rows.",
+        metrics_summary={"sigma_max": 0.6921, "acc": 0.8812, "raw_false": 0.2149},
+        primary_metric={"metric_id": "sigma_max", "value": 0.6921},
+        metric_contract={
+            "primary_metric_id": "sigma_max",
+            "metrics": [
+                {"metric_id": "sigma_max", "direction": "lower_better"},
+                {"metric_id": "acc", "direction": "higher_better"},
+                {"metric_id": "raw_false", "direction": "lower_better"},
+            ],
+        },
+    )
+
+    artifact.submit_idea(
+        quest_root,
+        title="Metric row route",
+        problem="Analysis nodes need their own durable metrics.",
+        hypothesis="Normalized metric rows should survive into the branch canvas payload.",
+        mechanism="Launch one main run and one follow-up slice.",
+        expected_gain="Canvas can render every analysis metric selector option.",
+        decision_reason="Prepare a durable parent run for analysis.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-analysis-metrics-001",
+        title="Main analysis metric run",
+        hypothesis="The main run establishes the analysis parent branch.",
+        setup="Standard setup.",
+        execution="Ran the main evaluation once.",
+        results="Enough evidence exists for one follow-up slice.",
+        conclusion="Launch one analysis slice.",
+        metric_rows=[
+            {"metric_id": "sigma_max", "value": 0.2477, "direction": "lower_better"},
+            {"metric_id": "acc", "value": 0.9103, "direction": "higher_better"},
+            {"metric_id": "raw_false", "value": 0.2063, "direction": "lower_better"},
+        ],
+    )
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Metric row analysis",
+        campaign_goal="Verify analysis slice metrics appear in the branch payload.",
+        slices=[
+            {
+                "slice_id": "ablation",
+                "title": "Metric row ablation",
+                "goal": "Record one completed analysis slice.",
+                "required_changes": "Apply one isolated ablation only.",
+                "metric_contract": "Keep the same evaluation protocol.",
+            }
+        ],
+    )
+
+    artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="ablation",
+        setup="Disable the target component only.",
+        execution="Ran the ablation once.",
+        results="The analysis slice produced comparable metrics.",
+        metric_rows=[
+            {"metric_id": "sigma_max", "value": 0.2511, "direction": "lower_better"},
+            {"metric_id": "acc", "value": 0.9051, "direction": "higher_better"},
+            {"metric_id": "raw_false", "value": 0.2098, "direction": "lower_better"},
+        ],
+        evaluation_summary={
+            "takeaway": "The ablation preserves most of the gain.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "write",
+        },
+    )
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    analysis_branch = campaign["slices"][0]["branch"]
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+    latest_result = nodes[analysis_branch]["latest_result"]
+
+    assert latest_result["metrics_summary"] == {
+        "sigma_max": 0.2511,
+        "acc": 0.9051,
+        "raw_false": 0.2098,
+    }
+    assert [item["metric_id"] for item in latest_result["metric_rows"]] == ["sigma_max", "acc", "raw_false"]
+    assert latest_result["metric_rows"][0]["numeric_value"] == pytest.approx(0.2511)
+    assert nodes[analysis_branch]["latest_metric"]["key"] == "sigma_max"
+    assert nodes[analysis_branch]["latest_metric"]["value"] == pytest.approx(0.2511)
+    assert nodes[analysis_branch]["latest_metric"]["direction"] == "minimize"
+
+
 def test_git_branch_canvas_parents_follow_up_analysis_to_current_workspace_node(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -680,3 +923,113 @@ def test_git_branch_canvas_parents_follow_up_analysis_to_current_workspace_node(
     assert nodes[head["branch"]]["research_head"] is True
     assert nodes[analysis_branch]["parent_ref"] == "run/run-parent"
     assert nodes[analysis_branch]["parent_branch_recorded"] == "run/run-parent"
+    assert nodes["run/run-parent"]["workflow_state"]["analysis_state"] == "active"
+    assert nodes["run/run-parent"]["workflow_state"]["writing_state"] == "blocked_by_analysis"
+    assert nodes["run/run-parent"]["workflow_state"]["next_pending_slice_id"] == "follow-up"
+    assert nodes[analysis_branch]["workflow_state"]["analysis_state"] == "active"
+    assert nodes[analysis_branch]["workflow_state"]["status_reason"] == "Analysis 0/1 done"
+    assert nodes[head["branch"]]["workflow_state"]["writing_state"] == "not_ready"
+
+
+def test_git_branch_canvas_marks_active_paper_branch_after_analysis_completion(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("canvas writing state quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-writing")
+    artifact.submit_idea(
+        quest_root,
+        title="Writing route",
+        problem="Need a truthful paper transition on the canvas.",
+        hypothesis="A completed supplementary run should activate the paper branch only.",
+        mechanism="Run one writing-facing supplementary slice.",
+        decision_reason="Prepare the writing handoff.",
+        next_target="experiment",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-writing-001",
+        title="Writing main run",
+        hypothesis="This route is strong enough for paper drafting.",
+        setup="Use the confirmed baseline.",
+        execution="Completed the main run.",
+        results="The main run is ready for one last reviewer-style check.",
+        conclusion="Run one analysis slice before writing.",
+        metric_rows=[{"metric_id": "acc", "value": 0.92}],
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Writing Outline",
+        detailed_outline={
+            "title": "Writing Outline",
+            "research_questions": ["RQ-writing"],
+            "experimental_designs": ["Exp-writing"],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use the first outline for the writing-state canvas test.",
+    )
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Writing-state campaign",
+        campaign_goal="Complete the last supplementary slice before opening the paper branch.",
+        selected_outline_ref="outline-001",
+        research_questions=["RQ-writing"],
+        experimental_designs=["Exp-writing"],
+        todo_items=[
+            {
+                "todo_id": "todo-writing",
+                "slice_id": "slice-writing",
+                "title": "Writing slice",
+                "research_question": "RQ-writing",
+                "experimental_design": "Exp-writing",
+                "completion_condition": "Finish the required supplementary experiment.",
+            }
+        ],
+        slices=[
+            {
+                "slice_id": "slice-writing",
+                "title": "Writing slice",
+                "goal": "Complete the final writing-facing check.",
+                "required_changes": "Keep the main claim comparable.",
+                "metric_contract": "Use the same accuracy contract.",
+            }
+        ],
+    )
+    completed = artifact.record_analysis_slice(
+        quest_root,
+        campaign_id=campaign["campaign_id"],
+        slice_id="slice-writing",
+        setup="Lock the baseline and protocol.",
+        execution="Ran the final writing-facing check.",
+        results="The last check supports opening the paper branch.",
+        metric_rows=[{"metric_id": "acc", "value": 0.925}],
+        evaluation_summary={
+            "takeaway": "The final supplementary check supports the main claim.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "write",
+        },
+    )
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+    paper_branch = str(completed["research_state"]["current_workspace_branch"] or "").strip()
+    parent_branch = str(completed["research_state"]["paper_parent_branch"] or "").strip()
+
+    assert completed["research_state"]["workspace_mode"] == "paper"
+    assert branches["active_workspace_ref"] == paper_branch
+    assert nodes[paper_branch]["workflow_state"]["writing_state"] == "active"
+    assert nodes[paper_branch]["workflow_state"]["status_reason"] == "Writing workspace active."
+    assert nodes[parent_branch]["workflow_state"]["writing_state"] == "ready"

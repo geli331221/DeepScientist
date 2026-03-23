@@ -8,7 +8,6 @@ import HeroTerminal from './HeroTerminal'
 import HeroFooter from './HeroFooter'
 import { FadeContent, GlareHover, SpotlightCard } from '@/components/react-bits'
 import { PngIcon } from '@/components/ui/png-icon'
-import Shimmer from '@/components/effects/Shimmer'
 import {
   BarChart3,
   BookOpen,
@@ -55,47 +54,6 @@ function FeaturePreview({ feature, animate }: { feature: HeroFeature; animate: b
               {chip}
             </span>
           ))}
-        </div>
-      </div>
-    )
-  }
-
-  if (feature.id === 'autofigure') {
-    const steps = [
-      { label: feature.chips[0] ?? 'Draft', detail: 'Layout' },
-      { label: feature.chips[1] ?? 'Iterate', detail: 'Refine' },
-      { label: feature.chips[2] ?? 'Render', detail: 'Export' },
-    ]
-
-    return (
-      <div className="mt-auto rounded-2xl border border-black/5 bg-[#F7F3EC] p-3">
-        <div className="text-[10px] uppercase tracking-[0.22em] text-[#9A948C]">
-          AutoFigure pipeline
-        </div>
-        <div className="relative mt-3">
-          <div className="absolute left-4 right-4 top-1/2 h-px bg-[#E2DDD4]" />
-          {animate ? (
-            <div className="absolute left-4 right-4 top-1/2 h-px overflow-hidden">
-              <Shimmer duration="6s" width="35%" color="rgba(255, 255, 255, 0.45)">
-                <div className="h-px w-full" />
-              </Shimmer>
-            </div>
-          ) : null}
-          <div className="relative grid grid-cols-3 gap-2">
-            {steps.map((step) => (
-              <div
-                key={step.label}
-                className="rounded-xl border border-black/10 bg-white/80 px-2 py-2 text-center"
-              >
-                <div className="text-[10px] uppercase tracking-[0.18em] text-[#5D5A55]">
-                  {step.label}
-                </div>
-                <div className="text-[9px] uppercase tracking-[0.16em] text-[#9A948C]">
-                  {step.detail}
-                </div>
-              </div>
-            ))}
-          </div>
         </div>
       </div>
     )
@@ -487,7 +445,7 @@ export default function HeroSections() {
                 </h3>
                 <p className="text-sm text-[#5D5A55]">
                   Start in seconds, then connect the CLI, workspace, and
-                  AutoFigure outputs as your research evolves.
+                  reproducible outputs as your research evolves.
                 </p>
               </div>
               <div className="rounded-full border border-black/10 bg-white/75 px-4 py-2 text-sm text-[#5D5A55]">

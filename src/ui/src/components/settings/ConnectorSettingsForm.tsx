@@ -4,16 +4,19 @@ import {
   ArrowUpRight,
   Ban,
   BookOpenText,
+  Check,
   CheckCircle2,
+  Copy,
   Link2,
+  Loader2,
   MessageSquareText,
   RadioTower,
   Save,
   Settings2,
-  ShieldCheck,
   Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { Link } from 'react-router-dom'
 
 import { Badge } from '@/components/ui/badge'
@@ -22,8 +25,11 @@ import { HintDot } from '@/components/ui/hint-dot'
 import { Input } from '@/components/ui/input'
 import { ConfirmModal, Modal, ModalFooter } from '@/components/ui/modal'
 import { Textarea } from '@/components/ui/textarea'
-import { connectorTargetLabel, conversationIdentityKey, normalizeConnectorTargets, parseConversationId } from '@/lib/connectors'
+import { useToast } from '@/components/ui/toast'
+import { client } from '@/lib/api'
+import { connectorTargetLabel, conversationIdentityKey, normalizeConnectorTargets } from '@/lib/connectors'
 import { getDocAssetUrl } from '@/lib/docs'
+import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 import type {
   ConnectorProfileSnapshot,
@@ -43,7 +49,14 @@ import {
   type ConnectorGuideLink,
   type ConnectorGuideStep,
 } from './connectorGuideCatalog'
-import { qqProfileDisplayLabel, qqProfileStatus, selectQqProfileTarget } from './connectorSettingsHelpers'
+import {
+  connectorConfigAutoEnabled,
+  lingzhuAuthAkNeedsRotation,
+  qqProfileDisplayLabel,
+  qqProfileStatus,
+  resolveLingzhuAuthAk,
+  selectQqProfileTarget,
+} from './connectorSettingsHelpers'
 import { translateSettingsCatalogText } from './settingsCatalogI18n'
 
 type ConnectorConfigMap = Record<string, Record<string, unknown>>
@@ -125,7 +138,7 @@ const copy = {
     missingFields: 'Missing now',
     saveConnectorFirst: 'Save this connector before moving to the next step.',
     sendPlatformMessageFirst: 'Go to the platform, send one real message or mention, then return here.',
-    enableConnectorFirst: 'Enable this connector and fill the missing credentials first.',
+    enableConnectorFirst: 'Fill the missing credentials first.',
     detailSubtitle: 'Complete one connector from Step 1 onward instead of editing every platform in one long page.',
     stepSaveAction: 'Save this connector',
     connectorReference: 'Connector docs',
@@ -172,18 +185,38 @@ const copy = {
     qqBindChecklist3: 'Return here and confirm the detected OpenID is no longer empty.',
     qqProbeLockedUntilOpenId: 'The probe unlocks after the first QQ private message is detected.',
     qqNeedOpenIdFirst: 'Send the first QQ private message so DeepScientist can detect and save the OpenID.',
+    weixinAddConnector: 'Bind WeChat',
+    weixinRebindConnector: 'Rebind WeChat',
+    weixinBindHint: 'DeepScientist generates a QR code, you scan it with WeChat, and the connector is saved automatically after confirmation.',
+    weixinCurrentBinding: 'Current WeChat binding',
+    weixinAccountId: 'Bot account',
+    weixinLoginUserId: 'Owner account',
+    weixinNotBoundYet: 'Not bound yet.',
+    weixinQrModalTitle: 'Scan With WeChat',
+    weixinQrLoading: 'Generating WeChat QR code…',
+    weixinQrHint1: 'Open WeChat on the phone that will own this binding and scan this QR code.',
+    weixinQrHint2: 'Confirm the login inside WeChat. DeepScientist saves the connector automatically after success.',
+    weixinQrHint3: '',
+    weixinBindingSuccessTitle: 'WeChat connected',
+    weixinBindingSuccessBody: 'The WeChat connector was saved automatically.',
+    weixinBindingFailedTitle: 'WeChat binding failed',
+    weixinDeleteAction: 'Delete WeChat',
+    weixinDeleteTitle: 'Delete WeChat binding',
+    weixinDeleteConfirm: 'This will clear the saved WeChat bot token and account binding from DeepScientist.',
+    weixinDeleteSuccessTitle: 'WeChat deleted',
+    weixinDeleteSuccessBody: 'The WeChat connector binding was removed.',
     lingzhuQuickSetup: 'Quick setup',
     lingzhuStepEndpoint: 'Gateway endpoint',
-    lingzhuStepPlatform: 'Platform values',
-    lingzhuStepProbe: 'Probe and verify',
-    lingzhuNeedPublicIp: 'Lingzhu requires a public IP or public domain. `127.0.0.1` only works for local health checks.',
-    lingzhuUseLocalDefaults: 'Use local defaults',
+    lingzhuStepPlatform: 'Generate binding values',
+    lingzhuStepProbe: 'Test, verify, and save',
+    lingzhuNeedPublicIp: 'Lingzhu requires a public IP or public domain. The popup auto-generates values from the current DeepScientist web address, but only a public URL can be registered on Rokid.',
+    lingzhuUseLocalDefaults: 'Use current web address',
     lingzhuGenerateAk: 'Generate AK',
     lingzhuGeneratedValues: 'Generated values',
-    lingzhuLocalHealthUrl: 'Local health URL',
-    lingzhuLocalSseUrl: 'Local SSE URL',
-    lingzhuPublicSseUrl: 'Public SSE URL',
-    lingzhuPublicHint: 'Fill the public URL that the glasses can really reach.',
+    lingzhuLocalHealthUrl: 'DeepScientist health URL',
+    lingzhuLocalSseUrl: 'DeepScientist SSE URL',
+    lingzhuPublicSseUrl: 'External SSE URL',
+    lingzhuPublicHint: 'The custom agent URL is generated from the current DeepScientist web address. Only a public URL can be registered on Rokid.',
     lingzhuOpenclawConfig: 'OpenClaw config snippet',
     lingzhuCurl: 'Probe curl',
     lingzhuSupportedCommands: 'Supported commands',
@@ -192,9 +225,41 @@ const copy = {
     lingzhuProbeResult: 'Lingzhu probe',
     lingzhuNoProbeYet: 'Run the probe after saving the AK and endpoint values.',
     lingzhuAgentIdHint: 'Use the same agent id on both OpenClaw and Lingzhu.',
-    lingzhuPlatformReminder: 'Paste the generated public SSE URL and AK into the Lingzhu platform.',
-    lingzhuCompleteEndpointFirst: 'Finish Step 1 and save the gateway endpoint values first.',
-    lingzhuSavePlatformValuesFirst: 'Save the public URL, AK, and agent values before running the Lingzhu probe.',
+    lingzhuPlatformReminder: 'Open the popup, copy the generated values into the Rokid form, then click Save here to finish.',
+    lingzhuCompleteEndpointFirst: 'The current DeepScientist web address has not been generated yet.',
+    lingzhuSavePlatformValuesFirst: 'Save the generated URL, AK, and agent values before checking the runtime snapshot.',
+    lingzhuAddConnector: 'Add Lingzhu (Rokid Glasses)',
+    lingzhuPlatformUrl: 'Rokid platform',
+    lingzhuOpenPlatform: 'Open platform',
+    lingzhuGeneratedForRokid: 'Generated fields for Rokid binding',
+    lingzhuRokidBindHint: 'DeepScientist generates these values automatically. Copy them into the Rokid custom agent form, then click Save here to finish binding.',
+    lingzhuCurrentBindingValues: 'Current Lingzhu values',
+    lingzhuAkPersistenceHint: 'The Custom agent AK is generated randomly. Click Save to persist it, and keep the same AK on the Rokid platform and DeepScientist.',
+    lingzhuCustomAgentId: 'Custom agent ID',
+    lingzhuCustomAgentUrl: 'Custom agent URL',
+    lingzhuCustomAgentAk: 'Custom agent AK',
+    lingzhuAgentName: 'Agent name',
+    lingzhuCategory: 'Category',
+    lingzhuCapabilitySummary: 'Capability summary',
+    lingzhuOpeningMessage: 'Opening message',
+    lingzhuInputType: 'Input type',
+    lingzhuIcon: 'Icon',
+    lingzhuCategoryWork: 'Work',
+    lingzhuInputTypeText: 'Text',
+    lingzhuCopyValue: 'Copy',
+    lingzhuCopiedValue: 'Copied',
+    lingzhuIconHint: 'Upload the DeepScientist logo on the Rokid platform. If the platform accepts a URL, you can copy the logo URL below.',
+    lingzhuCopyLogoUrl: 'Copy logo URL',
+    lingzhuBindingGuideTitle: 'How to bind Rokid Glasses',
+    lingzhuBindingGuide1: 'Open the Rokid platform and go to Project Development -> Third-party Agent -> Create.',
+    lingzhuBindingGuide2: 'Choose `Custom Agent`, then paste the generated agent ID, public URL, and AK.',
+    lingzhuBindingGuide3: 'Use the default values below for agent name, category, capability summary, opening message, and input type.',
+    lingzhuBindingGuide4: 'Upload the DeepScientist logo as the icon. The custom agent URL must be publicly reachable.',
+    lingzhuBindingGuide5: 'After the Rokid form is filled, return here and click Save to finish binding.',
+    lingzhuBindingGuide6: 'When giving a new task from the glasses, start with `我现在的任务是 ...`. Only that prefix is treated as a fresh DeepScientist instruction.',
+    lingzhuBindingGuide7: 'If the connection drops, ask again without that prefix, such as `找DeepScientist` or `继续`. DeepScientist will replay buffered progress updates instead of resubmitting the task.',
+    lingzhuCurrentAddress: 'Current DeepScientist web address',
+    lingzhuManualOverrides: 'Manual overrides and debug',
   },
   zh: {
     title: '连接器',
@@ -272,7 +337,7 @@ const copy = {
     missingFields: '当前还缺',
     saveConnectorFirst: '进入下一步前，请先保存当前 connector。',
     sendPlatformMessageFirst: '请先回到平台侧发送一条真实消息或一次 @ 提及，再回来继续。',
-    enableConnectorFirst: '请先启用当前 connector，并补齐缺少的凭据。',
+    enableConnectorFirst: '请先补齐缺少的凭据。',
     detailSubtitle: '一次只配置一个 connector，从 Step 1 开始，不再在一页里同时编辑所有平台。',
     stepSaveAction: '保存当前 connector',
     connectorReference: '连接器文档',
@@ -319,18 +384,38 @@ const copy = {
     qqBindChecklist3: '回到这里确认 OpenID 已不再为空。',
     qqProbeLockedUntilOpenId: '检测到第一条 QQ 私聊并拿到 OpenID 后，测试入口才会解锁。',
     qqNeedOpenIdFirst: '请先发送第一条 QQ 私聊，让 DeepScientist 自动检测并保存 OpenID。',
+    weixinAddConnector: '绑定微信',
+    weixinRebindConnector: '重新绑定微信',
+    weixinBindHint: 'DeepScientist 会自动生成二维码。你只需要用微信扫码并确认，之后 connector 会自动保存。',
+    weixinCurrentBinding: '当前微信绑定',
+    weixinAccountId: '机器人账号',
+    weixinLoginUserId: '扫码账号',
+    weixinNotBoundYet: '当前还没有绑定。',
+    weixinQrModalTitle: '请使用微信扫码',
+    weixinQrLoading: '正在生成微信二维码…',
+    weixinQrHint1: '请在将要持有这个绑定的手机微信上扫码。',
+    weixinQrHint2: '扫码后在微信里确认登录。成功后 DeepScientist 会自动保存 connector。',
+    weixinQrHint3: '',
+    weixinBindingSuccessTitle: '微信已连接',
+    weixinBindingSuccessBody: '微信 connector 已自动保存。',
+    weixinBindingFailedTitle: '微信绑定失败',
+    weixinDeleteAction: '删除微信',
+    weixinDeleteTitle: '删除微信绑定',
+    weixinDeleteConfirm: '这会清掉 DeepScientist 中保存的微信 bot token 和账号绑定信息。',
+    weixinDeleteSuccessTitle: '微信已删除',
+    weixinDeleteSuccessBody: '微信 connector 绑定已移除。',
     lingzhuQuickSetup: '快速接入',
     lingzhuStepEndpoint: '网关端点',
-    lingzhuStepPlatform: '平台填写值',
-    lingzhuStepProbe: '探测与校验',
-    lingzhuNeedPublicIp: 'Lingzhu 需要公网 IP 或公网域名。`127.0.0.1` 只能用于本地健康检查。',
-    lingzhuUseLocalDefaults: '使用本地默认值',
+    lingzhuStepPlatform: '生成绑定信息',
+    lingzhuStepProbe: '测试验证并保存',
+    lingzhuNeedPublicIp: 'Lingzhu 需要公网 IP 或公网域名。弹窗会基于当前 DeepScientist 网页地址自动生成绑定值，但 Rokid 平台只能注册公网 URL。',
+    lingzhuUseLocalDefaults: '使用当前网页地址',
     lingzhuGenerateAk: '生成 AK',
     lingzhuGeneratedValues: '自动生成值',
-    lingzhuLocalHealthUrl: '本地健康检查 URL',
-    lingzhuLocalSseUrl: '本地 SSE URL',
-    lingzhuPublicSseUrl: '公网 SSE URL',
-    lingzhuPublicHint: '这里应填写眼镜端真正能够访问到的公网地址。',
+    lingzhuLocalHealthUrl: 'DeepScientist 健康检查 URL',
+    lingzhuLocalSseUrl: 'DeepScientist SSE URL',
+    lingzhuPublicSseUrl: '外部 SSE URL',
+    lingzhuPublicHint: '自定义智能体 URL 会按当前 DeepScientist 网页地址自动生成，但只有公网 URL 才能在 Rokid 平台注册。',
     lingzhuOpenclawConfig: 'OpenClaw 配置片段',
     lingzhuCurl: '探测 curl',
     lingzhuSupportedCommands: '支持的命令',
@@ -339,9 +424,41 @@ const copy = {
     lingzhuProbeResult: 'Lingzhu 探测结果',
     lingzhuNoProbeYet: '保存 AK 和端点后，再执行探测。',
     lingzhuAgentIdHint: 'OpenClaw 与 Lingzhu 两侧应使用同一个 agent id。',
-    lingzhuPlatformReminder: '请把自动生成的公网 SSE URL 和 AK 填回到 Lingzhu 平台中。',
-    lingzhuCompleteEndpointFirst: '请先完成 Step 1，并保存网关端点配置。',
-    lingzhuSavePlatformValuesFirst: '执行 Lingzhu 探测前，请先保存公网地址、AK 和 agent 等平台值。',
+    lingzhuPlatformReminder: '打开弹窗后，把自动生成的值复制到 Rokid 表单里，随后在这里点保存即可完成。',
+    lingzhuCompleteEndpointFirst: '当前 DeepScientist 网页地址还没有成功生成。',
+    lingzhuSavePlatformValuesFirst: '查看运行时快照前，请先保存自动生成的 URL、AK 和 agent 等平台值。',
+    lingzhuAddConnector: 'Add Lingzhu（Rokid Glasses）',
+    lingzhuPlatformUrl: 'Rokid 平台',
+    lingzhuOpenPlatform: '打开平台',
+    lingzhuGeneratedForRokid: 'Rokid 平台自动生成字段',
+    lingzhuRokidBindHint: '下面这些值由 DeepScientist 自动生成。复制到 Rokid 自定义智能体表单后，再回到这里点保存即可完成绑定。自定义智能体 URL 必须是公网地址，不能填写 `127.0.0.1`。',
+    lingzhuCurrentBindingValues: '当前 Lingzhu 绑定值',
+    lingzhuAkPersistenceHint: '自定义智能体 AK 会随机生成。点击保存后才会真正持久化，之后 Rokid 平台和 DeepScientist 都必须使用同一个 AK。',
+    lingzhuCustomAgentId: '自定义智能体ID',
+    lingzhuCustomAgentUrl: '自定义智能体url',
+    lingzhuCustomAgentAk: '自定义智能体AK',
+    lingzhuAgentName: '智能体名称',
+    lingzhuCategory: '类别',
+    lingzhuCapabilitySummary: '功能介绍',
+    lingzhuOpeningMessage: '开场白',
+    lingzhuInputType: '入参类型',
+    lingzhuIcon: '图标',
+    lingzhuCategoryWork: '工作',
+    lingzhuInputTypeText: '文字',
+    lingzhuCopyValue: '复制',
+    lingzhuCopiedValue: '已复制',
+    lingzhuIconHint: '请在 Rokid 平台上传 DeepScientist logo。如果平台支持 URL，也可以直接复制下面的 logo 地址。',
+    lingzhuCopyLogoUrl: '复制 logo URL',
+    lingzhuBindingGuideTitle: '如何绑定 Rokid Glasses',
+    lingzhuBindingGuide1: '打开 Rokid 平台，进入 项目开发 -> 三方智能体 -> 创建。',
+    lingzhuBindingGuide2: '选择“自定义智能体”，然后粘贴自动生成的智能体 ID、公网 URL 和 AK。',
+    lingzhuBindingGuide3: '智能体名称、类别、功能介绍、开场白、入参类型可以直接使用下方默认值。',
+    lingzhuBindingGuide4: '图标上传 DeepScientist logo。自定义智能体 URL 必须是公网可访问地址。',
+    lingzhuBindingGuide5: 'Rokid 表单填写完成后，回到这里点保存即可完成绑定。',
+    lingzhuBindingGuide6: '眼镜侧下发新任务时，必须以“我现在的任务是 ...”开头；只有这个前缀会被当作新的 DeepScientist 指令。',
+    lingzhuBindingGuide7: '如果中途断开，下一次直接再唤起即可，不要重复任务前缀；例如说“找DeepScientist”或“继续”，系统会优先补发中间进展，而不是重复提交任务。',
+    lingzhuCurrentAddress: '当前 DeepScientist 网页地址',
+    lingzhuManualOverrides: '手动覆盖与调试',
   },
 } satisfies Record<Locale, Record<string, string>>
 
@@ -422,18 +539,7 @@ function lingzhuConfigString(config: Record<string, unknown>, key: string, fallb
   return typeof value === 'string' || typeof value === 'number' ? String(value).trim() : fallback
 }
 
-function lingzhuGatewayPort(config: Record<string, unknown>) {
-  const parsed = Number.parseInt(lingzhuConfigString(config, 'gateway_port', '18789'), 10)
-  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : 18789
-}
-
-function lingzhuLocalHost(config: Record<string, unknown>) {
-  return lingzhuConfigString(config, 'local_host', '127.0.0.1') || '127.0.0.1'
-}
-
-function lingzhuLocalBaseUrl(config: Record<string, unknown>) {
-  return `http://${lingzhuLocalHost(config)}:${lingzhuGatewayPort(config)}`
-}
+const LINGZHU_PUBLIC_AGENT_ID = 'DeepScientist'
 
 function normalizeBaseUrl(value: string) {
   const trimmed = value.trim()
@@ -451,31 +557,78 @@ function lingzhuPublicBaseUrl(config: Record<string, unknown>) {
   return normalizeBaseUrl(lingzhuConfigString(config, 'public_base_url'))
 }
 
-function lingzhuLocalHealthUrl(config: Record<string, unknown>) {
-  return `${lingzhuLocalBaseUrl(config)}/metis/agent/api/health`
+function isPrivateIpv4Host(hostname: string) {
+  const octets = hostname.split('.').map((item) => Number.parseInt(item, 10))
+  if (octets.length !== 4 || octets.some((item) => Number.isNaN(item) || item < 0 || item > 255)) {
+    return false
+  }
+  const [first, second] = octets
+  if (first === 0 || first === 10 || first === 127) return true
+  if (first === 169 && second === 254) return true
+  if (first === 172 && second >= 16 && second <= 31) return true
+  if (first === 192 && second === 168) return true
+  if (first === 100 && second >= 64 && second <= 127) return true
+  return false
 }
 
-function lingzhuLocalSseUrl(config: Record<string, unknown>) {
-  return `${lingzhuLocalBaseUrl(config)}/metis/agent/api/sse`
+function isPublicBaseUrl(value: string) {
+  const normalized = normalizeBaseUrl(value)
+  if (!normalized) {
+    return false
+  }
+  try {
+    const url = new URL(normalized)
+    const hostname = url.hostname.trim().toLowerCase()
+    if (!hostname) {
+      return false
+    }
+    if (hostname === 'localhost' || hostname === '0.0.0.0' || hostname === '::' || hostname === '::1') {
+      return false
+    }
+    if (hostname.endsWith('.local')) {
+      return false
+    }
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+      return !isPrivateIpv4Host(hostname)
+    }
+    const normalizedIpv6 = hostname.replace(/^\[|\]$/g, '')
+    if (normalizedIpv6.includes(':')) {
+      const lowered = normalizedIpv6.toLowerCase()
+      if (lowered === '::1' || lowered === '::') {
+        return false
+      }
+      if (lowered.startsWith('fc') || lowered.startsWith('fd') || lowered.startsWith('fe80')) {
+        return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function lingzhuBrowserBaseUrl() {
+  if (typeof window === 'undefined' || !window.location?.origin) {
+    return ''
+  }
+  return normalizeBaseUrl(window.location.origin)
+}
+
+function lingzhuResolvedPublicBaseUrl(config: Record<string, unknown>) {
+  const browserBaseUrl = lingzhuBrowserBaseUrl()
+  if (isPublicBaseUrl(browserBaseUrl)) {
+    return browserBaseUrl
+  }
+  const savedBaseUrl = lingzhuPublicBaseUrl(config)
+  if (isPublicBaseUrl(savedBaseUrl)) {
+    return savedBaseUrl
+  }
+  return ''
 }
 
 function lingzhuPublicSseUrl(config: Record<string, unknown>) {
-  const base = lingzhuPublicBaseUrl(config)
+  const base = lingzhuResolvedPublicBaseUrl(config)
   return base ? `${base}/metis/agent/api/sse` : ''
-}
-
-function lingzhuAgentId(config: Record<string, unknown>) {
-  return lingzhuConfigString(config, 'agent_id', 'main') || 'main'
-}
-
-function lingzhuBool(config: Record<string, unknown>, key: string, fallback = false) {
-  const value = config[key]
-  return typeof value === 'boolean' ? value : fallback
-}
-
-function lingzhuNumber(config: Record<string, unknown>, key: string, fallback: number) {
-  const raw = Number.parseInt(lingzhuConfigString(config, key, String(fallback)), 10)
-  return Number.isFinite(raw) ? raw : fallback
 }
 
 function createLingzhuAk() {
@@ -498,63 +651,52 @@ function createLingzhuAk() {
     .join('-')
 }
 
-function lingzhuGeneratedOpenclawConfig(config: Record<string, unknown>) {
-  return JSON.stringify(
-    {
-      gateway: {
-        port: lingzhuGatewayPort(config),
-        http: {
-          endpoints: {
-            chatCompletions: {
-              enabled: true,
-            },
-          },
-        },
-      },
-      plugins: {
-        entries: {
-          lingzhu: {
-            enabled: lingzhuBool(config, 'enabled', false),
-            config: {
-              authAk: lingzhuConfigString(config, 'auth_ak'),
-              agentId: lingzhuAgentId(config),
-              includeMetadata: lingzhuBool(config, 'include_metadata', true),
-              requestTimeoutMs: lingzhuNumber(config, 'request_timeout_ms', 60000),
-              systemPrompt: lingzhuConfigString(config, 'system_prompt'),
-              defaultNavigationMode: lingzhuConfigString(config, 'default_navigation_mode', '0') || '0',
-              enableFollowUp: lingzhuBool(config, 'enable_follow_up', true),
-              followUpMaxCount: lingzhuNumber(config, 'follow_up_max_count', 3),
-              maxImageBytes: lingzhuNumber(config, 'max_image_bytes', 5242880),
-              sessionMode: lingzhuConfigString(config, 'session_mode', 'per_user') || 'per_user',
-              sessionNamespace: lingzhuConfigString(config, 'session_namespace', 'lingzhu') || 'lingzhu',
-              autoReceiptAck: lingzhuBool(config, 'auto_receipt_ack', true),
-              visibleProgressHeartbeat: lingzhuBool(config, 'visible_progress_heartbeat', true),
-              visibleProgressHeartbeatSec: lingzhuNumber(config, 'visible_progress_heartbeat_sec', 10),
-              debugLogging: lingzhuBool(config, 'debug_logging', false),
-              debugLogPayloads: lingzhuBool(config, 'debug_log_payloads', false),
-              debugLogDir: lingzhuConfigString(config, 'debug_log_dir'),
-              enableExperimentalNativeActions: lingzhuBool(config, 'enable_experimental_native_actions', false),
-            },
-          },
-        },
-      },
-    },
-    null,
-    2
-  )
+function lingzhuLogoUrl() {
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return new URL('/assets/branding/logo-rokid.png', window.location.origin).toString()
+  }
+  return '/assets/branding/logo-rokid.png'
 }
 
-function lingzhuGeneratedCurl(config: Record<string, unknown>) {
-  return [
-    `curl -X POST '${lingzhuLocalSseUrl(config)}' \\`,
-    `  --header 'Authorization: Bearer ${lingzhuConfigString(config, 'auth_ak')}' \\`,
-    "  --header 'Content-Type: application/json' \\",
-    `  --data '${JSON.stringify({
-      message_id: 'ds-lingzhu-probe-001',
-      agent_id: lingzhuAgentId(config),
-      message: [{ role: 'user', type: 'text', text: '你好' }],
-    })}'`,
-  ].join('\n')
+function lingzhuDefaultAgentName(locale: Locale) {
+  return locale === 'zh' ? 'DeepScientist' : 'DeepScientist'
+}
+
+function lingzhuDefaultCapabilitySummary(locale: Locale) {
+  return locale === 'zh'
+    ? 'DeepScientist 是一个本地优先的研究智能体，适合处理科研规划、实验执行、结果分析、论文写作与任务跟进。'
+    : 'DeepScientist is a local-first research agent for planning, experiments, analysis, writing, and execution follow-up.'
+}
+
+function lingzhuDefaultOpeningMessage(locale: Locale) {
+  return locale === 'zh'
+    ? '你好，我是 DeepScientist。你可以直接告诉我研究目标、实验问题或需要推进的任务。'
+    : 'Hello, I am DeepScientist. Tell me the research goal, experiment question, or task you want to move forward.'
+}
+
+function resolveWeixinQrContent(payload: { qrcode_content?: unknown; qrcode_url?: unknown }) {
+  const explicit = String(payload.qrcode_content || '').trim()
+  if (explicit) {
+    return explicit
+  }
+  return String(payload.qrcode_url || '').trim()
+}
+
+function resolveWeixinQrImageUrl(payload: { qrcode_url?: unknown }) {
+  const explicit = String(payload.qrcode_url || '').trim()
+  if (!explicit) {
+    return ''
+  }
+  if (explicit.startsWith('data:image/')) {
+    return explicit
+  }
+  if (explicit.startsWith('blob:')) {
+    return explicit
+  }
+  if (/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp|svg)(?:$|[?#])/i.test(explicit)) {
+    return explicit
+  }
+  return ''
 }
 
 function routingConfig(value: ConnectorConfigMap): Record<string, unknown> {
@@ -919,6 +1061,50 @@ function ConnectorGuideImageCard({
   )
 }
 
+function CopyableValueCard({
+  label,
+  value,
+  hint,
+  copyLabel,
+  copiedLabel,
+  copied,
+  onCopy,
+  multiline = false,
+}: {
+  label: string
+  value: string
+  hint?: string
+  copyLabel: string
+  copiedLabel: string
+  copied: boolean
+  onCopy: () => void
+  multiline?: boolean
+}) {
+  return (
+    <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm font-medium">{label}</div>
+        <Button variant="secondary" size="sm" onClick={onCopy} className="shrink-0">
+          {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+          {copied ? copiedLabel : copyLabel}
+        </Button>
+      </div>
+      {multiline ? (
+        <Textarea
+          value={value}
+          readOnly
+          className="mt-3 min-h-[120px] rounded-[18px] border-black/[0.08] bg-white/[0.44] text-sm shadow-none dark:bg-white/[0.03]"
+        />
+      ) : (
+        <div className="mt-3 break-all rounded-[18px] border border-black/[0.06] bg-white/[0.44] px-3 py-3 text-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
+          {value || '—'}
+        </div>
+      )}
+      {hint ? <div className="mt-3 text-xs leading-5 text-muted-foreground">{hint}</div> : null}
+    </div>
+  )
+}
+
 type GuidedStepView = ConnectorGuideStep & {
   index: number
   state: 'done' | 'current' | 'pending'
@@ -1210,7 +1396,7 @@ function ConnectorOverviewCard({
 }) {
   const t = copy[locale]
   const Icon = entry.icon
-  const enabled = Boolean(config.enabled)
+  const enabled = connectorConfigAutoEnabled(entry.name, config)
   const needsPublicNetwork = entry.name === 'lingzhu'
   const publicRequirementLabel =
     locale === 'zh'
@@ -1538,6 +1724,7 @@ function ConnectorCard({
   onUpdateField,
   onUpdateConnector,
   onSave,
+  onRefresh,
   onDeleteProfile,
   onManageProfileBinding,
   onJumpToAnchor,
@@ -1553,16 +1740,17 @@ function ConnectorCard({
   bindingProfileKey?: string
   onUpdateField: (connectorName: ConnectorName, key: string, value: unknown) => void
   onUpdateConnector: (connectorName: ConnectorName, patch: Record<string, unknown>) => void
-  onSave: () => void
+  onSave: () => Promise<boolean> | boolean
+  onRefresh: () => Promise<void> | void
   onDeleteProfile: (connectorName: ConnectorName, profileId: string) => Promise<void> | void
   onManageProfileBinding: (payload: ConnectorProfileBindingAction) => Promise<void> | void
   onJumpToAnchor?: (anchorId: string) => void
 }) {
   const t = copy[locale]
+  const { toast } = useToast()
   const Icon = entry.icon
-  const enabled = Boolean(config.enabled)
+  const enabled = connectorConfigAutoEnabled(entry.name, config)
   const guide = connectorGuideCatalog[entry.name]
-  const [legacyExpanded, setLegacyExpanded] = useState(false)
   const [qqWizardOpen, setQqWizardOpen] = useState(false)
   const [qqWizardStep, setQqWizardStep] = useState<1 | 2 | 3>(1)
   const [qqWizardProfileId, setQqWizardProfileId] = useState<string | null>(null)
@@ -1571,7 +1759,16 @@ function ConnectorCard({
   const [guidedWizardOpen, setGuidedWizardOpen] = useState(false)
   const [guidedWizardStep, setGuidedWizardStep] = useState(1)
   const [lingzhuWizardOpen, setLingzhuWizardOpen] = useState(false)
-  const [lingzhuWizardStep, setLingzhuWizardStep] = useState<1 | 2 | 3>(1)
+  const [weixinWizardOpen, setWeixinWizardOpen] = useState(false)
+  const [weixinQrSessionKey, setWeixinQrSessionKey] = useState('')
+  const [weixinQrContent, setWeixinQrContent] = useState('')
+  const [weixinQrImageUrl, setWeixinQrImageUrl] = useState('')
+  const [weixinQrLoading, setWeixinQrLoading] = useState(false)
+  const [weixinQrSaving, setWeixinQrSaving] = useState(false)
+  const [weixinQrError, setWeixinQrError] = useState('')
+  const [weixinDeleteOpen, setWeixinDeleteOpen] = useState(false)
+  const [weixinDeleting, setWeixinDeleting] = useState(false)
+  const [copiedValueKey, setCopiedValueKey] = useState('')
   const [profileWizardOpen, setProfileWizardOpen] = useState(false)
   const [profileWizardStep, setProfileWizardStep] = useState<1 | 2 | 3>(1)
   const [profileWizardProfileId, setProfileWizardProfileId] = useState<string | null>(null)
@@ -1587,6 +1784,179 @@ function ConnectorCard({
   const cardAnchorId = connectorAnchorId(entry.name)
   const useCompactGuidedLayout = entry.name !== 'qq'
   const connectorModalClassName = 'w-[min(92vw,1100px)] max-w-[calc(100vw-1.5rem)] overflow-y-auto lg:w-[50vw]'
+
+  const closeWeixinWizard = () => {
+    setWeixinWizardOpen(false)
+    setWeixinQrSessionKey('')
+    setWeixinQrContent('')
+    setWeixinQrImageUrl('')
+    setWeixinQrLoading(false)
+    setWeixinQrSaving(false)
+    setWeixinQrError('')
+  }
+
+  useEffect(() => {
+    if (entry.name !== 'weixin' || !weixinWizardOpen || weixinQrSessionKey) {
+      return
+    }
+    let cancelled = false
+
+    const startLogin = async () => {
+      setWeixinQrLoading(true)
+      setWeixinQrError('')
+      try {
+        const payload = await client.startWeixinQrLogin({ force: true })
+        if (cancelled) {
+          return
+        }
+        const nextSessionKey = String(payload.session_key || '').trim()
+        const nextQrContent = resolveWeixinQrContent(payload)
+        const nextQrImageUrl = resolveWeixinQrImageUrl(payload)
+        if (!nextSessionKey || !nextQrContent) {
+          throw new Error(String(payload.message || 'Failed to create WeChat QR code.'))
+        }
+        setWeixinQrSessionKey(nextSessionKey)
+        setWeixinQrContent(nextQrContent)
+        setWeixinQrImageUrl(nextQrImageUrl)
+      } catch (error) {
+        if (!cancelled) {
+          setWeixinQrError(error instanceof Error ? error.message : String(error || 'Failed to create WeChat QR code.'))
+        }
+      } finally {
+        if (!cancelled) {
+          setWeixinQrLoading(false)
+        }
+      }
+    }
+
+    void startLogin()
+    return () => {
+      cancelled = true
+    }
+  }, [entry.name, weixinQrSessionKey, weixinWizardOpen])
+
+  useEffect(() => {
+    if (entry.name !== 'weixin') {
+      setWeixinQrImageUrl('')
+      return
+    }
+    if (!weixinQrContent) {
+      setWeixinQrImageUrl('')
+      return
+    }
+    if (weixinQrImageUrl) {
+      return
+    }
+    let cancelled = false
+
+    const renderQrPng = async () => {
+      try {
+        const qrModule = (await import('qrcode')) as {
+          toDataURL?: (content: string, options?: Record<string, unknown>) => Promise<string>
+          default?: {
+            toDataURL?: (content: string, options?: Record<string, unknown>) => Promise<string>
+          }
+        }
+        const toDataURL = qrModule.toDataURL || qrModule.default?.toDataURL
+        if (typeof toDataURL !== 'function') {
+          throw new Error('QR renderer is unavailable.')
+        }
+        const nextImageUrl = await toDataURL(weixinQrContent, {
+          errorCorrectionLevel: 'M',
+          margin: 2,
+          type: 'image/png',
+          width: 360,
+        })
+        if (!cancelled) {
+          setWeixinQrImageUrl(nextImageUrl)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setWeixinQrError(error instanceof Error ? error.message : String(error || 'Failed to render WeChat QR code.'))
+        }
+      }
+    }
+
+    void renderQrPng()
+    return () => {
+      cancelled = true
+    }
+  }, [entry.name, weixinQrContent, weixinQrImageUrl])
+
+  useEffect(() => {
+    if (entry.name !== 'weixin' || !weixinWizardOpen || !weixinQrSessionKey || weixinQrLoading || weixinQrSaving) {
+      return
+    }
+    let cancelled = false
+    let timer: number | null = null
+
+    const pollLogin = async () => {
+      try {
+        const payload = await client.waitWeixinQrLogin({
+          session_key: weixinQrSessionKey,
+          timeout_ms: 1500,
+        })
+        if (cancelled) {
+          return
+        }
+        if (payload.ok === false && !payload.connected) {
+          throw new Error(String(payload.message || 'Failed to poll WeChat login state.'))
+        }
+        const nextQrContent = resolveWeixinQrContent(payload)
+        const nextQrImageUrl = resolveWeixinQrImageUrl(payload)
+        if (nextQrContent) {
+          if (!nextQrImageUrl) {
+            setWeixinQrImageUrl((current) => (current ? '' : current))
+          }
+          setWeixinQrContent((current) => (current === nextQrContent ? current : nextQrContent))
+        }
+        if (nextQrImageUrl) {
+          setWeixinQrImageUrl((current) => (current === nextQrImageUrl ? current : nextQrImageUrl))
+        }
+        if (payload.connected) {
+          setWeixinQrSaving(true)
+          try {
+            await Promise.resolve(onRefresh())
+            toast({
+              title: t.weixinBindingSuccessTitle,
+              description: t.weixinBindingSuccessBody,
+              variant: 'success',
+            })
+            closeWeixinWizard()
+          } catch (error) {
+            setWeixinQrError(error instanceof Error ? error.message : String(error || 'Failed to refresh WeChat settings.'))
+          } finally {
+            if (!cancelled) {
+              setWeixinQrSaving(false)
+            }
+          }
+          return
+        }
+        timer = window.setTimeout(() => {
+          void pollLogin()
+        }, 150)
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        const message = error instanceof Error ? error.message : String(error || 'Failed to poll WeChat login state.')
+        setWeixinQrError(message)
+        toast({
+          title: t.weixinBindingFailedTitle,
+          description: message,
+          variant: 'destructive',
+        })
+      }
+    }
+
+    void pollLogin()
+    return () => {
+      cancelled = true
+      if (timer != null) {
+        window.clearTimeout(timer)
+      }
+    }
+  }, [entry.name, onRefresh, t.weixinBindingFailedTitle, t.weixinBindingSuccessBody, t.weixinBindingSuccessTitle, toast, weixinQrLoading, weixinQrSaving, weixinQrSessionKey, weixinWizardOpen])
 
   useEffect(() => {
     if (entry.name !== 'qq' || !qqWizardPendingSaveProfileId || saving) {
@@ -1607,7 +1977,7 @@ function ConnectorCard({
   const renderGuidedSetup = () => {
     const missingRequiredFields = missingConnectorFields(entry, guide.requiredFieldKeys, config)
     const requiredReady = missingRequiredFields.length === 0
-    const settingsReady = Boolean(enabled && requiredReady)
+    const settingsReady = requiredReady
     const savedReady = Boolean(settingsReady && !isDirty)
     const targets = snapshot ? normalizeConnectorTargets(snapshot) : []
     const interactionReady = Boolean(targets.length > 0 || snapshot?.main_chat_id)
@@ -1833,26 +2203,10 @@ function ConnectorCard({
                   <StepBlockerNotice locale={locale} description={verifyBlockedDescription} />
                 ) : null}
 
-                {activeWizardStep.includeEnabledToggle || activeStepFields.length ? (
+                {activeStepFields.length ? (
                   <div>
                     <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.stepFields}</div>
                     <div className="grid gap-4 md:grid-cols-2">
-                      {activeWizardStep.includeEnabledToggle ? (
-                        <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                          <label className="flex min-h-[44px] items-center justify-between gap-4">
-                            <span className="text-sm font-medium">{t.enabled}</span>
-                            <input
-                              type="checkbox"
-                              checked={enabled}
-                              onChange={(event) => onUpdateField(entry.name, 'enabled', event.target.checked)}
-                              className="h-4 w-4 rounded border-black/20 text-foreground"
-                            />
-                          </label>
-                          <div className="mt-3 text-xs leading-5 text-muted-foreground">
-                            {translateSettingsCatalogText(locale, entry.deliveryNote)}
-                          </div>
-                        </div>
-                      ) : null}
                       {activeStepFields.map((field) => (
                         <ConnectorFieldControl
                           key={`${activeWizardStep.id}:${field.key}`}
@@ -2926,93 +3280,88 @@ function ConnectorCard({
   }
 
   const renderLingzhuSetup = () => {
+    const copyGeneratedValue = async (key: string, value: string) => {
+      const success = await copyToClipboard(value)
+      if (!success) {
+        return
+      }
+      setCopiedValueKey(key)
+      window.setTimeout(() => {
+        setCopiedValueKey((current) => (current === key ? '' : current))
+      }, 1600)
+    }
     const lingzhuGuide = connectorGuideCatalog.lingzhu
-    const endpointGuideStep = lingzhuGuide.steps.find((step) => step.id === 'endpoint') || null
     const platformGuideStep = lingzhuGuide.steps.find((step) => step.id === 'platform') || null
-    const probeGuideStep = lingzhuGuide.steps.find((step) => step.id === 'probe') || null
-    const localHostField = findConnectorField(entry, 'local_host')
-    const gatewayPortField = findConnectorField(entry, 'gateway_port')
-    const publicBaseUrlField = findConnectorField(entry, 'public_base_url')
-    const authAkField = findConnectorField(entry, 'auth_ak')
-    const agentIdField = findConnectorField(entry, 'agent_id')
-    const systemPromptField = findConnectorField(entry, 'system_prompt')
-    const behaviorFields = [
-      findConnectorField(entry, 'include_metadata'),
-      findConnectorField(entry, 'request_timeout_ms'),
-      findConnectorField(entry, 'default_navigation_mode'),
-      findConnectorField(entry, 'enable_follow_up'),
-      findConnectorField(entry, 'follow_up_max_count'),
-      findConnectorField(entry, 'session_mode'),
-      findConnectorField(entry, 'session_namespace'),
-      findConnectorField(entry, 'auto_receipt_ack'),
-      findConnectorField(entry, 'visible_progress_heartbeat'),
-      findConnectorField(entry, 'visible_progress_heartbeat_sec'),
-      findConnectorField(entry, 'max_image_bytes'),
-    ].filter(Boolean) as ConnectorField[]
-    const advancedFields = [
-      findConnectorField(entry, 'debug_logging'),
-      findConnectorField(entry, 'debug_log_payloads'),
-      findConnectorField(entry, 'debug_log_dir'),
-      findConnectorField(entry, 'enable_experimental_native_actions'),
-    ].filter(Boolean) as ConnectorField[]
-    const snapshotDetails =
-      snapshot?.details && typeof snapshot.details === 'object' ? (snapshot.details as Record<string, unknown>) : {}
-    const localHealthUrl =
-      typeof snapshotDetails.health_url === 'string' && snapshotDetails.health_url
-        ? String(snapshotDetails.health_url)
-        : lingzhuLocalHealthUrl(config)
-    const localSseUrl =
-      typeof snapshotDetails.endpoint_url === 'string' && snapshotDetails.endpoint_url
-        ? String(snapshotDetails.endpoint_url)
-        : lingzhuLocalSseUrl(config)
-    const publicSseUrl =
-      typeof snapshotDetails.public_endpoint_url === 'string' && snapshotDetails.public_endpoint_url
-        ? String(snapshotDetails.public_endpoint_url)
-        : lingzhuPublicSseUrl(config)
-    const generatedConfig =
-      typeof snapshotDetails.generated_openclaw_config === 'string' && snapshotDetails.generated_openclaw_config
-        ? String(snapshotDetails.generated_openclaw_config)
-        : lingzhuGeneratedOpenclawConfig(config)
-    const generatedCurl =
-      typeof snapshotDetails.generated_curl === 'string' && snapshotDetails.generated_curl
-        ? String(snapshotDetails.generated_curl)
-        : lingzhuGeneratedCurl(config)
-    const supportedCommandsRaw =
-      (Array.isArray(snapshotDetails.supported_commands) ? snapshotDetails.supported_commands : null) || []
-    const supportedCommands = supportedCommandsRaw.map((item) => String(item)).filter(Boolean)
-    const targets = snapshot ? normalizeConnectorTargets(snapshot) : []
-    const authAk = lingzhuConfigString(config, 'auth_ak')
-    const publicReady = Boolean(lingzhuPublicBaseUrl(config))
-    const endpointReady = Boolean(enabled && publicReady)
-    const platformReady = Boolean(endpointReady && authAk)
-    const runtimeReady = Boolean(
-      platformReady && (
-        targets.length > 0
-        || (typeof snapshot?.connection_state === 'string' && snapshot.connection_state.trim() && snapshot.connection_state !== 'idle')
-        || (typeof snapshot?.auth_state === 'string' && snapshot.auth_state.trim() && snapshot.auth_state !== 'idle')
-      )
-    )
-    const lingzhuStepSummaries: Array<{ step: 1 | 2 | 3; title: string; state: 'done' | 'current' | 'pending' }> = [
+    const publicBaseUrl = lingzhuResolvedPublicBaseUrl(config)
+    const publicSseUrl = lingzhuPublicSseUrl(config)
+    const authAk = resolveLingzhuAuthAk(lingzhuConfigString(config, 'auth_ak'))
+    const hasPublicBaseUrl = Boolean(publicBaseUrl && publicSseUrl)
+    const rokidPlatformUrl = 'https://agent-develop.rokid.com/space'
+    const logoUrl = lingzhuLogoUrl()
+    const rokidBindingFields = [
       {
-        step: 1,
-        title: endpointGuideStep ? localizedGuideText(locale, endpointGuideStep.title) : t.lingzhuStepEndpoint,
-        state: endpointReady ? 'done' : 'current',
+        key: 'custom-agent-id',
+        label: t.lingzhuCustomAgentId,
+        value: LINGZHU_PUBLIC_AGENT_ID,
       },
       {
-        step: 2,
-        title: platformGuideStep ? localizedGuideText(locale, platformGuideStep.title) : t.lingzhuStepPlatform,
-        state: !endpointReady ? 'pending' : platformReady ? 'done' : 'current',
+        key: 'custom-agent-url',
+        label: t.lingzhuCustomAgentUrl,
+        value: publicSseUrl,
+        hint: hasPublicBaseUrl ? t.lingzhuPublicHint : t.lingzhuNeedPublicIp,
       },
       {
-        step: 3,
-        title: probeGuideStep ? localizedGuideText(locale, probeGuideStep.title) : t.lingzhuStepProbe,
-        state: !platformReady ? 'pending' : runtimeReady ? 'done' : 'current',
+        key: 'custom-agent-ak',
+        label: t.lingzhuCustomAgentAk,
+        value: authAk,
+        hint: t.lingzhuAkPersistenceHint,
+      },
+      {
+        key: 'agent-name',
+        label: t.lingzhuAgentName,
+        value: lingzhuDefaultAgentName(locale),
+      },
+      {
+        key: 'category',
+        label: t.lingzhuCategory,
+        value: t.lingzhuCategoryWork,
+      },
+      {
+        key: 'capability-summary',
+        label: t.lingzhuCapabilitySummary,
+        value: lingzhuDefaultCapabilitySummary(locale),
+        multiline: true,
+      },
+      {
+        key: 'opening-message',
+        label: t.lingzhuOpeningMessage,
+        value: lingzhuDefaultOpeningMessage(locale),
+        multiline: true,
+      },
+      {
+        key: 'input-type',
+        label: t.lingzhuInputType,
+        value: t.lingzhuInputTypeText,
       },
     ]
-    const nextLingzhuStep = lingzhuStepSummaries.find((item) => item.state !== 'done') || lingzhuStepSummaries[lingzhuStepSummaries.length - 1]
-    const maxLingzhuStep = !endpointReady ? 1 : !platformReady ? 2 : 3
+    const bindingGuideItems = [
+      t.lingzhuBindingGuide1,
+      t.lingzhuBindingGuide2,
+      t.lingzhuBindingGuide3,
+      t.lingzhuBindingGuide4,
+      t.lingzhuBindingGuide6,
+      t.lingzhuBindingGuide7,
+    ]
     const openLingzhuWizard = () => {
-      setLingzhuWizardStep(nextLingzhuStep.step)
+      const patch: Record<string, unknown> = {}
+      if (publicBaseUrl && lingzhuPublicBaseUrl(config) !== publicBaseUrl) patch.public_base_url = publicBaseUrl
+      if (lingzhuConfigString(config, 'agent_id') !== LINGZHU_PUBLIC_AGENT_ID) patch.agent_id = LINGZHU_PUBLIC_AGENT_ID
+      if (lingzhuAuthAkNeedsRotation(lingzhuConfigString(config, 'auth_ak')) || !authAk) {
+        patch.auth_ak = createLingzhuAk()
+      }
+      if (Object.keys(patch).length) {
+        onUpdateConnector(entry.name, patch)
+      }
       setLingzhuWizardOpen(true)
     }
 
@@ -3023,97 +3372,48 @@ function ConnectorCard({
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.bindConnectorTitle}</div>
               <h4 className="mt-2 text-lg font-semibold tracking-tight">{localizedGuideText(locale, lingzhuGuide.summary)}</h4>
-              <p className="mt-1 text-sm leading-6 text-muted-foreground">{t.lingzhuNeedPublicIp}</p>
-            </div>
-            <StepStateBadge state={nextLingzhuStep.state} locale={locale} />
-          </div>
-
-          <div className="mt-5 grid gap-3 lg:grid-cols-3">
-            {lingzhuStepSummaries.map((item) => (
-              <div
-                key={`lingzhu-summary:${item.step}`}
-                className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-3 dark:border-white/[0.08] dark:bg-white/[0.04]"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Step {item.step}</span>
-                  <StepStateBadge state={item.state} locale={locale} />
-                </div>
-                <div className="mt-2 text-sm font-medium text-foreground">{item.title}</div>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-5 rounded-[20px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.nextAction}</div>
-            <div className="mt-2 text-sm font-medium text-foreground">{nextLingzhuStep.title}</div>
-            <div className="mt-1 text-sm leading-6 text-muted-foreground">
-              {nextLingzhuStep.step === 1
-                ? localizedGuideText(locale, endpointGuideStep?.description)
-                : nextLingzhuStep.step === 2
-                  ? localizedGuideText(locale, platformGuideStep?.description)
-                  : localizedGuideText(locale, probeGuideStep?.description)}
-            </div>
-          </div>
-
-          <div className="mt-5 flex flex-wrap gap-2">
-            {lingzhuGuide.links.map((link) => (
-              <ConnectorGuideLinkButton
-                key={`lingzhu-endpoint:${link.kind}:${localizedGuideText(locale, link.label)}`}
-                link={link}
-                locale={locale}
-              />
-            ))}
-          </div>
-
-          <div className="mt-5 flex flex-col gap-3 rounded-[20px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03] md:flex-row md:items-center md:justify-between">
-            <div className="text-sm text-muted-foreground">
-              {nextLingzhuStep.step === 1
-                ? t.lingzhuNeedPublicIp
-                : nextLingzhuStep.step === 2
-                  ? t.lingzhuPlatformReminder
-                  : t.lingzhuSnapshotHint}
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                {hasPublicBaseUrl ? t.lingzhuRokidBindHint : t.lingzhuNeedPublicIp}
+              </p>
             </div>
             <Button size="lg" className="rounded-full px-6" onClick={openLingzhuWizard}>
               <RadioTower className="h-4 w-4" />
-              {t.openGuidedSetup}
+              {t.lingzhuAddConnector}
             </Button>
           </div>
-        </section>
 
-        <section className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
-          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.boundTargetsTitle}</div>
-              <h4 className="mt-2 text-lg font-semibold tracking-tight">{t.discoveredTargets}</h4>
-              <p className="mt-1 text-sm leading-6 text-muted-foreground">{t.boundTargetsHint}</p>
+          {!hasPublicBaseUrl ? <StepBlockerNotice locale={locale} description={t.lingzhuNeedPublicIp} /> : null}
+          {hasPublicBaseUrl || authAk ? (
+            <div className="mt-4 rounded-[20px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                {t.lingzhuCurrentBindingValues}
+              </div>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                {hasPublicBaseUrl ? (
+                  <CopyableValueCard
+                    label={t.lingzhuCustomAgentUrl}
+                    value={publicSseUrl}
+                    hint={t.lingzhuPublicHint}
+                    copyLabel={t.lingzhuCopyValue}
+                    copiedLabel={t.lingzhuCopiedValue}
+                    copied={copiedValueKey === 'current-custom-agent-url'}
+                    onCopy={() => void copyGeneratedValue('current-custom-agent-url', publicSseUrl)}
+                  />
+                ) : null}
+                {authAk ? (
+                  <CopyableValueCard
+                    label={t.lingzhuCustomAgentAk}
+                    value={authAk}
+                    hint={t.lingzhuAkPersistenceHint}
+                    copyLabel={t.lingzhuCopyValue}
+                    copiedLabel={t.lingzhuCopiedValue}
+                    copied={copiedValueKey === 'current-custom-agent-ak'}
+                    onCopy={() => void copyGeneratedValue('current-custom-agent-ak', authAk)}
+                  />
+                ) : null}
+              </div>
             </div>
-            <Badge variant="secondary" className="shrink-0">
-              {targets.length}
-            </Badge>
-          </div>
-
-          <div className="mt-5">
-            <ConnectorTargetList locale={locale} targets={targets} emptyText={t.noTargets} showBindingDetails={false} />
-          </div>
-
-          <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.connection}</div>
-              <div className="mt-2 text-sm font-medium">{translateSettingsCatalogText(locale, snapshot?.connection_state || 'idle')}</div>
-            </div>
-            <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.auth}</div>
-              <div className="mt-2 text-sm font-medium">{translateSettingsCatalogText(locale, snapshot?.auth_state || 'idle')}</div>
-            </div>
-            <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuLocalHealthUrl}</div>
-              <div className="mt-2 break-all text-sm font-medium">{localHealthUrl}</div>
-            </div>
-            <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuPublicSseUrl}</div>
-              <div className="mt-2 break-all text-sm font-medium">{publicSseUrl || '—'}</div>
-            </div>
-          </div>
+          ) : null}
         </section>
 
         <Modal
@@ -3125,347 +3425,279 @@ function ConnectorCard({
           className={connectorModalClassName}
         >
           <div className="space-y-5">
-            <div className="grid gap-3 md:grid-cols-3">
-              {lingzhuStepSummaries.map((item) => (
-                <button
-                  key={`lingzhu-wizard-step:${item.step}`}
-                  type="button"
-                  onClick={() => {
-                    if (item.step <= maxLingzhuStep) {
-                      setLingzhuWizardStep(item.step)
-                    }
-                  }}
-                  disabled={item.step > maxLingzhuStep}
-                  className={cn(
-                    'rounded-[18px] border px-4 py-3 text-left disabled:cursor-not-allowed disabled:opacity-60',
-                    lingzhuWizardStep === item.step
-                      ? 'border-black/[0.14] bg-black/[0.04] dark:border-white/[0.18] dark:bg-white/[0.05]'
-                      : 'border-black/[0.08] bg-white/[0.52] dark:border-white/[0.08] dark:bg-white/[0.03]'
-                  )}
+            {!hasPublicBaseUrl ? <StepBlockerNotice locale={locale} description={t.lingzhuNeedPublicIp} /> : null}
+
+            {platformGuideStep?.image ? <ConnectorGuideImageCard image={platformGuideStep.image} locale={locale} /> : null}
+
+            <div className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuPlatformUrl}</div>
+                  <h4 className="mt-2 text-lg font-semibold tracking-tight">{t.lingzhuGeneratedForRokid}</h4>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">{t.lingzhuRokidBindHint}</p>
+                </div>
+                <a
+                  href={rokidPlatformUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-full border border-black/[0.08] bg-white/[0.52] px-3 py-2 text-sm transition hover:border-black/[0.14] hover:text-foreground dark:border-white/[0.12] dark:bg-white/[0.04]"
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Step {item.step}</span>
-                    <StepStateBadge state={item.state} locale={locale} />
+                  <ArrowUpRight className="h-4 w-4" />
+                  {t.lingzhuOpenPlatform}
+                </a>
+              </div>
+
+              <div className="mt-5 grid gap-4 md:grid-cols-2">
+                {rokidBindingFields.map((field) => (
+                  <CopyableValueCard
+                    key={field.key}
+                    label={field.label}
+                    value={field.value}
+                    hint={field.hint}
+                    multiline={field.multiline}
+                    copyLabel={t.lingzhuCopyValue}
+                    copiedLabel={t.lingzhuCopiedValue}
+                    copied={copiedValueKey === field.key}
+                    onCopy={() => {
+                      if (field.value) {
+                        void copyGeneratedValue(field.key, field.value)
+                      }
+                    }}
+                  />
+                ))}
+                <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-sm font-medium">{t.lingzhuIcon}</div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void copyGeneratedValue('logo-url', logoUrl)}
+                      className="shrink-0"
+                    >
+                      {copiedValueKey === 'logo-url' ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                      {copiedValueKey === 'logo-url' ? t.lingzhuCopiedValue : t.lingzhuCopyLogoUrl}
+                    </Button>
                   </div>
-                  <div className="mt-2 text-sm font-medium text-foreground">{item.title}</div>
-                </button>
-              ))}
+                  <div className="mt-3 flex items-center gap-4 rounded-[18px] border border-black/[0.06] bg-white/[0.44] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                    <img src={logoUrl} alt="DeepScientist logo" className="h-14 w-14 rounded-[14px] border border-black/[0.08] bg-white p-2 dark:border-white/[0.12]" />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{lingzhuDefaultAgentName(locale)}</div>
+                      <div className="mt-1 break-all text-xs text-muted-foreground">{logoUrl}</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 text-xs leading-5 text-muted-foreground">{t.lingzhuIconHint}</div>
+                </div>
+              </div>
             </div>
 
-            {lingzhuWizardStep === 1 ? (
-              <div className="space-y-5 pt-2">
-                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                  <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Step 1</div>
-                    <h4 className="mt-2 text-lg font-semibold tracking-tight">{t.lingzhuStepEndpoint}</h4>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                      {localizedGuideText(locale, endpointGuideStep?.description) || t.lingzhuNeedPublicIp}
-                    </p>
-                  </div>
-                  <StepStateBadge state={lingzhuStepSummaries[0].state} locale={locale} />
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {lingzhuGuide.links.map((link) => (
-                    <ConnectorGuideLinkButton
-                      key={`lingzhu-step1:${link.kind}:${localizedGuideText(locale, link.label)}`}
-                      link={link}
-                      locale={locale}
-                    />
-                  ))}
-                </div>
-
-                {endpointGuideStep?.image ? <ConnectorGuideImageCard image={endpointGuideStep.image} locale={locale} /> : null}
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <label className="flex min-h-[44px] items-center justify-between gap-4">
-                      <span className="text-sm font-medium">{t.enabled}</span>
-                      <input
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={(event) => onUpdateField(entry.name, 'enabled', event.target.checked)}
-                        className="h-4 w-4 rounded border-black/20 text-foreground"
-                      />
-                    </label>
-                    <div className="mt-3 text-xs leading-5 text-muted-foreground">{t.lingzhuNeedPublicIp}</div>
-                  </div>
-                  {localHostField ? (
-                    <ConnectorFieldControl
-                      field={localHostField}
-                      config={config}
-                      locale={locale}
-                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                    />
-                  ) : null}
-                  {gatewayPortField ? (
-                    <ConnectorFieldControl
-                      field={gatewayPortField}
-                      config={config}
-                      locale={locale}
-                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                    />
-                  ) : null}
-                  {publicBaseUrlField ? (
-                    <ConnectorFieldControl
-                      field={publicBaseUrlField}
-                      config={config}
-                      locale={locale}
-                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                    />
-                  ) : null}
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="secondary"
-                    onClick={() => onUpdateConnector(entry.name, { local_host: '127.0.0.1', gateway_port: '18789' })}
-                  >
-                    {t.lingzhuUseLocalDefaults}
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-
-            {lingzhuWizardStep === 2 ? (
-              <div className="space-y-5 pt-2">
-                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                  <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Step 2</div>
-                    <h4 className="mt-2 text-lg font-semibold tracking-tight">{t.lingzhuGeneratedValues}</h4>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                      {localizedGuideText(locale, platformGuideStep?.description) || t.lingzhuPlatformReminder}
-                    </p>
-                  </div>
-                  <StepStateBadge state={lingzhuStepSummaries[1].state} locale={locale} />
-                </div>
-
-                {!endpointReady ? <StepBlockerNotice locale={locale} description={t.lingzhuCompleteEndpointFirst} /> : null}
-
-                {platformGuideStep?.image ? <ConnectorGuideImageCard image={platformGuideStep.image} locale={locale} /> : null}
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  {authAkField ? (
-                    <ConnectorFieldControl
-                      field={authAkField}
-                      config={config}
-                      locale={locale}
-                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                    />
-                  ) : null}
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.lingzhuGenerateAk}</div>
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">{t.lingzhuPublicHint}</div>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <Button
-                        variant="secondary"
-                        onClick={() => onUpdateField(entry.name, 'auth_ak', createLingzhuAk())}
-                      >
-                        <ShieldCheck className="h-4 w-4" />
-                        {t.lingzhuGenerateAk}
-                      </Button>
-                    </div>
-                  </div>
-                  {agentIdField ? (
-                    <ConnectorFieldControl
-                      field={agentIdField}
-                      config={config}
-                      locale={locale}
-                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                    />
-                  ) : null}
-                  {systemPromptField ? (
-                    <ConnectorFieldControl
-                      field={systemPromptField}
-                      config={config}
-                      locale={locale}
-                      onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                    />
-                  ) : null}
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-3">
-                  <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuLocalHealthUrl}</div>
-                    <div className="mt-2 break-all text-sm font-medium">{localHealthUrl}</div>
-                  </div>
-                  <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuLocalSseUrl}</div>
-                    <div className="mt-2 break-all text-sm font-medium">{localSseUrl}</div>
-                  </div>
-                  <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuPublicSseUrl}</div>
-                    <div className="mt-2 break-all text-sm font-medium">{publicSseUrl || '—'}</div>
-                  </div>
-                </div>
-
-                <div className="grid gap-4 lg:grid-cols-2">
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.lingzhuOpenclawConfig}</div>
-                    <Textarea value={generatedConfig} readOnly className="mt-3 min-h-[240px] rounded-[18px] border-black/[0.08] bg-white/[0.44] font-mono text-xs shadow-none dark:bg-white/[0.03]" />
-                  </div>
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.lingzhuCurl}</div>
-                    <Textarea value={generatedCurl} readOnly className="mt-3 min-h-[240px] rounded-[18px] border-black/[0.08] bg-white/[0.44] font-mono text-xs shadow-none dark:bg-white/[0.03]" />
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            {lingzhuWizardStep === 3 ? (
-              <div className="space-y-5 pt-2">
-                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                  <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Step 3</div>
-                    <h4 className="mt-2 text-lg font-semibold tracking-tight">{t.lingzhuProbeResult}</h4>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                      {localizedGuideText(locale, probeGuideStep?.description) || t.lingzhuSnapshotHint}
-                    </p>
-                  </div>
-                  <StepStateBadge state={lingzhuStepSummaries[2].state} locale={locale} />
-                </div>
-
-                {!platformReady ? <StepBlockerNotice locale={locale} description={t.lingzhuSavePlatformValuesFirst} /> : null}
-
-                {probeGuideStep?.image ? <ConnectorGuideImageCard image={probeGuideStep.image} locale={locale} /> : null}
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.discoveredTargets}</div>
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">{t.useDiscoveredTargets}</div>
-                    <div className="mt-4">
-                      <ConnectorTargetList locale={locale} targets={targets} emptyText={t.noTargets} showBindingDetails={false} />
-                    </div>
-                  </div>
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.snapshot}</div>
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">{t.lingzhuSnapshotHint}</div>
-                    <div className="mt-4 space-y-2 text-sm text-muted-foreground">
-                      <div>
-                        <span className="text-foreground">{t.connection}:</span>{' '}
-                        {translateSettingsCatalogText(locale, snapshot?.connection_state || 'idle')}
-                      </div>
-                      <div>
-                        <span className="text-foreground">{t.auth}:</span>{' '}
-                        {translateSettingsCatalogText(locale, snapshot?.auth_state || 'idle')}
-                      </div>
-                      <div>
-                        <span className="text-foreground">{t.discoveredTargets}:</span> {targets.length}
-                      </div>
-                      <div>
-                        <span className="text-foreground">{t.lingzhuPublicSseUrl}:</span> {publicSseUrl || '—'}
-                      </div>
-                      <div className={runtimeReady ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'}>
-                        {runtimeReady ? t.ok : t.stepProbeHint}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.lingzhuSupportedCommands}</div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {supportedCommands.length ? (
-                        supportedCommands.map((command) => (
-                          <span key={command} className="rounded-full border border-black/[0.08] bg-white/[0.44] px-3 py-1 text-xs dark:border-white/[0.12] dark:bg-white/[0.03]">
-                            {command}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="text-sm text-muted-foreground">—</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <div className="text-sm font-medium">{t.lingzhuAgentIdHint}</div>
-                    <div className="mt-2 text-sm text-muted-foreground">{lingzhuAgentId(config)}</div>
-                  </div>
-                </div>
-
-                <div className="border-t border-black/[0.06] pt-5 dark:border-white/[0.08]">
-                  <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.stepFields}</div>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    {behaviorFields.map((field) => (
-                      <ConnectorFieldControl
-                        key={field.key}
-                        field={field}
-                        config={config}
-                        locale={locale}
-                        onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                {advancedFields.length ? (
-                  <section className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.showLegacy}</div>
-                        <h4 className="mt-2 text-lg font-semibold tracking-tight">{translateSettingsCatalogText(locale, 'Advanced debug')}</h4>
-                      </div>
-                      <Button variant="secondary" onClick={() => setLegacyExpanded((current) => !current)}>
-                        {legacyExpanded ? t.hideLegacy : t.showLegacy}
-                      </Button>
-                    </div>
-                    {legacyExpanded ? (
-                      <div className="mt-5 grid gap-4 md:grid-cols-2">
-                        {advancedFields.map((field) => (
-                          <ConnectorFieldControl
-                            key={field.key}
-                            field={field}
-                            config={config}
-                            locale={locale}
-                            onChange={(key, value) => onUpdateField(entry.name, key, value)}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                  </section>
-                ) : null}
-              </div>
-            ) : null}
+            <div className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.lingzhuBindingGuideTitle}</div>
+              <ol className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
+                {bindingGuideItems.map((item, index) => (
+                  <li key={`lingzhu-binding-guide:${index}`}>{index + 1}. {item}</li>
+                ))}
+              </ol>
+            </div>
 
             <ModalFooter className="-mx-6 -mb-4 mt-2">
               <Button variant="secondary" onClick={() => setLingzhuWizardOpen(false)}>
                 {t.wizardClose}
               </Button>
-              {lingzhuWizardStep > 1 ? (
-                <Button variant="secondary" onClick={() => setLingzhuWizardStep((current) => Math.max(1, current - 1) as 1 | 2 | 3)}>
-                  {t.wizardBack}
-                </Button>
-              ) : null}
-              {lingzhuWizardStep < 3 ? (
-                <Button
-                  onClick={() => {
-                    onSave()
-                    setLingzhuWizardStep((current) => Math.min(3, current + 1) as 1 | 2 | 3)
-                  }}
-                  disabled={
-                    saving ||
-                    (lingzhuWizardStep === 1 && !endpointReady) ||
-                    (lingzhuWizardStep === 2 && !platformReady)
-                  }
-                >
-                  {saving ? t.saving : t.wizardSaveContinue}
-                </Button>
-              ) : (
-                <Button
-                  onClick={() => {
+              <Button
+                onClick={() => {
+                  void (async () => {
                     if (isDirty) {
-                      onSave()
+                      const saved = await Promise.resolve(onSave())
+                      if (!saved) {
+                        return
+                      }
                     }
                     setLingzhuWizardOpen(false)
-                  }}
-                  disabled={saving}
-                >
-                  {saving ? t.saving : isDirty ? t.save : t.wizardDone}
-                </Button>
-              )}
+                  })()
+                }}
+                disabled={saving || !hasPublicBaseUrl || !authAk}
+              >
+                {saving ? t.saving : t.save}
+              </Button>
             </ModalFooter>
           </div>
         </Modal>
+      </div>
+    )
+  }
+
+  const renderWeixinSetup = () => {
+    const accountId = String(config.account_id || '').trim()
+    const loginUserId = String(config.login_user_id || '').trim()
+    const hasBinding = Boolean(accountId)
+    const introGuideImage =
+      guide.steps.find((step) => step.id === 'platform')?.image ||
+      guide.steps.find((step) => step.id === 'scan')?.image ||
+      guide.steps[0]?.image ||
+      null
+
+    const openWeixinWizard = () => {
+      setWeixinQrSessionKey('')
+      setWeixinQrContent('')
+      setWeixinQrImageUrl('')
+      setWeixinQrLoading(false)
+      setWeixinQrSaving(false)
+      setWeixinQrError('')
+      setWeixinWizardOpen(true)
+    }
+
+    const deleteWeixinBinding = async () => {
+      setWeixinDeleting(true)
+      try {
+        flushSync(() => {
+          onUpdateConnector(entry.name, {
+            enabled: false,
+            bot_token: null,
+            bot_token_env: null,
+            account_id: null,
+            login_user_id: null,
+          })
+        })
+        const saved = await Promise.resolve(onSave())
+        if (!saved) {
+          throw new Error(locale === 'zh' ? '微信删除保存失败。' : 'Failed to save WeChat deletion.')
+        }
+        toast({
+          title: t.weixinDeleteSuccessTitle,
+          description: t.weixinDeleteSuccessBody,
+          variant: 'success',
+        })
+        setWeixinDeleteOpen(false)
+      } catch (error) {
+        toast({
+          title: t.weixinBindingFailedTitle,
+          description: error instanceof Error ? error.message : String(error || 'Failed to delete WeChat binding.'),
+          variant: 'destructive',
+        })
+      } finally {
+        setWeixinDeleting(false)
+      }
+    }
+
+    return (
+      <div className="space-y-5">
+        <section className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.bindConnectorTitle}</div>
+              <h4 className="mt-2 text-lg font-semibold tracking-tight">{localizedGuideText(locale, guide.summary)}</h4>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">{t.weixinBindHint}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {guide.links.map((link, index) => (
+                  <ConnectorGuideLinkButton
+                    key={`weixin-guide-link:${index}:${link.kind === 'external' ? link.href : link.docSlug}`}
+                    link={link}
+                    locale={locale}
+                  />
+                ))}
+              </div>
+            </div>
+            <Button size="lg" className="rounded-full px-6" onClick={openWeixinWizard}>
+              <RadioTower className="h-4 w-4" />
+              {hasBinding ? t.weixinRebindConnector : t.weixinAddConnector}
+            </Button>
+          </div>
+
+          {introGuideImage ? (
+            <div className="mt-4">
+              <ConnectorGuideImageCard image={introGuideImage} locale={locale} />
+            </div>
+          ) : null}
+
+          <div className="mt-4 rounded-[20px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t.weixinCurrentBinding}</div>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="rounded-[18px] border border-black/[0.06] bg-white/[0.44] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <div className="text-sm font-medium">{t.weixinAccountId}</div>
+                <div className="mt-2 break-all text-sm text-muted-foreground">{accountId || t.weixinNotBoundYet}</div>
+              </div>
+              <div className="rounded-[18px] border border-black/[0.06] bg-white/[0.44] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <div className="text-sm font-medium">{t.weixinLoginUserId}</div>
+                <div className="mt-2 break-all text-sm text-muted-foreground">{loginUserId || t.weixinNotBoundYet}</div>
+              </div>
+            </div>
+            {hasBinding ? (
+              <div className="mt-4 flex justify-end">
+                <Button
+                  variant="secondary"
+                  onClick={() => setWeixinDeleteOpen(true)}
+                  className="text-red-600 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {t.weixinDeleteAction}
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        <Modal
+          open={weixinWizardOpen}
+          onClose={closeWeixinWizard}
+          title={t.weixinQrModalTitle}
+          size="xl"
+          className="w-[min(96vw,980px)] max-w-[calc(100vw-1rem)]"
+        >
+          <div className="max-h-[calc(100dvh-8rem)] overflow-auto py-4 pr-1">
+            <div className="grid min-w-[720px] grid-cols-[360px_minmax(320px,1fr)] gap-4">
+              <div className="flex min-h-[420px] items-center justify-center rounded-[20px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                {weixinQrError ? (
+                  <div className="text-sm text-red-600 dark:text-red-300">{weixinQrError}</div>
+                ) : weixinQrLoading || weixinQrSaving || (weixinQrContent && !weixinQrImageUrl) ? (
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                ) : weixinQrImageUrl ? (
+                  <img
+                    src={weixinQrImageUrl}
+                    alt="Weixin QR code"
+                    className="h-[320px] w-[320px] rounded-[24px] border border-black/[0.08] bg-white p-4 shadow-sm dark:border-white/[0.12]"
+                  />
+                ) : (
+                  <div className="text-sm text-red-600 dark:text-red-300">{weixinQrError || t.weixinQrLoading}</div>
+                )}
+              </div>
+              <div className="space-y-4">
+                {introGuideImage ? (
+                  <div className="overflow-hidden rounded-[20px] border border-black/[0.06] bg-white/[0.44] dark:border-white/[0.08] dark:bg-white/[0.03]">
+                    <img
+                      src={getDocAssetUrl(introGuideImage.assetPath)}
+                      alt={localizedGuideText(locale, introGuideImage.alt)}
+                      className="block w-full bg-white object-cover"
+                      loading="lazy"
+                    />
+                  </div>
+                ) : null}
+                <div className="rounded-[20px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 text-sm leading-6 text-muted-foreground dark:border-white/[0.08] dark:bg-white/[0.03]">
+                  <p>{t.weixinQrHint1}</p>
+                  <p>{t.weixinQrHint2}</p>
+                  {t.weixinQrHint3 ? <p>{t.weixinQrHint3}</p> : null}
+                </div>
+              </div>
+            </div>
+          </div>
+        </Modal>
+
+        <ConfirmModal
+          open={weixinDeleteOpen}
+          onClose={() => {
+            if (!weixinDeleting) {
+              setWeixinDeleteOpen(false)
+            }
+          }}
+          onConfirm={() => {
+            void deleteWeixinBinding()
+          }}
+          title={t.weixinDeleteTitle}
+          description={t.weixinDeleteConfirm}
+          confirmText={t.weixinDeleteAction}
+          cancelText={t.wizardClose}
+          variant="danger"
+          loading={weixinDeleting}
+        />
       </div>
     )
   }
@@ -3494,15 +3726,9 @@ function ConnectorCard({
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <label className="inline-flex items-center gap-2 rounded-full border border-black/[0.08] bg-white/[0.52] px-3 py-2 text-sm dark:border-white/[0.12] dark:bg-white/[0.04]">
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(event) => onUpdateField(entry.name, 'enabled', event.target.checked)}
-              className="h-4 w-4 rounded border-black/20"
-            />
-            {t.enabled}
-          </label>
+          <span className="inline-flex items-center rounded-full border border-black/[0.08] bg-white/[0.52] px-3 py-2 text-sm text-muted-foreground dark:border-white/[0.12] dark:bg-white/[0.04]">
+            {enabled ? t.enabled : t.disabled}
+          </span>
           <a
             href={entry.portalUrl}
             target="_blank"
@@ -3517,7 +3743,9 @@ function ConnectorCard({
 
       {useCompactGuidedLayout ? (
         <div className="mt-6">
-          {entry.name === 'lingzhu'
+          {entry.name === 'weixin'
+            ? renderWeixinSetup()
+            : entry.name === 'lingzhu'
             ? renderLingzhuSetup()
             : isGenericProfileConnectorName(entry.name)
               ? renderProfileConnectorSetup()
@@ -3639,6 +3867,7 @@ export function ConnectorSettingsForm({
   selectedConnectorName,
   onChange,
   onSave,
+  onRefresh,
   onDeleteProfile,
   onManageProfileBinding,
   onSelectConnector,
@@ -3656,7 +3885,8 @@ export function ConnectorSettingsForm({
   visibleConnectorNames: ConnectorName[]
   selectedConnectorName?: ConnectorName | null
   onChange: (next: ConnectorConfigMap) => void
-  onSave: () => void
+  onSave: () => Promise<boolean> | boolean
+  onRefresh: () => Promise<void> | void
   onDeleteProfile: (connectorName: ConnectorName, profileId: string) => Promise<void> | void
   onManageProfileBinding: (payload: ConnectorProfileBindingAction) => Promise<void> | void
   onSelectConnector: (connectorName: ConnectorName) => void
@@ -3671,7 +3901,10 @@ export function ConnectorSettingsForm({
     [visibleConnectorNames]
   )
   const enabledEntries = useMemo(
-    () => visibleEntries.filter((entry) => Boolean(value[entry.name]?.enabled)),
+    () =>
+      visibleEntries.filter((entry) =>
+        connectorConfigAutoEnabled(entry.name, (value[entry.name] as Record<string, unknown> | undefined) || {})
+      ),
     [value, visibleEntries]
   )
   const preferredConnector = typeof routing.primary_connector === 'string' ? routing.primary_connector : ''
@@ -3849,6 +4082,7 @@ export function ConnectorSettingsForm({
               onUpdateField={updateConnectorField}
               onUpdateConnector={updateConnectorFields}
               onSave={onSave}
+              onRefresh={onRefresh}
               onDeleteProfile={onDeleteProfile}
               onManageProfileBinding={onManageProfileBinding}
               onJumpToAnchor={onJumpToAnchor}

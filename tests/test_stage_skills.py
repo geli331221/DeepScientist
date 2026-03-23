@@ -112,9 +112,23 @@ def test_idea_skill_requires_memory_first_literature_survey() -> None:
     assert "arXiv" in text
     assert "artifact.arxiv(" in text
     assert "literature survey report" in text
+    assert "at least `5` and usually `5-10`" in text
+    assert "task-modeling-related" in text
+    assert "Treat that literature floor as a hard gate" in text
+    assert "standard citation format" in text
+    assert "`References` or `Bibliography` section" in text
 
     template = repo_root() / "src" / "skills" / "idea" / "references" / "literature-survey-template.md"
     assert template.exists()
+    template_text = template.read_text(encoding="utf-8")
+    assert "hard floor of at least `5` and usually `5-10` usable papers" in template_text
+    assert "standard citation string or citation key" in template_text
+    assert "Citation-ready shortlist for the selected idea" in template_text
+
+    gate_template = repo_root() / "src" / "skills" / "idea" / "references" / "selection-gate.md"
+    gate_text = gate_template.read_text(encoding="utf-8")
+    assert "the literature survey must already durably cover at least `5` and usually `5-10` related and usable papers" in gate_text
+    assert "`references` or `bibliography` in a standard citation format" in gate_text
 
 
 def test_scout_skill_requires_memory_first_literature_report() -> None:

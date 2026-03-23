@@ -6,6 +6,8 @@ from typing import Any
 
 from ..shared import ensure_dir, read_json, sha256_text, utc_now, write_json
 
+NODE_TRACE_SCHEMA_VERSION = 2
+
 
 def _format_state_label(value: str | None) -> str:
     normalized = str(value or "").strip().replace("_", " ").replace("-", " ")
@@ -36,6 +38,23 @@ def _normalize_branch_name(value: object, *, fallback: str) -> str:
     return text or fallback
 
 
+def _infer_stage_from_branch_name(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized.startswith("analysis/"):
+        return "analysis"
+    if normalized.startswith("run/"):
+        return "experiment"
+    if normalized.startswith("idea/"):
+        return "idea"
+    if normalized.startswith("paper/") or normalized.startswith("write/"):
+        return "writing"
+    if normalized.startswith("baseline/"):
+        return "baseline"
+    return None
+
+
 def _infer_stage_from_skill(skill_id: object) -> str | None:
     normalized = str(skill_id or "").strip().lower()
     if not normalized:
@@ -46,8 +65,10 @@ def _infer_stage_from_skill(skill_id: object) -> str | None:
         return "baseline"
     if normalized in {"idea", "scout+idea"}:
         return "idea"
-    if normalized in {"experiment", "analysis-campaign", "analysis"}:
+    if normalized == "experiment":
         return "experiment"
+    if normalized in {"analysis-campaign", "analysis", "analysis_slice"}:
+        return "analysis"
     if normalized in {"write", "finalize"}:
         return "writing"
     if normalized == "decision":
@@ -103,6 +124,56 @@ def _load_artifact_record(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_paths_map(value: object) -> dict[str, str | None]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, str | None] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if raw_value is None:
+            normalized[key] = None
+            continue
+        text = str(raw_value).strip()
+        normalized[key] = text or None
+    return normalized
+
+
+def _normalize_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        text = str(raw or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+    return items
+
+
+def _run_artifact_context(quest_root: Path, run_id: str | None) -> dict[str, Any] | None:
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        return None
+    path = quest_root / ".ds" / "runs" / normalized / "artifact.json"
+    payload = read_json(path, {})
+    if not isinstance(payload, dict) or not payload:
+        return None
+    record = dict(payload.get("record") or {}) if isinstance(payload.get("record"), dict) else {}
+    checkpoint = dict(payload.get("checkpoint") or {}) if isinstance(payload.get("checkpoint"), dict) else {}
+    return {
+        "path": str(path),
+        "record": record,
+        "checkpoint": checkpoint,
+        "head_commit": str(checkpoint.get("head") or record.get("head_commit") or "").strip() or None,
+        "paths_map": _normalize_paths_map(record.get("paths")),
+        "changed_files": _normalize_string_list(record.get("files_changed")),
+    }
+
+
 def _build_run_contexts(quest_root: Path, *, default_branch: str) -> dict[str, dict[str, Any]]:
     contexts: dict[str, dict[str, Any]] = {}
     artifact_roots = [quest_root / "artifacts"]
@@ -145,6 +216,7 @@ def _build_run_contexts(quest_root: Path, *, default_branch: str) -> dict[str, d
             current["worktree_rel_path"] = current.get("worktree_rel_path") or record.get("worktree_rel_path")
             current["summary"] = current.get("summary") or summary
             current["updated_at"] = current.get("updated_at") or updated_at
+            current["artifact_path"] = current.get("artifact_path") or str(artifact_path)
             contexts[run_id] = current
     return contexts
 
@@ -160,6 +232,7 @@ def _resolve_entry_context(
     raw_event_type = str(entry.get("raw_event_type") or entry.get("kind") or "").strip()
     run_context = run_contexts.get(run_id or "")
     artifact_context: dict[str, Any] | None = None
+    artifact_path: str | None = None
     for raw_path in entry.get("paths") or []:
         try:
             path = Path(str(raw_path))
@@ -169,16 +242,24 @@ def _resolve_entry_context(
             continue
         artifact_context = _load_artifact_record(path)
         if artifact_context:
+            artifact_path = str(path)
             break
+    if run_id is None and artifact_context:
+        run_id = str(artifact_context.get("run_id") or "").strip() or None
+    run_artifact = _run_artifact_context(quest_root, run_id)
     branch_name = _normalize_branch_name(
-        (artifact_context or {}).get("branch") or (run_context or {}).get("branch_name"),
+        (artifact_context or {}).get("branch")
+        or (((run_artifact or {}).get("record") or {}) if isinstance((run_artifact or {}).get("record"), dict) else {}).get("branch")
+        or (run_context or {}).get("branch_name"),
         fallback=default_branch,
     )
     stage_key = (
         _infer_stage_from_skill(entry.get("skill_id"))
         or _infer_stage_from_artifact(artifact_context or {})
+        or _infer_stage_from_artifact((((run_artifact or {}).get("record") or {}) if run_artifact else {}))
         or (run_context or {}).get("stage_key")
         or _infer_stage_from_event_type(raw_event_type)
+        or _infer_stage_from_branch_name(branch_name)
         or "general"
     )
     return {
@@ -186,9 +267,15 @@ def _resolve_entry_context(
         "branch_name": branch_name,
         "stage_key": stage_key,
         "worktree_rel_path": (artifact_context or {}).get("worktree_rel_path")
+        or (((run_artifact or {}).get("record") or {}) if run_artifact else {}).get("worktree_rel_path")
         or (run_context or {}).get("worktree_rel_path"),
+        "artifact_context": artifact_context,
+        "artifact_path": artifact_path or (run_context or {}).get("artifact_path"),
+        "run_artifact": run_artifact,
         "trace_confidence": "artifact"
         if artifact_context
+        else "run_artifact"
+        if run_artifact
         else "run_context"
         if run_context
         else "default_branch",
@@ -196,6 +283,25 @@ def _resolve_entry_context(
 
 
 def _build_action(entry: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    artifact_context = (
+        dict(context.get("artifact_context") or {})
+        if isinstance(context.get("artifact_context"), dict)
+        else {}
+    )
+    run_artifact = (
+        dict(context.get("run_artifact") or {})
+        if isinstance(context.get("run_artifact"), dict)
+        else {}
+    )
+    run_record = dict(run_artifact.get("record") or {}) if isinstance(run_artifact.get("record"), dict) else {}
+    paths_map = _normalize_paths_map(artifact_context.get("paths")) or _normalize_paths_map(run_record.get("paths"))
+    changed_files = _normalize_string_list(artifact_context.get("files_changed")) or _normalize_string_list(
+        artifact_context.get("changed_files")
+    ) or _normalize_string_list(run_record.get("files_changed")) or _normalize_string_list(run_artifact.get("changed_files"))
+    details_json = dict(artifact_context.get("details") or {}) if isinstance(artifact_context.get("details"), dict) else {}
+    checkpoint_json = dict(run_artifact.get("checkpoint") or {}) if isinstance(run_artifact.get("checkpoint"), dict) else {}
+    metadata = dict(entry.get("metadata") or {}) if isinstance(entry.get("metadata"), dict) else {}
+    payload_json = artifact_context or metadata or None
     return {
         "action_id": entry.get("id"),
         "kind": entry.get("kind"),
@@ -217,6 +323,22 @@ def _build_action(entry: dict[str, Any], context: dict[str, Any]) -> dict[str, A
         "reason": entry.get("reason"),
         "raw_event_type": entry.get("raw_event_type"),
         "paths": [str(item) for item in (entry.get("paths") or []) if item],
+        "paths_map": paths_map or None,
+        "artifact_id": artifact_context.get("artifact_id"),
+        "artifact_kind": artifact_context.get("kind"),
+        "artifact_path": context.get("artifact_path"),
+        "head_commit": (
+            str(
+                artifact_context.get("head_commit")
+                or run_artifact.get("head_commit")
+                or ""
+            ).strip()
+            or None
+        ),
+        "payload_json": payload_json,
+        "details_json": details_json or (metadata or None),
+        "checkpoint_json": checkpoint_json or None,
+        "changed_files": changed_files or None,
         "trace_confidence": context.get("trace_confidence"),
     }
 
@@ -277,6 +399,24 @@ def _build_trace_item(
     ) or None
     run_ids = sorted({str(item.get("run_id") or "").strip() for item in ordered_actions if item.get("run_id")})
     skill_ids = sorted({str(item.get("skill_id") or "").strip() for item in ordered_actions if item.get("skill_id")})
+    primary_action = next(
+        (
+            action
+            for action in reversed(ordered_actions)
+            if action.get("artifact_id")
+            or action.get("head_commit")
+            or action.get("payload_json")
+            or action.get("details_json")
+        ),
+        ordered_actions[-1] if ordered_actions else {},
+    )
+    merged_paths_map: dict[str, str | None] = {}
+    for action in ordered_actions:
+        if isinstance(action.get("paths_map"), dict):
+            merged_paths_map.update(action.get("paths_map") or {})
+    merged_changed_files = _normalize_string_list(
+        [item for action in ordered_actions for item in (action.get("changed_files") or [])]
+    )
     return {
         "selection_type": selection_type,
         "selection_ref": selection_ref,
@@ -291,6 +431,13 @@ def _build_trace_item(
         "counts": _build_counts(ordered_actions),
         "run_ids": run_ids,
         "skill_ids": skill_ids,
+        "artifact_id": primary_action.get("artifact_id"),
+        "artifact_kind": primary_action.get("artifact_kind"),
+        "head_commit": primary_action.get("head_commit"),
+        "payload_json": primary_action.get("payload_json"),
+        "details_json": primary_action.get("details_json"),
+        "paths_map": merged_paths_map or None,
+        "changed_files": merged_changed_files or None,
         "actions": ordered_actions,
     }
 
@@ -313,6 +460,7 @@ class QuestNodeTraceManager:
         source_signature = sha256_text(
             json.dumps(
                 {
+                    "schema_version": NODE_TRACE_SCHEMA_VERSION,
                     "entries": workflow.get("entries") or [],
                     "branch": (snapshot or {}).get("branch"),
                 },
@@ -324,6 +472,7 @@ class QuestNodeTraceManager:
         if (
             isinstance(existing, dict)
             and existing.get("quest_id") == quest_id
+            and existing.get("schema_version") == NODE_TRACE_SCHEMA_VERSION
             and existing.get("source_signature") == source_signature
             and isinstance(existing.get("items"), list)
         ):
@@ -418,6 +567,7 @@ class QuestNodeTraceManager:
 
         payload = {
             "quest_id": quest_id,
+            "schema_version": NODE_TRACE_SCHEMA_VERSION,
             "generated_at": utc_now(),
             "source_signature": source_signature,
             "items": items,

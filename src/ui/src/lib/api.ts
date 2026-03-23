@@ -28,8 +28,22 @@ import type {
   QuestSummary,
   SessionPayload,
   SystemUpdateStatus,
+  WeixinQrLoginStartPayload,
+  WeixinQrLoginWaitPayload,
   WorkflowPayload,
 } from '@/types'
+import {
+  getDemoGitCompare,
+  getDemoExplorerPayload,
+  getDemoGitBranches,
+  getDemoGitDiffFile,
+  getDemoMetricsTimeline,
+  getDemoStageView,
+  listDemoDocuments,
+  listDemoMemory,
+  openDemoDocument,
+} from '@/demo/adapter'
+import { isDemoProjectId } from '@/demo/projects'
 
 type ConfigStructuredPayload = Record<string, unknown>
 
@@ -88,8 +102,36 @@ export const client = {
   quests: () => api<QuestSummary[]>('/api/quests'),
   nextQuestId: () => api<{ quest_id: string }>('/api/quest-id/next'),
   baselines: () => api<BaselineRegistryEntry[]>('/api/baselines'),
+  deleteBaseline: (baselineId: string) =>
+    api<{
+      ok: boolean
+      baseline_id: string
+      deleted?: boolean
+      already_deleted?: boolean
+      affected_quest_ids?: string[]
+      cleared_requested_refs?: number
+      cleared_confirmed_refs?: number
+      deleted_paths?: string[]
+      warnings?: string[]
+      message?: string
+    }>(`/api/baselines/${encodeURIComponent(baselineId)}`, {
+      method: 'DELETE',
+    }),
   connectorsAvailability: () => api<ConnectorAvailabilitySnapshot>('/api/connectors/availability'),
   session: (questId: string) => api<SessionPayload>(`/api/quests/${questId}/session`),
+  layout: (questId: string) =>
+    api<{
+      layout_json?: Record<string, unknown> | null
+      updated_at?: string | null
+    }>(`/api/quests/${questId}/layout`),
+  updateLayout: (questId: string, payload: { layout_json?: Record<string, unknown> | null }) =>
+    api<{
+      layout_json?: Record<string, unknown> | null
+      updated_at?: string | null
+    }>(`/api/quests/${questId}/layout`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   updateQuestSettings: (
     questId: string,
     payload: {
@@ -201,15 +243,30 @@ export const client = {
       summary?: string | null
       baseline_gate?: string | null
     }
-  ) =>
-    api<QuestStageViewPayload>(`/api/quests/${questId}/stage-view`, {
+  ) => {
+    if (isDemoProjectId(questId)) {
+      const demoPayload = getDemoStageView(questId, payload)
+      if (!demoPayload) {
+        throw new Error(`Unknown demo stage view for ${questId}`)
+      }
+      return Promise.resolve(demoPayload)
+    }
+    return api<QuestStageViewPayload>(`/api/quests/${questId}/stage-view`, {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
+    })
+  },
   explorer: (
     questId: string,
     options?: { revision?: string | null; mode?: string | null; profile?: string | null }
   ) => {
+    if (isDemoProjectId(questId)) {
+      const payload = getDemoExplorerPayload(questId)
+      if (!payload) {
+        throw new Error(`Unknown demo explorer payload for ${questId}`)
+      }
+      return Promise.resolve(payload)
+    }
     const params = new URLSearchParams()
     if (options?.revision) {
       params.set('revision', options.revision)
@@ -227,25 +284,77 @@ export const client = {
     api<QuestSearchPayload>(
       `/api/quests/${questId}/search?q=${encodeURIComponent(query)}&limit=${Math.max(1, Math.floor(limit))}`
     ),
-  memory: (questId: string) => api<MemoryCard[]>(`/api/quests/${questId}/memory`),
-  documents: (questId: string) => api<QuestDocument[]>(`/api/quests/${questId}/documents`),
+  memory: (questId: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = listDemoMemory(questId)
+      if (!payload) {
+        throw new Error(`Unknown demo memory payload for ${questId}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<MemoryCard[]>(`/api/quests/${questId}/memory`)
+  },
+  documents: (questId: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = listDemoDocuments(questId)
+      if (!payload) {
+        throw new Error(`Unknown demo documents payload for ${questId}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<QuestDocument[]>(`/api/quests/${questId}/documents`)
+  },
   graph: (questId: string) => api<GraphPayload>(`/api/quests/${questId}/graph`),
-  metricsTimeline: (questId: string) => api<MetricsTimelinePayload>(`/api/quests/${questId}/metrics/timeline`),
-  gitBranches: (questId: string) => api<GitBranchesPayload>(`/api/quests/${questId}/git/branches`),
+  metricsTimeline: (questId: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = getDemoMetricsTimeline(questId)
+      if (!payload) {
+        throw new Error(`Unknown demo metrics timeline for ${questId}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<MetricsTimelinePayload>(`/api/quests/${questId}/metrics/timeline`)
+  },
+  gitBranches: (questId: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = getDemoGitBranches(questId)
+      if (!payload) {
+        throw new Error(`Unknown demo git branches for ${questId}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<GitBranchesPayload>(`/api/quests/${questId}/git/branches`)
+  },
   gitLog: (questId: string, ref: string, base?: string, limit = 30) =>
     api<GitLogPayload>(
       `/api/quests/${questId}/git/log?ref=${encodeURIComponent(ref)}${base ? `&base=${encodeURIComponent(base)}` : ''}&limit=${limit}`
     ),
-  gitCompare: (questId: string, base: string, head: string) =>
-    api<GitComparePayload>(
+  gitCompare: (questId: string, base: string, head: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = getDemoGitCompare(questId, base, head)
+      if (!payload) {
+        throw new Error(`Unknown demo git compare ${base} -> ${head}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<GitComparePayload>(
       `/api/quests/${questId}/git/compare?base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}`
-    ),
+    )
+  },
   gitCommit: (questId: string, sha: string) =>
     api<GitCommitDetailPayload>(`/api/quests/${questId}/git/commit?sha=${encodeURIComponent(sha)}`),
-  gitDiffFile: (questId: string, base: string, head: string, path: string) =>
-    api<GitDiffPayload>(
+  gitDiffFile: (questId: string, base: string, head: string, path: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = getDemoGitDiffFile(questId, base, head, path)
+      if (!payload) {
+        throw new Error(`Unknown demo git diff ${base} -> ${head} for ${path}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<GitDiffPayload>(
       `/api/quests/${questId}/git/diff-file?base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}&path=${encodeURIComponent(path)}`
-    ),
+    )
+  },
   fileChangeDiff: (questId: string, runId: string, path: string, eventId?: string) =>
     api<FileChangeDiffPayload>(
       `/api/quests/${questId}/operations/file-change-diff?run_id=${encodeURIComponent(runId)}&path=${encodeURIComponent(path)}${
@@ -254,11 +363,19 @@ export const client = {
     ),
   gitCommitFile: (questId: string, sha: string, path: string) =>
     api<GitDiffPayload>(`/api/quests/${questId}/git/commit-file?sha=${encodeURIComponent(sha)}&path=${encodeURIComponent(path)}`),
-  openDocument: (questId: string, documentId: string) =>
-    api<OpenDocumentPayload>(`/api/quests/${questId}/documents/open`, {
+  openDocument: (questId: string, documentId: string) => {
+    if (isDemoProjectId(questId)) {
+      const payload = openDemoDocument(questId, documentId)
+      if (!payload) {
+        throw new Error(`Unknown demo document ${documentId}`)
+      }
+      return Promise.resolve(payload)
+    }
+    return api<OpenDocumentPayload>(`/api/quests/${questId}/documents/open`, {
       method: 'POST',
       body: JSON.stringify({ document_id: documentId }),
-    }),
+    })
+  },
   saveDocument: (questId: string, documentId: string, content: string, revision?: string) =>
     api<{
       ok: boolean
@@ -338,6 +455,7 @@ export const client = {
     auto_start?: boolean
     initial_message?: string
     preferred_connector_conversation_id?: string
+    auto_bind_latest_connectors?: boolean
     requested_connector_bindings?: Array<{
       connector: string
       conversation_id?: string | null
@@ -362,6 +480,16 @@ export const client = {
       body: JSON.stringify({ document_id: documentId }),
     }),
   connectors: () => api<ConnectorSnapshot[]>('/api/connectors'),
+  startWeixinQrLogin: (payload?: { force?: boolean }) =>
+    api<WeixinQrLoginStartPayload>('/api/connectors/weixin/login/qr/start', {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    }),
+  waitWeixinQrLogin: (payload: { session_key: string; timeout_ms?: number }) =>
+    api<WeixinQrLoginWaitPayload>('/api/connectors/weixin/login/qr/wait', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   deleteConnectorProfile: (connectorName: string, profileId: string) =>
     api<{
       ok: boolean

@@ -11,5 +11,7 @@
 - lingzhu_safety_rule: request only actions that are clearly justified by the current quest and understandable to the human user
 - lingzhu_text_rule: even when requesting `surface_actions`, always include a clear text explanation of what is happening and why
 - lingzhu_reply_style_rule: for Lingzhu-facing user-visible text sent through `artifact.interact(...)`, keep the message clear, concise, respectful, and high-information-density
-- lingzhu_reply_length_rule: for each Lingzhu-facing `artifact.interact(...)` message, normally answer in at most 2 to 3 sentences unless the user explicitly asks for more detail
+- lingzhu_reply_length_rule: for each Lingzhu-facing `artifact.interact(...)` message, normally keep the text within about 20 Chinese characters or one very short sentence unless the user explicitly asks for more detail
 - lingzhu_summary_first_rule: in Lingzhu-facing `artifact.interact(...)` messages, usually give only the synopsis and key facts needed for the user's next decision or understanding; avoid long preambles, repetition, and low-signal detail
+- lingzhu_task_gate_rule: only treat a Lingzhu user utterance as a new quest instruction when the text explicitly starts with `我现在的任务是`; otherwise assume the device is polling for queued progress or buffered replies
+- lingzhu_poll_rule: when Lingzhu is polling rather than giving a new task, return only the buffered progress checkpoints or the latest short status; do not reinterpret the poll text as a fresh instruction

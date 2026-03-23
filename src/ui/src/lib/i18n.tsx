@@ -1,7 +1,12 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react'
 
 import { client } from '@/lib/api'
+import { useUILanguageStore } from '@/lib/stores/ui-language'
 import type { Locale } from '@/types'
+
+function resolveLegacyLocale(value: string | null | undefined): Locale {
+  return String(value || '').toLowerCase().startsWith('zh') ? 'zh' : 'en'
+}
 
 const messages = {
   en: {
@@ -286,8 +291,17 @@ function resolveBrowserConfigLocale(): 'zh-CN' | 'en-US' {
 }
 
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocale] = useState<Locale>(resolveInitialLocale)
+  const uiLanguage = useUILanguageStore((state) => state.language)
+  const locale = resolveLegacyLocale(uiLanguage)
+  const hydrated = useUILanguageStore((state) => state.hydrated)
+  const hydrateFromPersistence = useUILanguageStore((state) => state.hydrateFromPersistence)
+  const saveLanguagePreference = useUILanguageStore((state) => state.saveLanguagePreference)
   const bootstrapAttemptedRef = useRef(false)
+
+  useEffect(() => {
+    if (hydrated) return
+    hydrateFromPersistence()
+  }, [hydrateFromPersistence, hydrated])
 
   useEffect(() => {
     if (bootstrapAttemptedRef.current) {
@@ -350,10 +364,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const value = useMemo<I18nValue>(
     () => ({
       locale,
-      toggleLocale: () => setLocale((current) => (current === 'zh' ? 'en' : 'zh')),
+      toggleLocale: () => {
+        void saveLanguagePreference(locale === 'zh' ? 'en' : 'zh')
+      },
       t: (key) => messages[locale][key],
     }),
-    [locale]
+    [locale, saveLanguagePreference]
   )
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>

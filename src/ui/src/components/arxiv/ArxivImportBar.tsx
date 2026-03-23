@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { AlertCircle, Loader2, Plus } from "lucide-react";
+import { useToast } from "@/components/ui/toast";
 import { useArxivStore } from "@/lib/stores/arxiv-store";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +19,8 @@ function formatError(code: string): string {
       return "Invalid arXiv ID format";
     case "metadata_failed":
       return "Paper not found or metadata fetch failed";
+    case "metadata_pending":
+      return "Metadata timed out for now. Open the arXiv page directly.";
     case "download_failed":
       return "PDF download failed";
     case "already_exists":
@@ -38,6 +41,7 @@ interface ArxivImportBarProps {
 }
 
 export function ArxivImportBar({ disabled = false }: ArxivImportBarProps) {
+  const { addToast } = useToast();
   const importArxiv = useArxivStore((s) => s.importArxiv);
   const importingIds = useArxivStore((s) => s.importingIds);
   const errors = useArxivStore((s) => s.errors);
@@ -63,8 +67,21 @@ export function ArxivImportBar({ disabled = false }: ArxivImportBarProps) {
       return;
     }
     setLocalError(null);
-    await importArxiv(normalizedId);
-  }, [disabled, normalizedId, isValid, importArxiv]);
+    const result = await importArxiv(normalizedId);
+    if (!result.ok) {
+      return;
+    }
+    addToast({
+      type: result.metadataPending ? "warning" : "success",
+      title: result.metadataPending ? "Added with limited metadata" : "Added to arXiv library",
+      description:
+        result.message ||
+        (result.metadataPending
+          ? "Metadata timed out for now. You can open the arXiv page directly."
+          : result.title || result.arxivId),
+      duration: 2600,
+    });
+  }, [addToast, disabled, normalizedId, isValid, importArxiv]);
 
   const handlePaste = React.useCallback(
     (event: React.ClipboardEvent<HTMLInputElement>) => {

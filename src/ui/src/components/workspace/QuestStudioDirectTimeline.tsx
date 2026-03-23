@@ -54,23 +54,6 @@ function formatTime(value?: string) {
   }).format(date)
 }
 
-function parseStructuredValue(value?: string) {
-  if (!value) return null
-  try {
-    return JSON.parse(value) as Record<string, unknown>
-  } catch {
-    return null
-  }
-}
-
-function resolveBashExecMode(block: Extract<StudioTurnBlock, { kind: 'operation' }>) {
-  if (!isBashExecOperation(block)) {
-    return ''
-  }
-  const parsedArgs = parseStructuredValue(block.item.args)
-  return typeof parsedArgs?.mode === 'string' ? parsedArgs.mode.trim().toLowerCase() : ''
-}
-
 function EmptyState({
   loading,
   restoring,
@@ -220,11 +203,7 @@ function StudioOperationBlock({
   block: Extract<StudioTurnBlock, { kind: 'operation' }>
   isLatestOperation: boolean
 }) {
-  const bashMode = resolveBashExecMode(block)
-  if (bashMode === 'read') {
-    return null
-  }
-  if (isBashExecOperation(block) && bashMode !== 'list' && bashMode !== 'history') {
+  if (isBashExecOperation(block)) {
     return (
       <QuestBashExecOperation
         questId={questId}

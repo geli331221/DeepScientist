@@ -28,6 +28,11 @@ Score the final serious candidate on a `0/1/2` scale:
   - `2` fully compliant with dataset, protocol, and compute limits
 
 If total `< 7/10`, do not promote the idea yet.
+Also treat these as hard gates before promotion:
+
+- the literature survey must already durably cover at least `5` and usually `5-10` related and usable papers
+- the closest-prior-work comparison must explain why the idea is still needed
+- the final selected-idea draft must be ready to carry standard-format citations for the papers actually used
 
 ## 2. Honest novelty / value labels
 
@@ -53,6 +58,7 @@ The selected idea record should include:
 - `theory_and_method`
 - `code_level_plan`
 - `relation_to_literature`
+- `references` or `bibliography` in a standard citation format
 - evidence or source pointers
 
 Inside the implementation handoff, also include:
@@ -70,6 +76,7 @@ Use a compact Pyramid structure:
 - first line: falsifiable claim plus metric focus plus boundary condition
 - then `3-6` bullets of reasoning and evidence pointers
 - then the minimal validation plan
+- then a short `References` or `Bibliography` section that cites the survey-stage papers actually used
 
 ## 5. Promotion gate
 
@@ -80,3 +87,5 @@ Do not promote a candidate if any of these remain unclear:
 - what minimal experiment can refute it
 - which code touchpoints are affected
 - what evidence package would later defend it in writing
+- which `5-10` surveyed papers actually support the motivation, mechanism, and claim boundary
+- whether the final idea draft includes proper citation markers plus a standard-format reference list

@@ -13,7 +13,7 @@ from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.mcp.context import McpContext
 from deepscientist.mcp.server import build_artifact_server, build_bash_exec_server, build_memory_server
 from deepscientist.quest import QuestService
-from deepscientist.shared import read_jsonl, write_json, write_yaml
+from deepscientist.shared import read_json, read_jsonl, write_json, write_yaml
 from deepscientist.skills import SkillInstaller
 
 
@@ -461,10 +461,11 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
 
         branches_after_run = _unwrap_tool_result(await server.call_tool("list_research_branches", {}))
         assert branches_after_run["ok"] is True
-        assert branches_after_run["count"] == 1
-        assert branches_after_run["branches"][0]["branch_no"] == "001"
-        assert branches_after_run["branches"][0]["branch_name"] == idea_result["branch"]
-        assert branches_after_run["branches"][0]["latest_main_experiment"]["run_id"] == "main-mcp-001"
+        assert branches_after_run["count"] == 2
+        by_branch_after_run = {item["branch_name"]: item for item in branches_after_run["branches"]}
+        assert by_branch_after_run[idea_result["branch"]]["branch_no"] == "001"
+        assert by_branch_after_run["run/main-mcp-001"]["latest_main_experiment"]["run_id"] == "main-mcp-001"
+        assert by_branch_after_run["run/main-mcp-001"]["has_main_result"] is True
 
         second_idea_result = _unwrap_tool_result(
             await server.call_tool(
@@ -491,11 +492,11 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
 
         branches_after_second_idea = _unwrap_tool_result(await server.call_tool("list_research_branches", {}))
         assert branches_after_second_idea["ok"] is True
-        assert branches_after_second_idea["count"] == 2
+        assert branches_after_second_idea["count"] == 3
         by_branch = {item["branch_name"]: item for item in branches_after_second_idea["branches"]}
         assert by_branch[idea_result["branch"]]["branch_no"] == "001"
-        assert by_branch[idea_result["branch"]]["latest_main_experiment"]["run_id"] == "main-mcp-001"
         assert by_branch[second_idea_result["branch"]]["branch_no"] == "002"
+        assert by_branch["run/main-mcp-001"]["latest_main_experiment"]["run_id"] == "main-mcp-001"
         assert by_branch[second_idea_result["branch"]]["foundation_ref"]["kind"] == "run"
         assert by_branch[second_idea_result["branch"]]["foundation_reason"] == "Carry forward the strongest measured branch."
 
@@ -546,6 +547,7 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert campaign_result["ok"] is True
         assert campaign_result["campaign_id"]
+        assert campaign_result["parent_branch"] == "run/main-mcp-001"
         assert Path(campaign_result["slices"][0]["worktree_root"]).exists()
         assert campaign_result["slices"][0]["required_baselines"][0]["baseline_id"] == "mcp-analysis-baseline"
         analysis_baseline_root = quest_root / "baselines" / "local" / "mcp-analysis-baseline"
@@ -594,7 +596,7 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert slice_result["ok"] is True
         assert slice_result["completed"] is True
-        assert slice_result["returned_to_branch"] == idea_result["branch"]
+        assert slice_result["returned_to_branch"] == campaign_result["parent_branch"]
         assert Path(slice_result["result_json_path"]).exists()
         assert slice_result["evaluation_summary"]["takeaway"].startswith("Removing the adapter")
 
@@ -745,6 +747,249 @@ def test_artifact_mcp_server_returns_structured_metric_contract_failures(temp_ho
     asyncio.run(scenario())
 
 
+def test_artifact_mcp_server_confirm_baseline_accepts_metric_directions(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp metric directions quest")
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-directions",
+            active_anchor="baseline",
+            conversation_id="quest:test",
+            agent_role="baseline",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        server = build_artifact_server(context)
+
+        baseline_root = quest_root / "baselines" / "local" / "mcp-direction-baseline"
+        baseline_root.mkdir(parents=True, exist_ok=True)
+        (baseline_root / "README.md").write_text("# MCP Direction Baseline\n", encoding="utf-8")
+
+        confirm_result = _unwrap_tool_result(
+            await server.call_tool(
+                "confirm_baseline",
+                {
+                    "baseline_path": "baselines/local/mcp-direction-baseline",
+                    "baseline_id": "mcp-direction-baseline",
+                    "summary": "Use lower-is-better overrides",
+                    "metrics_summary": {"sigma_max": 0.6921, "raw_false": 0.2149},
+                    "primary_metric": {"metric_id": "sigma_max", "value": 0.6921},
+                    "metric_contract": _detailed_metric_contract(
+                        ["sigma_max", "raw_false"],
+                        primary_metric_id="sigma_max",
+                        directions={
+                            "sigma_max": "maximize",
+                            "raw_false": "maximize",
+                        },
+                        evaluation_protocol={
+                            "scope_id": "full",
+                            "code_paths": ["eval.py"],
+                        },
+                    ),
+                    "metric_directions": {
+                        "sigma_max": "lower_better",
+                        "raw_false": "lower_better",
+                    },
+                },
+            )
+        )
+
+        assert confirm_result["ok"] is True
+        contract_json_path = quest_root / confirm_result["confirmed_baseline_ref"]["metric_contract_json_rel_path"]
+        payload = read_json(contract_json_path, {})
+        directions = {
+            item["metric_id"]: item["direction"]
+            for item in payload["metric_contract"]["metrics"]
+        }
+        assert directions["sigma_max"] == "minimize"
+        assert directions["raw_false"] == "minimize"
+
+    asyncio.run(scenario())
+
+
+def test_artifact_mcp_server_analysis_campaign_infers_parent_main_run_from_runtime_refs(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create(
+            "mcp analysis parent run inference quest"
+        )
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="worker-context-run",
+            active_anchor="baseline",
+            conversation_id="quest:test",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        server = build_artifact_server(context)
+
+        baseline_root = quest_root / "baselines" / "local" / "mcp-parent-run-baseline"
+        baseline_root.mkdir(parents=True, exist_ok=True)
+        (baseline_root / "README.md").write_text("# MCP baseline\n", encoding="utf-8")
+
+        confirm_result = _unwrap_tool_result(
+            await server.call_tool(
+                "confirm_baseline",
+                {
+                    "baseline_path": str(baseline_root),
+                    "baseline_id": "mcp-parent-run-baseline",
+                    "summary": "Confirmed baseline for parent run inference.",
+                    "metrics_summary": {"acc": 0.8},
+                    "primary_metric": {"metric_id": "acc", "value": 0.8},
+                    "metric_contract": _detailed_metric_contract(["acc"], primary_metric_id="acc"),
+                },
+            )
+        )
+        assert confirm_result["ok"] is True
+
+        idea_result = _unwrap_tool_result(
+            await server.call_tool(
+                "submit_idea",
+                {
+                    "mode": "create",
+                    "title": "Parent-run inference route",
+                    "problem": "The writing-facing analysis campaign must bind to the true main run.",
+                    "hypothesis": "The latest main run should be reused, not the MCP worker run id.",
+                    "mechanism": "Create a paper branch, then launch analysis without an explicit parent_run_id.",
+                    "decision_reason": "Prepare a realistic MCP flow.",
+                },
+            )
+        )
+        assert idea_result["ok"] is True
+
+        main_result = _unwrap_tool_result(
+            await server.call_tool(
+                "record_main_experiment",
+                {
+                    "run_id": "main-parent-001",
+                    "title": "Parent run",
+                    "hypothesis": "This is the true parent run.",
+                    "setup": "Standard setup.",
+                    "execution": "Ran the main evaluation once.",
+                    "results": "The main run is ready for analysis.",
+                    "conclusion": "Launch one writing-facing analysis slice.",
+                    "metric_rows": [{"metric_id": "acc", "value": 0.86, "direction": "higher_better"}],
+                    "evaluation_summary": {
+                        "takeaway": "The main run beats the baseline.",
+                        "claim_update": "strengthens",
+                        "baseline_relation": "better",
+                        "comparability": "high",
+                        "failure_mode": "none",
+                        "next_action": "analysis_campaign",
+                    },
+                },
+            )
+        )
+        assert main_result["ok"] is True
+
+        outline_candidate = _unwrap_tool_result(
+            await server.call_tool(
+                "submit_paper_outline",
+                {
+                    "mode": "candidate",
+                    "outline_id": "outline-parent-run",
+                    "title": "Parent run outline",
+                    "note": "Bind analysis to the selected outline.",
+                    "detailed_outline": {
+                        "title": "Parent run outline",
+                        "research_questions": ["RQ-parent"],
+                        "experimental_designs": ["Ablation-parent"],
+                        "contributions": ["C-parent"],
+                    },
+                },
+            )
+        )
+        assert outline_candidate["outline_id"] == "outline-parent-run"
+
+        selected_outline = _unwrap_tool_result(
+            await server.call_tool(
+                "submit_paper_outline",
+                {
+                    "mode": "select",
+                    "outline_id": "outline-parent-run",
+                    "selected_reason": "Writing-facing analysis requires a selected outline.",
+                },
+            )
+        )
+        assert selected_outline["outline_id"] == "outline-parent-run"
+
+        campaign = _unwrap_tool_result(
+            await server.call_tool(
+                "create_analysis_campaign",
+                {
+                    "campaign_title": "Parent run inference campaign",
+                    "campaign_goal": "Verify parent_run_id inference from the latest main run.",
+                    "selected_outline_ref": "outline-parent-run",
+                    "research_questions": ["RQ-parent"],
+                    "experimental_designs": ["Ablation-parent"],
+                    "todo_items": [
+                        {
+                            "todo_id": "todo-parent-001",
+                            "slice_id": "ablation",
+                            "title": "Parent ablation",
+                            "research_question": "RQ-parent",
+                            "experimental_design": "Ablation-parent",
+                            "completion_condition": "Complete one comparable ablation.",
+                        }
+                    ],
+                    "slices": [
+                        {
+                            "slice_id": "ablation",
+                            "title": "Parent ablation",
+                            "goal": "Disable the main component and compare.",
+                            "required_changes": "Disable the main component only.",
+                            "metric_contract": "Keep the same evaluation protocol.",
+                        }
+                    ],
+                },
+            )
+        )
+        assert campaign["manifest"]["parent_run_id"] == "main-parent-001"
+        assert campaign["manifest"]["parent_run_id"] != "worker-context-run"
+
+        completed = _unwrap_tool_result(
+            await server.call_tool(
+                "record_analysis_slice",
+                {
+                    "campaign_id": campaign["campaign_id"],
+                    "slice_id": "ablation",
+                    "setup": "Disable the main component only.",
+                    "execution": "Ran the ablation once.",
+                    "results": "The analysis slice finished cleanly.",
+                    "metric_rows": [{"metric_id": "acc", "value": 0.84, "direction": "higher_better"}],
+                    "evaluation_summary": {
+                        "takeaway": "The ablation still stays above baseline.",
+                        "claim_update": "strengthens",
+                        "baseline_relation": "better",
+                        "comparability": "high",
+                        "failure_mode": "none",
+                        "next_action": "write",
+                    },
+                },
+        )
+        )
+        assert completed["completed"] is True
+        assert completed["returned_to_branch"] == "run/main-parent-001"
+        assert completed["writing_branch"] == "paper/main-parent-001"
+
+        refs = _unwrap_tool_result(await server.call_tool("resolve_runtime_refs", {}))
+        assert refs["current_workspace_branch"] == "paper/main-parent-001"
+
+    asyncio.run(scenario())
+
+
 def test_artifact_mcp_server_arxiv_tool_calls_service(temp_home: Path, monkeypatch) -> None:
     async def scenario() -> None:
         ensure_home_layout(temp_home)
@@ -763,13 +1008,21 @@ def test_artifact_mcp_server_arxiv_tool_calls_service(temp_home: Path, monkeypat
             worktree_root=None,
             team_mode="single",
         )
-        calls: list[tuple[str, bool]] = []
+        calls: list[tuple[str | None, str, bool, str]] = []
 
-        def fake_arxiv(self, paper_id: str, *, full_text: bool = False) -> dict[str, object]:  # noqa: ANN001
-            calls.append((paper_id, full_text))
+        def fake_arxiv(  # noqa: ANN001
+            self,
+            paper_id: str | None = None,
+            *,
+            mode: str = "read",
+            full_text: bool = False,
+            quest_root: Path | None = None,
+        ) -> dict[str, object]:
+            calls.append((paper_id, mode, full_text, str(quest_root) if quest_root else ""))
             return {
                 "ok": True,
                 "paper_id": paper_id,
+                "mode": mode,
                 "requested_full_text": full_text,
                 "content_mode": "overview",
                 "source": "test",
@@ -790,7 +1043,64 @@ def test_artifact_mcp_server_arxiv_tool_calls_service(temp_home: Path, monkeypat
 
         assert result["ok"] is True
         assert result["paper_id"] == "2010.11929"
-        assert calls == [("2010.11929", True)]
+        assert result["mode"] == "read"
+        assert calls == [("2010.11929", "read", True, str(quest_root))]
+
+    asyncio.run(scenario())
+
+
+def test_artifact_mcp_server_arxiv_list_mode_calls_service(temp_home: Path, monkeypatch) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp arxiv list quest")
+        quest_root = Path(quest["quest_root"])
+        calls: list[tuple[str | None, str, bool, str]] = []
+
+        def fake_arxiv(  # noqa: ANN001
+            self,
+            paper_id: str | None = None,
+            *,
+            mode: str = "read",
+            full_text: bool = False,
+            quest_root: Path | None = None,
+        ) -> dict[str, object]:
+            calls.append((paper_id, mode, full_text, str(quest_root) if quest_root else ""))
+            return {
+                "ok": True,
+                "mode": mode,
+                "items": [
+                    {
+                        "arxiv_id": "2010.11929",
+                        "title": "Vision Transformers",
+                        "abstract": "A concise summary.",
+                        "status": "ready",
+                    }
+                ],
+                "count": 1,
+            }
+
+        monkeypatch.setattr(ArtifactService, "arxiv", fake_arxiv)
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-arxiv-list",
+            active_anchor="scout",
+            conversation_id="quest:test",
+            agent_role="scout",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        server = build_artifact_server(context)
+        result = _unwrap_tool_result(await server.call_tool("arxiv", {"mode": "list"}))
+
+        assert result["ok"] is True
+        assert result["mode"] == "list"
+        assert result["count"] == 1
+        assert result["items"][0]["arxiv_id"] == "2010.11929"
+        assert calls == [(None, "list", False, str(quest_root))]
 
     asyncio.run(scenario())
 
@@ -830,6 +1140,7 @@ def test_bash_exec_mcp_server_supports_detach_read_list_and_kill(temp_home: Path
         assert detached["status"] == "running"
         assert detached["kind"] == "exec"
         assert detached["comment"] == {"stage": "baseline", "goal": "smoke"}
+        assert detached["cwd"] == str(quest_root)
         assert detached["watchdog_after_seconds"] == 1800
         bash_id = detached["bash_id"]
         await asyncio.sleep(0.6)
@@ -859,6 +1170,7 @@ def test_bash_exec_mcp_server_supports_detach_read_list_and_kill(temp_home: Path
         )
         assert read_back["bash_id"] == bash_id
         assert read_back["comment"] == {"stage": "baseline", "goal": "smoke"}
+        assert read_back["cwd"] == str(quest_root)
         assert any("alpha" in str(item.get("line") or "") for item in read_back["tail"])
         assert read_back["tail_limit"] == 5
         assert read_back["order"] == "desc"

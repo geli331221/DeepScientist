@@ -429,6 +429,8 @@ claude:
 - UI label: `Binary`
 - Meaning: command name or absolute path used to launch the runner.
 - `Test` behavior: checks whether the binary is on `PATH`.
+- First-run note: DeepScientist does not finish Codex authentication for you. Before the first `ds`, make sure `codex --login` (or `codex`) has completed successfully.
+- Repair note: if the bundled dependency is missing after `npm install -g @researai/deepscientist`, install Codex explicitly with `npm install -g @openai/codex`.
 
 **`config_dir`**
 
@@ -443,6 +445,7 @@ claude:
 - Default: `codex=gpt-5.4`, `claude=inherit`
 - UI label: `Default model`
 - Meaning: default model used when a project does not override it.
+- Startup note: DeepScientist's Codex readiness probe uses this configured model first. If your Codex account cannot access it, DeepScientist falls back to the current Codex default model and persists `model: inherit`.
 
 **`model_reasoning_effort`**
 

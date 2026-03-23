@@ -565,6 +565,10 @@ export interface ToolbarProps {
   markdownActive?: boolean;
   /** Markdown toggle callback */
   onMarkdownToggle?: () => void;
+  /** Markdown/summary button label */
+  markdownLabel?: string;
+  /** Markdown/summary button title */
+  markdownTitle?: string;
   /** Review opinion view active */
   reviewOpinionActive?: boolean;
   /** Review opinion toggle callback */

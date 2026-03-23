@@ -1,6 +1,9 @@
 import type { ConnectorBindingSnapshot, ConnectorRecentConversation, ConnectorSnapshot, ConnectorTargetSnapshot } from '@/types'
 
 const CONNECTOR_PROFILE_CHAT_ID_SEPARATOR = '::'
+const MULTI_INSTANCE_CONNECTOR_NAMES = new Set(['qq', 'telegram', 'discord', 'slack', 'feishu', 'whatsapp'])
+
+export type ConnectorInstanceMode = 'single_instance' | 'multi_instance'
 
 function defaultConversationLabel(chatType?: string | null, chatId?: string | null) {
   return `${String(chatType || '').trim()} · ${String(chatId || '').trim()}`.trim()
@@ -263,4 +266,20 @@ export function normalizeConnectorTargets(snapshot: ConnectorSnapshot): Connecto
     )
   }
   return Array.from(merged.values()).sort(sortTargets)
+}
+
+export function connectorInstanceMode(
+  input?: Pick<ConnectorSnapshot, 'name' | 'profiles'> | string | null
+): ConnectorInstanceMode {
+  if (typeof input === 'string') {
+    return MULTI_INSTANCE_CONNECTOR_NAMES.has(String(input || '').trim().toLowerCase()) ? 'multi_instance' : 'single_instance'
+  }
+  const name = String(input?.name || '').trim().toLowerCase()
+  if (!name) {
+    return 'single_instance'
+  }
+  if (Array.isArray(input?.profiles) && input.profiles.length > 0) {
+    return 'multi_instance'
+  }
+  return MULTI_INSTANCE_CONNECTOR_NAMES.has(name) ? 'multi_instance' : 'single_instance'
 }

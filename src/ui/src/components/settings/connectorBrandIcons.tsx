@@ -57,6 +57,21 @@ function QQBrandIcon(props: BrandIconProps) {
   )
 }
 
+function WeixinBrandIcon(props: BrandIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
+      <path
+        fill="#07C160"
+        d="M9.669 3.2c-4.413 0-8.006 2.935-8.006 6.542 0 2.02 1.155 3.829 2.963 5.03l-.746 3.173a.48.48 0 0 0 .696.527l3.291-1.807c.588.119 1.194.181 1.802.181 4.413 0 8.006-2.934 8.006-6.541S14.082 3.2 9.669 3.2Zm-2.66 7.314a.96.96 0 1 1 0-1.92.96.96 0 0 1 0 1.92Zm5.345 0a.96.96 0 1 1 0-1.92.96.96 0 0 1 0 1.92Z"
+      />
+      <path
+        fill="#07C160"
+        d="M16.597 8.045c3.181.285 5.74 2.49 5.74 5.204 0 1.55-.842 2.984-2.264 3.984l.57 2.49a.38.38 0 0 1-.552.417l-2.58-1.433c-.303.056-.61.086-.914.086-1.906 0-3.654-.81-4.699-2.136 3.793-.6 6.69-3.256 6.69-6.491 0-.732-.148-1.44-.425-2.121-.505 0-1.03 0-1.566.001Z"
+      />
+    </svg>
+  )
+}
+
 function FeishuBrandIcon(props: BrandIconProps) {
   return (
     <svg viewBox="0 0 16 16" aria-hidden="true" {...props}>
@@ -94,6 +109,7 @@ export const connectorBrandIcons: Record<string, ComponentType<{ className?: str
   slack: SlackBrandIcon,
   whatsapp: WhatsAppBrandIcon,
   qq: QQBrandIcon,
+  weixin: WeixinBrandIcon,
   feishu: FeishuBrandIcon,
   lingzhu: LingzhuBrandIcon,
 }

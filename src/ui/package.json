@@ -7,7 +7,8 @@
     "dev": "vite --host 0.0.0.0 --port 21888",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 21888",
-    "test:e2e:git-diff": "playwright test e2e/git-diff-viewer.spec.ts"
+    "test:e2e:git-diff": "playwright test e2e/git-diff-viewer.spec.ts",
+    "test:e2e:lab-canvas": "playwright test e2e/lab-canvas-workflow.spec.ts"
   },
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",
@@ -102,6 +103,7 @@
     "react-router-dom": "^6.30.1",
     "react-tweet": "^3.3.0",
     "react-window": "^1.8.11",
+    "qrcode": "^1.5.4",
     "recharts": "^3.8.0",
     "rehype-katex": "^7.0.1",
     "rehype-raw": "^7.0.0",

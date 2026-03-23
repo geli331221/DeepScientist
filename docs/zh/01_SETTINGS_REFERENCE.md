@@ -443,6 +443,8 @@ claude:
 - 页面标签：`Binary`
 - 作用：启动 runner 时使用的命令名或绝对路径。
 - `Test` 行为：检查该二进制是否在 `PATH` 上。
+- 首次使用说明：DeepScientist 不会替你完成 Codex 认证。第一次运行 `ds` 前，必须先确保 `codex --login`（或 `codex`）已经成功完成。
+- 修复说明：如果执行 `npm install -g @researai/deepscientist` 之后 bundled Codex 依赖仍然缺失，请显式安装 `npm install -g @openai/codex`。
 
 **`config_dir`**
 
@@ -457,6 +459,7 @@ claude:
 - 默认值：`codex=gpt-5.4`，`claude=inherit`
 - 页面标签：`Default model`
 - 作用：项目和单次请求没有覆盖时的默认模型。
+- 启动说明：DeepScientist 的 Codex 就绪探测会优先使用这里配置的模型。如果你的 Codex 账号无法访问它，DeepScientist 会自动回退到当前 Codex 默认模型，并持久化为 `model: inherit`。
 
 **`model_reasoning_effort`**
 

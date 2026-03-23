@@ -4,8 +4,10 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import { MarkdownDocument } from '@/components/plugins/MarkdownDocument'
 import { ProjectsAppBar } from '@/components/projects/ProjectsAppBar'
+import { BaselineSettingsPanel } from '@/components/settings/BaselineSettingsPanel'
 import { ConnectorSettingsForm } from '@/components/settings/ConnectorSettingsForm'
 import { connectorCatalog, type ConnectorName } from '@/components/settings/connectorCatalog'
+import { connectorConfigAutoEnabled } from '@/components/settings/connectorSettingsHelpers'
 import { RegistrySettingsForm } from '@/components/settings/RegistrySettingsForm'
 import { translateSettingsCatalogText, translateSettingsHelpMarkdown } from '@/components/settings/settingsCatalogI18n'
 import { HintDot } from '@/components/ui/hint-dot'
@@ -13,6 +15,7 @@ import { Input } from '@/components/ui/input'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type {
+  BaselineRegistryEntry,
   ConfigFileEntry,
   ConfigTestPayload,
   ConfigValidationPayload,
@@ -22,9 +25,9 @@ import type {
   QuestSummary,
 } from '@/types'
 
-export type ConfigDocumentName = 'config' | 'runners' | 'connectors' | 'plugins' | 'mcp_servers'
+export type ConfigDocumentName = 'config' | 'runners' | 'connectors' | 'baselines' | 'plugins' | 'mcp_servers'
 
-const CONFIG_ORDER: ConfigDocumentName[] = ['config', 'runners', 'connectors', 'plugins', 'mcp_servers']
+const CONFIG_ORDER: ConfigDocumentName[] = ['config', 'runners', 'connectors', 'baselines', 'plugins', 'mcp_servers']
 
 const CONFIG_META = {
   config: {
@@ -40,6 +43,13 @@ const CONFIG_META = {
     hint: {
       en: 'Native connector transports, discovered runtime targets, and legacy callback fallbacks.',
       zh: '原生连接器传输方式、运行时发现目标，以及旧式回调兜底配置。',
+    },
+  },
+  baselines: {
+    label: { en: 'Baselines', zh: 'Baseline' },
+    hint: {
+      en: 'Reusable baseline registry entries and lifecycle management.',
+      zh: '可复用 baseline registry 条目，以及它们的生命周期管理。',
     },
   },
   plugins: {
@@ -71,6 +81,7 @@ const copy = {
     qqAutoBound: 'QQ openid detected and saved automatically.',
     connectorDeleted: 'Connector profile deleted.',
     connectorBindingSaved: 'Connector binding updated.',
+    baselineDeleted: 'Baseline deleted.',
   },
   zh: {
     title: '设置',
@@ -90,8 +101,16 @@ const copy = {
     qqAutoBound: '已自动检测并保存 QQ openid。',
     connectorDeleted: '已删除该 Connector。',
     connectorBindingSaved: '已更新该 Connector 绑定。',
+    baselineDeleted: '已删除该 baseline。',
   },
 } satisfies Record<Locale, Record<string, string>>
+
+const SYNTHETIC_BASELINE_FILE: ConfigFileEntry = {
+  name: 'baselines',
+  path: 'config/baselines',
+  required: false,
+  exists: true,
+}
 
 function compareConfig(a: ConfigFileEntry, b: ConfigFileEntry) {
   return CONFIG_ORDER.indexOf(a.name as ConfigDocumentName) - CONFIG_ORDER.indexOf(b.name as ConfigDocumentName)
@@ -99,6 +118,39 @@ function compareConfig(a: ConfigFileEntry, b: ConfigFileEntry) {
 
 function configLabel(name: ConfigDocumentName, locale: Locale) {
   return CONFIG_META[name].label[locale]
+}
+
+function connectorBindingTransitionMessage(transition: unknown, questId?: string | null, locale: Locale = 'en') {
+  if (!transition || typeof transition !== 'object') {
+    return locale === 'zh' ? copy.zh.connectorBindingSaved : copy.en.connectorBindingSaved
+  }
+  const payload = transition as Record<string, unknown>
+  const mode = String(payload.mode || '').trim().toLowerCase()
+  const previousLabel = String(payload.previous_label || '').trim()
+  const currentLabel = String(payload.current_label || '').trim()
+  const resolvedQuestId = String(questId || payload.quest_id || '').trim()
+  if (locale === 'zh') {
+    if (mode === 'switch' && previousLabel && currentLabel && resolvedQuestId) {
+      return `已将 ${resolvedQuestId} 从 ${previousLabel} 切换到 ${currentLabel}。`
+    }
+    if (mode === 'bind' && currentLabel && resolvedQuestId) {
+      return `已将 ${resolvedQuestId} 绑定到 ${currentLabel}。`
+    }
+    if (mode === 'disconnect' && resolvedQuestId) {
+      return `${resolvedQuestId} 已切换为仅本地。`
+    }
+    return copy.zh.connectorBindingSaved
+  }
+  if (mode === 'switch' && previousLabel && currentLabel && resolvedQuestId) {
+    return `Switched ${resolvedQuestId} from ${previousLabel} to ${currentLabel}.`
+  }
+  if (mode === 'bind' && currentLabel && resolvedQuestId) {
+    return `Bound ${resolvedQuestId} to ${currentLabel}.`
+  }
+  if (mode === 'disconnect' && resolvedQuestId) {
+    return `${resolvedQuestId} is now local only.`
+  }
+  return copy.en.connectorBindingSaved
 }
 
 function configHint(name: ConfigDocumentName, locale: Locale) {
@@ -120,7 +172,7 @@ function settingsConfigPath(name: ConfigDocumentName | null, connectorName?: Con
 
 function connectorNameFromAnchor(anchorId: string): ConnectorName | null {
   const normalized = normalizeHashAnchor(anchorId)
-  const match = /^connector-(qq|telegram|discord|slack|feishu|whatsapp|lingzhu)(?:$|-)/.exec(normalized)
+  const match = /^connector-(qq|weixin|telegram|discord|slack|feishu|whatsapp|lingzhu)(?:$|-)/.exec(normalized)
   return (match?.[1] as ConnectorName | undefined) ?? null
 }
 
@@ -178,15 +230,18 @@ export function SettingsPage({
   const navigate = useNavigate()
   const [files, setFiles] = useState<ConfigFileEntry[]>([])
   const [connectors, setConnectors] = useState<ConnectorSnapshot[]>([])
+  const [baselineEntries, setBaselineEntries] = useState<BaselineRegistryEntry[]>([])
   const [quests, setQuests] = useState<QuestSummary[]>([])
   const [selectedName, setSelectedName] = useState<ConfigDocumentName | null>(requestedConfigName || null)
   const [document, setDocument] = useState<OpenDocumentPayload | null>(null)
   const [structuredDraft, setStructuredDraft] = useState<Record<string, unknown>>({})
   const [loading, setLoading] = useState(true)
+  const [documentLoading, setDocumentLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [validating, setValidating] = useState(false)
   const [testingAll, setTestingAll] = useState(false)
   const [deletingProfileKey, setDeletingProfileKey] = useState('')
+  const [deletingBaselineId, setDeletingBaselineId] = useState('')
   const [bindingProfileKey, setBindingProfileKey] = useState('')
   const [validation, setValidation] = useState<ConfigValidationPayload | null>(null)
   const [testResult, setTestResult] = useState<ConfigTestPayload | null>(null)
@@ -200,13 +255,19 @@ export function SettingsPage({
     const load = async () => {
       setLoading(true)
       try {
-        const [filePayload, connectorPayload, questPayload] = await Promise.all([client.configFiles(), client.connectors(), client.quests()])
+        const [filePayload, connectorPayload, baselinePayload, questPayload] = await Promise.all([
+          client.configFiles(),
+          client.connectors(),
+          client.baselines(),
+          client.quests(),
+        ])
         if (!mounted) {
           return
         }
         const sorted = [...filePayload].sort(compareConfig)
-        setFiles(sorted)
+        setFiles([...sorted, SYNTHETIC_BASELINE_FILE].sort(compareConfig))
         setConnectors(connectorPayload)
+        setBaselineEntries(baselinePayload)
         setQuests(questPayload)
         const preferred = requestedConfigName || (sorted[0]?.name as ConfigDocumentName | undefined) || null
         if (preferred) {
@@ -228,23 +289,42 @@ export function SettingsPage({
     if (!selectedName) {
       setDocument(null)
       setStructuredDraft({})
+      setDocumentLoading(false)
       return
     }
-    let mounted = true
-    const load = async () => {
-      const next = await client.configDocument(selectedName)
-      if (!mounted) {
-        return
-      }
-      setDocument(next)
-      setStructuredDraft(
-        next.meta?.structured_config && typeof next.meta.structured_config === 'object'
-          ? (next.meta.structured_config as Record<string, unknown>)
-          : {}
-      )
+    if (selectedName === 'baselines') {
+      setDocument(null)
+      setStructuredDraft({})
       setValidation(null)
       setTestResult(null)
       setSaveMessage('')
+      setDocumentLoading(false)
+      return
+    }
+    let mounted = true
+    setDocumentLoading(true)
+    setDocument(null)
+    setStructuredDraft({})
+    setValidation(null)
+    setTestResult(null)
+    setSaveMessage('')
+    const load = async () => {
+      try {
+        const next = await client.configDocument(selectedName)
+        if (!mounted) {
+          return
+        }
+        setDocument(next)
+        setStructuredDraft(
+          next.meta?.structured_config && typeof next.meta.structured_config === 'object'
+            ? (next.meta.structured_config as Record<string, unknown>)
+            : {}
+        )
+      } finally {
+        if (mounted) {
+          setDocumentLoading(false)
+        }
+      }
     }
     void load()
     return () => {
@@ -260,7 +340,9 @@ export function SettingsPage({
     onRequestedConfigConsumed?.()
   }, [onRequestedConfigConsumed, requestedConfigName])
 
+  const isPageLoading = loading || documentLoading
   const isConnectorDocument = selectedName === 'connectors'
+  const isBaselineDocument = selectedName === 'baselines'
   const visibleConnectorNames = useMemo(
     () => new Set(connectors.filter((item) => item.name !== 'local').map((item) => item.name as ConnectorName)),
     [connectors]
@@ -279,7 +361,7 @@ export function SettingsPage({
   const selectedAnchorId = selectedName ? `settings-${selectedName}` : ''
 
   useEffect(() => {
-    if (selectedName !== 'connectors') {
+    if (selectedName !== 'connectors' || selectedConnectorName !== 'qq') {
       lastKnownQqMainChatIdRef.current = ''
       return
     }
@@ -333,16 +415,16 @@ export function SettingsPage({
     void poll()
     const timer = window.setInterval(() => {
       void poll()
-    }, 3000)
+    }, 10000)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [document?.revision, isDirty, selectedName, structuredDraft.qq, t.qqAutoBound])
+  }, [document?.revision, isDirty, selectedConnectorName, selectedName, structuredDraft.qq, t.qqAutoBound])
 
   useEffect(() => {
     const anchorId = normalizeHashAnchor(location.hash)
-    if (!anchorId || loading || !selectedName) {
+    if (!anchorId || isPageLoading || !selectedName) {
       return
     }
     let cancelled = false
@@ -361,9 +443,12 @@ export function SettingsPage({
     return () => {
       cancelled = true
     }
-  }, [document?.revision, loading, location.hash, selectedName])
+  }, [document?.revision, isPageLoading, location.hash, selectedName])
 
   useEffect(() => {
+    if (loading) {
+      return
+    }
     if (!isConnectorDocument || !requestedConnectorName) {
       return
     }
@@ -377,7 +462,7 @@ export function SettingsPage({
       },
       { replace: true }
     )
-  }, [isConnectorDocument, navigate, requestedConnectorName, visibleConnectorNames])
+  }, [isConnectorDocument, loading, navigate, requestedConnectorName, visibleConnectorNames])
 
   useEffect(() => {
     if (!isConnectorDocument || selectedConnectorName) {
@@ -470,7 +555,9 @@ export function SettingsPage({
     return visibleConnectorEntries.map((entry) => {
       const configured = structuredDraft[entry.name]
       const configEnabled =
-        configured && typeof configured === 'object' ? Boolean((configured as Record<string, unknown>).enabled) : false
+        configured && typeof configured === 'object'
+          ? connectorConfigAutoEnabled(entry.name, configured as Record<string, unknown>)
+          : false
       const snapshot = snapshotByName.get(entry.name)
       return {
         name: entry.name,
@@ -482,6 +569,10 @@ export function SettingsPage({
 
   const refreshSelected = async () => {
     if (!selectedName) {
+      return
+    }
+    if (selectedName === 'baselines') {
+      setBaselineEntries(await client.baselines())
       return
     }
     const next = await client.configDocument(selectedName)
@@ -519,7 +610,7 @@ export function SettingsPage({
 
   const handleSave = async () => {
     if (!selectedName || !document) {
-      return
+      return false
     }
     setSaving(true)
     try {
@@ -543,12 +634,19 @@ export function SettingsPage({
         setSaveMessage(t.saved)
         await refreshSelected()
         setConnectors(await client.connectors())
+        return true
       } else {
         setSaveMessage('')
+        return false
       }
     } finally {
       setSaving(false)
     }
+  }
+
+  const refreshConnectorSettings = async () => {
+    await refreshSelected()
+    setConnectors(await client.connectors())
   }
 
   const handleDeleteConnectorProfile = async (connectorName: ConnectorName, profileId: string) => {
@@ -564,6 +662,22 @@ export function SettingsPage({
       setSaveMessage(error instanceof Error ? error.message : String(error || 'Failed to delete connector profile.'))
     } finally {
       setDeletingProfileKey('')
+    }
+  }
+
+  const handleDeleteBaseline = async (baselineId: string) => {
+    setDeletingBaselineId(baselineId)
+    try {
+      await client.deleteBaseline(baselineId)
+      setSaveMessage(t.baselineDeleted)
+      const [baselinePayload, questPayload] = await Promise.all([client.baselines(), client.quests()])
+      setBaselineEntries(baselinePayload)
+      setQuests(questPayload)
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : String(error || 'Failed to delete baseline.'))
+      throw error
+    } finally {
+      setDeletingBaselineId('')
     }
   }
 
@@ -605,7 +719,13 @@ export function SettingsPage({
       if (!result.ok) {
         throw new Error(String(result.message || 'Unable to update connector binding.'))
       }
-      setSaveMessage(t.connectorBindingSaved)
+      setSaveMessage(
+        connectorBindingTransitionMessage(
+          (result as Record<string, unknown>).binding_transition,
+          normalizedNextQuestId || normalizedCurrentQuestId,
+          locale
+        )
+      )
       const [connectorPayload, questPayload] = await Promise.all([client.connectors(), client.quests()])
       setConnectors(connectorPayload)
       setQuests(questPayload)
@@ -701,16 +821,16 @@ export function SettingsPage({
           </aside>
 
           <section ref={contentRef} className="feed-scrollbar min-h-0 overflow-y-auto py-6 xl:px-10">
-            {loading ? (
+            {isPageLoading ? (
               <div className="flex items-center gap-3 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {t.loading}...
               </div>
             ) : null}
 
-            {!loading && !selectedName ? <div className="text-sm text-muted-foreground">{t.noFile}</div> : null}
+            {!isPageLoading && !selectedName ? <div className="text-sm text-muted-foreground">{t.noFile}</div> : null}
 
-            {!loading && selectedName && selectedMeta ? (
+            {!isPageLoading && selectedName && selectedMeta ? (
               <>
                 <header
                   id={selectedAnchorId || undefined}
@@ -737,7 +857,7 @@ export function SettingsPage({
 
                 {saveMessage ? <div className="mt-3 text-sm text-emerald-700 dark:text-emerald-300">{saveMessage}</div> : null}
 
-                {helpMarkdown && !isConnectorDocument ? (
+                {helpMarkdown && !isConnectorDocument && !isBaselineDocument ? (
                   <section className="border-b border-black/[0.08] py-6 dark:border-white/[0.08]">
                     <div className="mb-3 text-sm font-medium">{t.reference}</div>
                     <MarkdownDocument
@@ -763,7 +883,8 @@ export function SettingsPage({
                       visibleConnectorNames={visibleConnectorEntries.map((entry) => entry.name)}
                       selectedConnectorName={selectedConnectorName}
                       onChange={setStructuredConnectors}
-                      onSave={() => void handleSave()}
+                      onSave={handleSave}
+                      onRefresh={refreshConnectorSettings}
                       onDeleteProfile={(connectorName, profileId) => void handleDeleteConnectorProfile(connectorName, profileId)}
                       onManageProfileBinding={(payload) => handleManageConnectorBinding(payload)}
                       onSelectConnector={(connectorName) =>
@@ -783,10 +904,21 @@ export function SettingsPage({
                   </div>
                 ) : null}
 
-                {document && !isConnectorDocument ? (
+                {isBaselineDocument ? (
+                  <div className="pt-6">
+                    <BaselineSettingsPanel
+                      locale={locale}
+                      entries={baselineEntries}
+                      deletingBaselineId={deletingBaselineId}
+                      onDeleteBaseline={handleDeleteBaseline}
+                    />
+                  </div>
+                ) : null}
+
+                {document && !isConnectorDocument && !isBaselineDocument ? (
                   <div className="pt-6">
                     <RegistrySettingsForm
-                      documentName={selectedName as Exclude<ConfigDocumentName, 'connectors'>}
+                      documentName={selectedName as Exclude<ConfigDocumentName, 'connectors' | 'baselines'>}
                       locale={locale}
                       value={structuredDraft}
                       validation={validation}

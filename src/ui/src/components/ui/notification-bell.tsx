@@ -15,16 +15,12 @@ import { useUploadTasks, useFileTreeStore } from '@/lib/stores/file-tree'
 import { formatFileSize } from '@/lib/types/file'
 import { PngIcon } from '@/components/ui/png-icon'
 import { useNotificationsStore } from '@/lib/stores/notifications'
-import { useBroadcastsStore } from '@/lib/stores/broadcasts'
-import { useBroadcasts } from '@/lib/hooks/useBroadcasts'
-import { listBroadcasts, markBroadcastRead as markBroadcastReadApi } from '@/lib/api/broadcasts'
 import { usePremiumMessagesStore } from '@/lib/stores/premium-messages'
 import { markPremiumMessageRead } from '@/lib/api/messages'
 import { getFileContent } from '@/lib/api/files'
 import { markAllNotificationsRead, markNotificationsRead } from '@/lib/api/notifications'
 import { MARKDOWN_VIEWER_STYLES } from '@/lib/plugins/markdown-viewer/markdownStyles'
 import type { SystemNotification } from '@/lib/types/notification'
-import type { BroadcastMessage } from '@/lib/types/broadcast'
 import type { PremiumMessage } from '@/lib/types/messages'
 
 const MarkdownRenderer = dynamic(
@@ -67,21 +63,13 @@ export function NotificationBell({
   variant?: 'default' | 'workspace'
   enabled?: boolean
 }) {
-  useBroadcasts(enabled)
   const { toasts, markToastRead, markAllRead, removeToast, clearToasts } = useToast()
   const systemNotifications = useNotificationsStore((state) => state.items)
   const systemProjectId = useNotificationsStore((state) => state.projectId)
   const markSystemReadLocal = useNotificationsStore((state) => state.markRead)
   const markSystemAllReadLocal = useNotificationsStore((state) => state.markAllRead)
-  const broadcastNotifications = useBroadcastsStore((state) => state.items)
-  const broadcastLoading = useBroadcastsStore((state) => state.isLoading)
-  const setBroadcasts = useBroadcastsStore((state) => state.setBroadcasts)
-  const setBroadcastLoading = useBroadcastsStore((state) => state.setLoading)
-  const setBroadcastError = useBroadcastsStore((state) => state.setError)
   const premiumMessages = usePremiumMessagesStore((state) => state.items)
   const markPremiumReadLocal = usePremiumMessagesStore((state) => state.markRead)
-  const markBroadcastReadLocal = useBroadcastsStore((state) => state.markRead)
-  const markBroadcastAllReadLocal = useBroadcastsStore((state) => state.markAllRead)
   const uploadTasks = useUploadTasks()
   const { cancelUpload, clearCompletedUploads } = useFileTreeStore()
   const [expandedId, setExpandedId] = React.useState<string | null>(null)
@@ -154,10 +142,6 @@ export function NotificationBell({
     () => premiumMessages.filter((t) => !t.state?.read_at).length,
     [premiumMessages]
   )
-  const broadcastUnread = React.useMemo(
-    () => broadcastNotifications.filter((t) => !t.read_at).length,
-    [broadcastNotifications]
-  )
   const sorted = React.useMemo(
     () => [...toasts].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
     [toasts]
@@ -169,15 +153,7 @@ export function NotificationBell({
       ),
     [systemNotifications]
   )
-  const sortedBroadcasts = React.useMemo(
-    () =>
-      [...broadcastNotifications].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      ),
-    [broadcastNotifications]
-  )
-  const unreadTotal = frontendUnread + systemUnread + premiumUnread + broadcastUnread
-  const hasUnreadBroadcasts = premiumUnread > 0 || broadcastUnread > 0
+  const unreadTotal = frontendUnread + systemUnread + premiumUnread
 
   const iconSize = size === 'sm' ? 18 : 20
   const uploads = React.useMemo(() => {
@@ -186,13 +162,12 @@ export function NotificationBell({
     const completed = visible.filter((t) => t.status === 'completed' || t.status === 'error')
     return { visible, active, completed }
   }, [uploadTasks])
-  const badgeCount = frontendUnread + systemUnread + premiumUnread + broadcastUnread + uploads.active.length
-  const hasBroadcasts = sortedBroadcasts.length > 0
+  const badgeCount = frontendUnread + systemUnread + premiumUnread + uploads.active.length
   const hasPremium = premiumMessages.length > 0
   const hasSystem = sortedSystem.length > 0
   const hasFrontend = sorted.length > 0
   const hasUploads = uploads.visible.length > 0
-  const showEmptyState = !hasBroadcasts && !hasPremium && !hasSystem && !hasFrontend && !hasUploads
+  const showEmptyState = !hasPremium && !hasSystem && !hasFrontend && !hasUploads
 
   const markSystemRead = React.useCallback(
     async (ids: string[]) => {
@@ -206,22 +181,6 @@ export function NotificationBell({
     },
     [markSystemReadLocal]
   )
-  const markBroadcastRead = React.useCallback(
-    async (id: string) => {
-      if (!id) return
-      markBroadcastReadLocal([id])
-      try {
-        const res = await markBroadcastReadApi(id)
-        if (res?.read_at) {
-          markBroadcastReadLocal([id], res.read_at)
-        }
-      } catch {
-        // best-effort
-      }
-    },
-    [markBroadcastReadLocal]
-  )
-
   const markPremiumRead = React.useCallback(
     async (id: string) => {
       if (!id) return
@@ -239,19 +198,6 @@ export function NotificationBell({
   )
 
   const markSystemAllRead = React.useCallback(async () => {
-    if (broadcastNotifications.length > 0) {
-      const unread = broadcastNotifications.filter((item) => !item.read_at)
-      markBroadcastAllReadLocal()
-      await Promise.all(
-        unread.map(async (item) => {
-          try {
-            await markBroadcastReadApi(item.id)
-          } catch {
-            // best-effort
-          }
-        })
-      )
-    }
     if (!systemProjectId || systemNotifications.length === 0) return
     markSystemAllReadLocal()
     try {
@@ -259,13 +205,7 @@ export function NotificationBell({
     } catch {
       // best-effort
     }
-  }, [
-    broadcastNotifications.length,
-    markBroadcastAllReadLocal,
-    markSystemAllReadLocal,
-    systemNotifications.length,
-    systemProjectId,
-  ])
+  }, [markSystemAllReadLocal, systemNotifications.length, systemProjectId])
 
   if (!enabled) {
     return null
@@ -277,20 +217,7 @@ export function NotificationBell({
         if (!enabled) return
         if (!open) {
           setExpandedId(null)
-          return
         }
-
-        if (broadcastLoading) return
-
-        setBroadcastLoading(true)
-        listBroadcasts()
-          .then((response) => {
-            setBroadcasts(response.broadcasts || [])
-          })
-          .catch((err) => {
-            setBroadcastError(err?.message || 'Failed to load broadcasts')
-            setBroadcastLoading(false)
-          })
       }}
     >
       <DropdownMenuTrigger asChild>
@@ -314,7 +241,7 @@ export function NotificationBell({
             className="text-current"
             fallback={<Bell className="text-current" size={iconSize} />}
           />
-          {hasUnreadBroadcasts ? (
+          {premiumUnread > 0 ? (
             <span
               className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-[var(--brand)]/40 animate-ping"
               aria-hidden
@@ -390,7 +317,7 @@ export function NotificationBell({
               </div>
             </div>
             <div className="mt-1 text-[11px] text-black/60 dark:text-foreground/70">
-              Broadcasts, system messages, frontend alerts, and upload status are stored here.
+              Premium messages, system messages, frontend alerts, and upload status are stored here.
             </div>
           </div>
 
@@ -619,151 +546,6 @@ export function NotificationBell({
 	                  </div>
 	                </>
 	              ) : null}
-
-	              {hasBroadcasts ? (
-	                <>
-	                  <div className="px-4 pt-4 pb-2">
-	                    <div className="flex items-center justify-between">
-	                      <div className="text-[11px] font-semibold tracking-wide text-black/60 dark:text-foreground/70">
-	                        Broadcasts
-	                      </div>
-	                      <span className="text-[10px] px-2 py-0.5 rounded-full border border-black/10 dark:border-white/10 text-black/60 dark:text-foreground/70 bg-white/60 dark:bg-white/[0.04]">
-	                        Admin
-	                      </span>
-	                    </div>
-	                  </div>
-	                  <div className="px-2 pb-3 space-y-1">
-	                    {sortedBroadcasts.map((t: BroadcastMessage) => {
-	                      const expandedKey = `broadcast:${t.id}`
-	                      const isExpanded = expandedId === expandedKey
-	                      const title = t.title || t.message
-	                      const body = t.title ? t.message : null
-	                      const detailText = t.message
-	                      const imageUrl = (t.image_url || '').trim() || null
-	                      const levelLabel = t.level === 'error' ? 'Error' : t.level === 'warning' ? 'Warning' : 'Info'
-	                      const levelPill =
-	                        t.level === 'error'
-	                          ? 'border-black/25 text-black/80 dark:text-foreground bg-black/[0.03] dark:bg-white/[0.06]'
-	                          : t.level === 'warning'
-	                            ? 'border-black/20 text-black/70 dark:text-foreground/80 bg-black/[0.02] dark:bg-white/[0.05]'
-	                            : 'border-black/15 dark:border-white/20 text-black/60 dark:text-foreground/70 bg-white/70 dark:bg-white/[0.04]'
-
-	                      return (
-	                        <div
-	                          key={t.id}
-	                          className={cn(
-	                            'ds-glare-sheen group w-full text-left rounded-2xl px-4 py-3 transition-colors',
-	                            isExpanded
-	                              ? 'bg-white/70 dark:bg-white/[0.06] shadow-soft-card'
-	                              : 'bg-white/40 hover:bg-white/60 dark:bg-white/[0.03] dark:hover:bg-white/[0.06]'
-	                          )}
-	                          role="button"
-	                          tabIndex={0}
-	                          onMouseEnter={() => {
-	                            // Do not mark broadcasts read on hover (click to mark read).
-                          }}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void markBroadcastRead(t.id)
-                            setExpandedId((prev) => (prev === expandedKey ? null : expandedKey))
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key !== 'Enter' && e.key !== ' ') return
-                            e.preventDefault()
-                            void markBroadcastRead(t.id)
-                            setExpandedId((prev) => (prev === expandedKey ? null : expandedKey))
-	                          }}
-	                          aria-expanded={isExpanded}
-	                        >
-	                          <div className="flex items-start gap-4">
-	                            <div className="relative w-3 shrink-0">
-	                              <span
-	                                className="absolute left-1.5 top-1 bottom-1 w-px bg-black/15 dark:bg-white/20"
-	                                aria-hidden
-	                              />
-	                              {!t.read_at ? (
-	                                <span
-	                                  className="absolute left-[5px] top-3 h-2 w-2 rounded-full bg-[#111111] dark:bg-white"
-	                                  aria-hidden
-	                                />
-	                              ) : null}
-	                            </div>
-
-	                            <div className="min-w-0 flex-1">
-	                              <div
-	                                className={cn(
-	                                  'text-sm font-semibold tracking-tight',
-	                                  t.read_at ? 'text-black/55 dark:text-foreground/70' : 'text-[#111111] dark:text-foreground',
-	                                  isExpanded ? '' : 'line-clamp-2'
-	                                )}
-	                              >
-	                                {title}
-	                              </div>
-	                              {body ? (
-	                                <div
-	                                  className={cn(
-	                                    'mt-0.5 text-xs text-black/60 dark:text-foreground/70',
-	                                    isExpanded ? '' : 'line-clamp-2'
-	                                  )}
-	                                >
-	                                  {body}
-	                                </div>
-	                              ) : null}
-	                              {!isExpanded && imageUrl ? (
-	                                <div className="mt-2 overflow-hidden rounded-xl border border-black/10 bg-black/[0.02] dark:border-white/15 dark:bg-white/[0.04]">
-	                                  <img
-	                                    src={imageUrl}
-	                                    alt={title || 'Broadcast image'}
-	                                    className="h-24 w-full object-cover"
-	                                    loading="lazy"
-	                                  />
-	                                </div>
-	                              ) : null}
-	                              <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-black/55 dark:text-foreground/60">
-	                                <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 uppercase tracking-wide', levelPill)}>
-	                                  {levelLabel}
-	                                </span>
-	                                <span className="tabular-nums">{formatTime(t.created_at)}</span>
-	                                {t.expires_at ? (
-	                                  <span className="tabular-nums">Expires {formatTime(t.expires_at)}</span>
-	                                ) : null}
-	                              </div>
-	                              {isExpanded ? (
-	                                <ScrollArea className="mt-3 max-h-56 rounded-xl border border-black/10 bg-black/[0.02] dark:border-white/15 dark:bg-white/[0.03]">
-	                                  <div className="space-y-3 p-3">
-	                                    <p className="text-xs leading-relaxed text-black/75 dark:text-foreground/80 whitespace-pre-wrap">
-	                                      {detailText}
-	                                    </p>
-	                                    {imageUrl ? (
-	                                      <img
-	                                        src={imageUrl}
-	                                        alt={title || 'Broadcast image'}
-	                                        className="max-h-60 w-full rounded-lg object-contain bg-black/[0.03] dark:bg-white/[0.04]"
-	                                        loading="lazy"
-	                                      />
-	                                    ) : null}
-	                                    <div className="text-[10px] text-black/45 dark:text-foreground/40 font-mono tabular-nums truncate">
-	                                      id: {t.id}
-	                                    </div>
-	                                  </div>
-	                                </ScrollArea>
-	                              ) : null}
-	                            </div>
-
-	                            <ChevronDown
-	                              className={cn(
-	                                'mt-0.5 h-4 w-4 text-black/50 dark:text-foreground/60 transition-transform',
-	                                isExpanded ? 'rotate-180' : ''
-	                              )}
-	                              aria-hidden
-	                            />
-	                          </div>
-	                        </div>
-	                      )
-	                    })}
-	                  </div>
-                </>
-              ) : null}
 
 	              {hasSystem ? (
 	                <>

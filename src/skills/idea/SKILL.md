@@ -103,6 +103,9 @@ Break ties primarily through careful reasoning over:
 - Do not select an idea before checking whether close prior work already did it.
 - Do not confuse "I can implement this" with "this is a publishable or useful research direction".
 - Do not treat a weak literature search as sufficient because the idea sounds elegant.
+- Do not write, promote, or submit a final idea until the durable survey covers at least `5` and usually `5-10` task-modeling-related, mechanism-relevant, or otherwise directly usable papers.
+- Treat that literature floor as a hard gate, not a suggestion.
+  If the direct task-modeling neighborhood truly contains fewer than `5` usable papers, record that evidence explicitly and fill the remaining slots with the closest adjacent papers whose mechanism can be translated into the current task and codebase.
 - Every fresh idea build or idea-refinement pass must begin with:
   - a memory sweep, and
   - an external literature sweep.
@@ -206,6 +209,8 @@ Before you choose a direction, perform a broad but bounded literature sweep.
 
 The sweep must be grounded in actual retrieval, not recall alone.
 If durable quest memory already contains a recent and explicit survey, reuse it first and search externally only for the missing buckets, newer papers, or unresolved overlaps.
+For a normal selected-idea decision, the durable sweep must end with at least `5` and usually `5-10` papers that are close enough to the task-modeling problem, failure mode, mechanism, or codebase translation question to inform the actual design.
+This floor exists to prevent thin novelty claims and under-motivated ideas, not to reward quota chasing.
 
 When tools allow it, combine:
 
@@ -240,6 +245,8 @@ For each promising idea, you must be able to answer:
 
 The goal is not to cite everything on Earth.
 The goal is to avoid fake novelty and to identify a direction that has credible research value.
+However, do not stop the sweep early once the first plausible argument appears.
+Keep going until the strongest obvious overlaps are mapped and the `5-10` usable-paper floor is durably satisfied.
 
 Recommended search outputs:
 
@@ -962,8 +969,14 @@ At minimum, preserve:
 - a `why now` statement
 - the code-level plan and minimal experiment
 - the literature relation and evidence pointers
+- inline citations or citation markers tied to the papers actually used in the idea rationale
+- a `References` or `Bibliography` section in a standard citation format
 - the strongest alternative hypothesis
 - the strongest likely objection
+
+The selected idea draft must cite the survey papers that actually shaped the mechanism, motivation, novelty check, or claim boundary.
+Use one consistent standard citation format throughout the draft, such as numbered references or author-year style.
+Do not mention paper titles casually in prose without giving them a proper citation entry.
 
 ## Idea quality rules
 
@@ -1135,6 +1148,7 @@ Preferred artifact choices:
 
 If the idea is selected and becomes the active route, immediately call `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)`.
 Before that call, first finalize a concise but durable Markdown draft for the chosen route.
+Do not start writing that final draft until the literature survey has already met the hard minimum of at least `5` and usually `5-10` usable papers.
 That draft should usually cover:
 
 - executive summary
@@ -1148,9 +1162,11 @@ That draft should usually cover:
 - code-level change plan
 - evaluation or falsification plan
 - risks, caveats, and implementation notes
+- a citation-ready `References` or `Bibliography` section that lists the survey-stage papers actually used by the idea in a standard citation format
 
 Use the draft to think clearly first, then compress the accepted contract into the structured `artifact.submit_idea(...)` fields.
 When the MCP surface supports it, pass the final Markdown draft through `draft_markdown` so the branch records both `idea.md` and `draft.md`.
+Ensure the final draft carries appropriate citations for the closest prior work, direct inspirations, and any cross-domain papers that materially shaped the selected idea.
 Normal durable idea flow should create a new branch and a new canvas node every time an accepted idea package changes meaningfully, including documentation-only idea-package changes.
 Use `lineage_intent='continue_line'` when the new idea is a child of the current active branch.
 Use `lineage_intent='branch_alternative'` when the new idea should branch from the current branch's parent foundation as a sibling-like alternative.

@@ -10,6 +10,12 @@ import { apiClient } from "./client";
 import { downloadCliFile, readCliFile, writeCliFile } from "@/lib/api/cli";
 import { getCliFileName, parseCliFileId } from "@/lib/api/cli-file-id";
 import {
+  buildDemoFileTree,
+  getDemoFile,
+  getDemoFileContent,
+  isDemoFileId,
+} from "@/demo/adapter";
+import {
   getQuestFile,
   getQuestFileBlob,
   getQuestFileContent,
@@ -66,6 +72,10 @@ export async function listFiles(
  * We convert it to `FileTreeResponse` format for consistency with the rest of the API.
  */
 export async function getFileTree(projectId: string): Promise<FileTreeResponse> {
+  const demoTree = buildDemoFileTree(projectId);
+  if (demoTree) {
+    return demoTree;
+  }
   return await getQuestFileTree(projectId);
 }
 
@@ -149,6 +159,13 @@ function flattenFileTree(nodes: FileAPIResponse[]): FileAPIResponse[] {
  * Get file details
  */
 export async function getFile(fileId: string): Promise<FileAPIResponse> {
+  if (isDemoFileId(fileId)) {
+    const demoFile = getDemoFile(fileId);
+    if (!demoFile) {
+      throw new Error(`Unknown demo file \`${fileId}\`.`);
+    }
+    return demoFile;
+  }
   if (isQuestNodeId(fileId)) {
     return await getQuestFile(fileId);
   }
@@ -321,12 +338,12 @@ export async function restoreFiles(fileIds: string[]): Promise<void> {
  * Get file content as text
  */
 export async function getFileContent(fileId: string): Promise<string> {
-  if (fileId.startsWith("broadcast:")) {
-    const broadcastId = fileId.slice("broadcast:".length);
-    const response = await apiClient.get<{ content: string }>(
-      `/api/v1/admin/broadcasts/${broadcastId}/content`
-    );
-    return response.data?.content ?? "";
+  if (isDemoFileId(fileId)) {
+    const demoContent = getDemoFileContent(fileId);
+    if (demoContent == null) {
+      throw new Error(`Unknown demo file content for \`${fileId}\`.`);
+    }
+    return demoContent;
   }
   const cliRef = parseCliFileId(fileId);
   if (cliRef) {
@@ -371,22 +388,6 @@ export async function updateFileContent(
   fileId: string,
   content: string
 ): Promise<FileAPIResponse & { checksum?: string; project_id?: string }> {
-  if (fileId.startsWith("broadcast:")) {
-    const broadcastId = fileId.slice("broadcast:".length);
-    await apiClient.put(`/api/v1/admin/broadcasts/${broadcastId}/content`, { content });
-    const now = new Date().toISOString();
-    return {
-      id: fileId,
-      name: `broadcast-${broadcastId}.md`,
-      type: "file",
-      parent_id: null,
-      path: `/admin/broadcasts/${broadcastId}`,
-      size: content.length,
-      created_at: now,
-      updated_at: now,
-      project_id: "admin",
-    } as unknown as FileAPIResponse & { checksum?: string; project_id?: string };
-  }
   const cliRef = parseCliFileId(fileId);
   if (cliRef) {
     await writeCliFile(cliRef.projectId, cliRef.serverId, {

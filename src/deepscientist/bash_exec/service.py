@@ -67,6 +67,14 @@ def _session_sort_key(session: dict[str, Any]) -> tuple[str, str]:
 def _is_process_alive(pid: object) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    proc_stat_path = Path("/proc") / str(pid) / "stat"
+    if proc_stat_path.exists():
+        try:
+            parts = proc_stat_path.read_text(encoding="utf-8").split()
+        except OSError:
+            parts = []
+        if len(parts) >= 3 and parts[2] == "Z":
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1181,6 +1189,7 @@ class BashExecService:
             "label": session.get("label"),
             "command": session.get("command"),
             "workdir": session.get("workdir"),
+            "cwd": session.get("cwd"),
             "started_at": session.get("started_at"),
             "finished_at": session.get("finished_at"),
             "exit_code": session.get("exit_code"),

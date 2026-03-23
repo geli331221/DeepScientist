@@ -1,4 +1,14 @@
 import { client as questClient } from '@/lib/api'
+import {
+  getDemoLabLayout,
+  getDemoLabQuestGraph,
+  listDemoLabAgents,
+  listDemoLabMemory,
+  listDemoLabPapers,
+  listDemoLabQuestEvents,
+  saveDemoLabLayout,
+} from '@/demo/adapter'
+import { isDemoProjectId } from '@/demo/projects'
 import { shouldUseQuestProject } from '@/lib/runtime/quest-runtime'
 import type {
   GuidanceVm,
@@ -179,6 +189,26 @@ export type LabMetricObjective = {
   target?: number | null
 }
 
+export type LabBranchWorkflowState = {
+  analysis_state?: 'none' | 'pending' | 'active' | 'completed' | string | null
+  writing_state?: 'not_ready' | 'blocked_by_analysis' | 'ready' | 'active' | 'completed' | string | null
+  analysis_campaign_id?: string | null
+  total_slices?: number | null
+  completed_slices?: number | null
+  next_pending_slice_id?: string | null
+  paper_parent_branch?: string | null
+  paper_parent_run_id?: string | null
+  status_reason?: string | null
+}
+
+export type LabCanvasPreferences = {
+  curveMetric?: string | null
+  curveMode?: 'sota' | 'full' | null
+  nodeDisplayMode?: 'summary' | 'metric' | null
+  showAnalysis?: boolean | null
+  pathFilterMode?: 'all' | 'current' | 'selected' | null
+}
+
 export type LabMetricCurvePoint = {
   seq?: number | null
   ts?: string | null
@@ -243,6 +273,7 @@ export type LabQuestGraphNode = {
   scope_paths?: string[] | null
   compare_base?: string | null
   compare_head?: string | null
+  workflow_state?: LabBranchWorkflowState | null
   node_summary?: {
     last_event_type?: string | null
     last_reply?: string | null
@@ -1604,6 +1635,19 @@ function resolveBranchCompareBase(node: GitBranchNode): string | null {
   return null
 }
 
+function resolveWorkflowBranchStageKey(workflowState?: LabBranchWorkflowState | null): string | null {
+  if (!workflowState || typeof workflowState !== 'object') return null
+  const writingState = String(workflowState.writing_state || '').trim().toLowerCase()
+  if (writingState === 'completed') return 'finalize'
+  if (writingState === 'active') return 'write'
+  if (writingState === 'blocked_by_analysis') return 'analysis-campaign'
+  const analysisState = String(workflowState.analysis_state || '').trim().toLowerCase()
+  if (analysisState === 'pending' || analysisState === 'active' || analysisState === 'completed') {
+    return 'analysis-campaign'
+  }
+  return null
+}
+
 function resolveGraphBranchStageKey(
   summary: QuestSummary,
   node: GitBranchNode | null,
@@ -1611,6 +1655,8 @@ function resolveGraphBranchStageKey(
 ) {
   const traced = resolveStageKey(branchTrace?.stage_key)
   if (isCanonicalStage(traced)) return traced
+  const workflowStage = resolveStageKey(resolveWorkflowBranchStageKey(node?.workflow_state as LabBranchWorkflowState | null))
+  if (isCanonicalStage(workflowStage)) return workflowStage
   const runKind = resolveStageKey(node?.run_kind || null)
   if (isCanonicalStage(runKind)) return runKind
   const inferredClass = node ? resolveBranchClass(node) : 'main'
@@ -1686,7 +1732,15 @@ function buildLocalBranchGraphNodes(
     nextRank >= 0 && nextRank < CANONICAL_STAGE_ORDER.length
       ? CANONICAL_STAGE_ORDER[nextRank]
       : null
+  const hasPendingAnalysis = Boolean(
+    summary.active_analysis_campaign_id ||
+      summary.next_pending_slice_id ||
+      String(summary.workspace_mode || '').trim().toLowerCase() === 'analysis'
+  )
   if (!nextStage || nextStage === 'baseline') {
+    return nodes
+  }
+  if (nextStage === 'write' && hasPendingAnalysis) {
     return nodes
   }
   const alreadyCovered = realNodes.some((node) => resolveStageRank(node.stage_key) >= resolveStageRank(nextStage))
@@ -1975,7 +2029,7 @@ function buildLocalBranchWorkbench(summary: QuestSummary, branches?: GitBranches
         isHead: true,
         stage: 'baseline',
         nowDoing: summary.summary?.status_line ?? null,
-        latestMetrics: latestMetrics(summary),
+        latestMetrics: null,
       },
     ]
   }
@@ -1988,9 +2042,7 @@ function buildLocalBranchWorkbench(summary: QuestSummary, branches?: GitBranches
     isHead: Boolean(node.research_head),
     stage: resolveGraphBranchStageKey(summary, node, null),
     nowDoing: node.latest_summary ?? node.subject ?? null,
-    latestMetrics:
-      extractLatestResultMetrics(node.latest_result) ||
-      (node.latest_metric?.key ? { [node.latest_metric.key]: node.latest_metric.value ?? null } : null),
+    latestMetrics: extractLatestResultMetrics(node.latest_result),
   }))
 }
 
@@ -2185,6 +2237,24 @@ function extractTraceMetrics(trace?: LabQuestNodeTrace | null) {
   return asRecordValue(details?.metrics_summary)
 }
 
+function extractDurableRunTraceMetrics(trace?: LabQuestNodeTrace | null) {
+  const payload = asRecordValue(trace?.payload_json)
+  const artifactKind = String(trace?.artifact_kind || payload?.kind || '').trim().toLowerCase()
+  const resultKind = String(payload?.result_kind || '').trim().toLowerCase()
+  const stageKey = String(trace?.stage_key || '').trim().toLowerCase()
+  const hasRunIdentity =
+    Boolean(asStringValue(payload?.run_id)) ||
+    Array.isArray(payload?.metric_rows) ||
+    Boolean(asRecordValue(payload?.metrics_summary))
+  const isDurableRunTrace =
+    artifactKind === 'run' ||
+    resultKind === 'main_experiment' ||
+    resultKind === 'analysis_slice' ||
+    (hasRunIdentity && (stageKey === 'experiment' || stageKey === 'analysis-campaign' || stageKey === 'analysis'))
+  if (!isDurableRunTrace) return null
+  return extractTraceMetrics(trace)
+}
+
 function formatFoundationLabel(node: GitBranchNode) {
   const foundation = node.foundation_ref
   if (!foundation || typeof foundation !== 'object' || Array.isArray(foundation)) {
@@ -2248,15 +2318,9 @@ function mapGitNodeToLabQuestGraphNode(
   node: GitBranchNode,
   branchTrace?: LabQuestNodeTrace | null
 ): LabQuestGraphNode {
-  const traceMetrics = extractTraceMetrics(branchTrace)
+  const traceMetrics = extractDurableRunTraceMetrics(branchTrace)
   const traceWorktreeRelPath = String(branchTrace?.worktree_rel_path || '').trim() || null
-  const metrics =
-    extractLatestResultMetrics(node.latest_result) ||
-    (node.latest_metric?.key
-      ? { [node.latest_metric.key]: node.latest_metric.value ?? null }
-      : null) ||
-    traceMetrics ||
-    latestMetrics(summary)
+  const metrics = extractLatestResultMetrics(node.latest_result) || traceMetrics
   const metricDeltas = extractLatestResultMetricDeltas(node.latest_result)
   const stageKey = resolveGraphBranchStageKey(summary, node, branchTrace)
 
@@ -2298,6 +2362,7 @@ function mapGitNodeToLabQuestGraphNode(
     scope_paths: resolveBranchScopePaths(node),
     compare_base: resolveBranchCompareBase(node),
     compare_head: node.ref,
+    workflow_state: (node.workflow_state as LabBranchWorkflowState | null) ?? null,
     node_summary: {
       last_event_type:
         branchTrace?.artifact_kind ||
@@ -2315,6 +2380,7 @@ function mapGitNodeToLabQuestGraphNode(
 
 function buildFallbackGraphNode(summary: QuestSummary, branchTrace?: LabQuestNodeTrace | null): LabQuestGraphNode {
   const stageKey = resolveGraphBranchStageKey(summary, null, branchTrace)
+  const traceMetrics = extractDurableRunTraceMetrics(branchTrace)
   return {
     node_id: summary.branch || 'main',
     branch_name: summary.branch || 'main',
@@ -2325,7 +2391,7 @@ function buildFallbackGraphNode(summary: QuestSummary, branchTrace?: LabQuestNod
     worktree_rel_path: null,
     latest_commit: branchTrace?.head_commit || summary.head || null,
     status: 'active',
-    metrics_json: extractTraceMetrics(branchTrace) || latestMetrics(summary),
+    metrics_json: traceMetrics,
     verdict: branchTrace?.summary || summary.summary?.status_line || null,
     created_at: normalizeTimestamp(branchTrace?.updated_at || summary.updated_at),
     stage_key: stageKey,
@@ -2346,7 +2412,7 @@ function buildFallbackGraphNode(summary: QuestSummary, branchTrace?: LabQuestNod
         branchTrace?.actions?.[branchTrace.actions.length - 1]?.raw_event_type ||
         stageKey,
       last_reply: branchTrace?.summary || summary.summary?.status_line || null,
-      latest_metrics: extractTraceMetrics(branchTrace) || latestMetrics(summary),
+      latest_metrics: traceMetrics,
       trend_preview: null,
       claim_verdict: null,
       go_decision: null,
@@ -2516,6 +2582,16 @@ async function loadLocalQuestNodeTraces(
 async function loadLocalQuestBranches(projectId: string): Promise<GitBranchesPayload | null> {
   try {
     return await questClient.gitBranches(projectId)
+  } catch {
+    return null
+  }
+}
+
+async function loadLocalQuestLayout(
+  projectId: string
+): Promise<{ layout_json?: Record<string, unknown> | null; updated_at?: string | null } | null> {
+  try {
+    return await questClient.layout(projectId)
   } catch {
     return null
   }
@@ -2892,7 +2968,8 @@ function buildLocalQuestGraphResponse(
   summary: QuestSummary,
   branches: GitBranchesPayload | null,
   params?: { view?: 'branch' | 'event' | 'stage'; search?: string; atEventId?: string | null },
-  nodeTraces?: LabQuestNodeTraceListResponse | null
+  nodeTraces?: LabQuestNodeTraceListResponse | null,
+  layoutJson?: Record<string, unknown> | null
 ): LabQuestGraphResponse {
   const view = params?.view ?? 'branch'
   const items = nodeTraces?.items ?? []
@@ -2912,7 +2989,7 @@ function buildLocalQuestGraphResponse(
       nodes: traces.map((trace) => mapTraceToGraphNode(trace, summary, view)),
       edges: buildTraceEdges(traces, view),
       head_branch: summary.branch || 'main',
-      layout_json: null,
+      layout_json: layoutJson ?? null,
       metric_catalog: [],
       governance_vm: buildLocalGovernanceVm(summary, branches),
       overlay_actions: [],
@@ -2925,7 +3002,7 @@ function buildLocalQuestGraphResponse(
     nodes: branchNodes,
     edges: branchEdges,
     head_branch: summary.branch || 'main',
-    layout_json: null,
+    layout_json: layoutJson ?? null,
     metric_catalog: buildGraphMetricCatalogFromNodes(branchNodes),
     governance_vm: buildLocalGovernanceVm(summary, branches),
     overlay_actions: [],
@@ -3049,6 +3126,9 @@ export async function listLabAgents(
   projectId: string,
   options?: LabRequestOptions
 ): Promise<LabListResponse<LabAgentInstance>> {
+  if (isDemoProjectId(projectId)) {
+    return listDemoLabAgents(projectId) ?? { items: [] }
+  }
   if (await shouldUseLocalQuestLab(projectId)) {
     const summary = await loadLocalQuestSummary(projectId)
     return { items: [mapQuestSummaryToLabAgent(summary)] }
@@ -3523,13 +3603,32 @@ export async function getLabQuestGraph(
   questId: string,
   params?: { view?: 'branch' | 'event' | 'stage'; search?: string; atEventId?: string | null }
 ): Promise<LabQuestGraphResponse> {
+  if (isDemoProjectId(projectId)) {
+    const payload = getDemoLabQuestGraph(projectId, { view: params?.view })
+    if (!payload) {
+      throw new Error(`Unknown demo graph for ${projectId}`)
+    }
+    const layout = getDemoLabLayout(projectId)
+    return {
+      ...payload,
+      layout_json: layout?.layout_json ?? payload.layout_json ?? null,
+    }
+  }
   if (await shouldUseLocalQuestLab(projectId)) {
-    const summary = await loadLocalQuestSummary(projectId)
-    const branches = await loadLocalQuestBranches(projectId)
     const requestedView = params?.view ?? 'branch'
-    const nodeTraces =
-      requestedView === 'branch' ? null : await loadLocalQuestNodeTraces(projectId)
-    return buildLocalQuestGraphResponse(summary, branches, params, nodeTraces)
+    const [summary, branches, layoutState, nodeTraces] = await Promise.all([
+      loadLocalQuestSummary(projectId),
+      loadLocalQuestBranches(projectId),
+      loadLocalQuestLayout(projectId),
+      requestedView === 'branch' ? Promise.resolve(null) : loadLocalQuestNodeTraces(projectId),
+    ])
+    return buildLocalQuestGraphResponse(
+      summary,
+      branches,
+      params,
+      nodeTraces,
+      (layoutState?.layout_json as Record<string, unknown> | null) ?? null
+    )
   }
   try {
     const response = await apiClient.get(`${LAB_BASE(projectId)}/quests/${questId}/graph`, {
@@ -3544,8 +3643,11 @@ export async function getLabQuestGraph(
     if (!isLocalLabFallbackError(error)) {
       throw error
     }
-    const summary = await loadLocalQuestSummary(projectId)
-    const branches = await loadLocalQuestBranches(projectId)
+    const [summary, branches, layoutState] = await Promise.all([
+      loadLocalQuestSummary(projectId),
+      loadLocalQuestBranches(projectId),
+      loadLocalQuestLayout(projectId),
+    ])
     const branchNodes = buildLocalBranchGraphNodes(summary, branches, new Map())
     const branchEdges = buildLocalBranchGraphEdges(summary, branchNodes, branches)
     return {
@@ -3553,7 +3655,7 @@ export async function getLabQuestGraph(
       nodes: branchNodes,
       edges: branchEdges,
       head_branch: summary.branch || 'main',
-      layout_json: null,
+      layout_json: (layoutState?.layout_json as Record<string, unknown> | null) ?? null,
       metric_catalog: buildGraphMetricCatalogFromNodes(branchNodes),
       governance_vm: buildLocalGovernanceVm(summary, branches),
       overlay_actions: [],
@@ -4153,8 +4255,15 @@ export async function listLabQuestEvents(
     cursor?: string
     limit?: number
     includePayload?: boolean
+    }
+  ): Promise<LabQuestEventListResponse> {
+  if (isDemoProjectId(projectId)) {
+    const payload = listDemoLabQuestEvents(projectId, { limit: params?.limit })
+    if (!payload) {
+      throw new Error(`Unknown demo quest events for ${projectId}`)
+    }
+    return payload
   }
-): Promise<LabQuestEventListResponse> {
   if (await shouldUseLocalQuestLab(projectId)) {
     const summary = await loadLocalQuestSummary(projectId)
     const artifacts = await loadLocalQuestArtifacts(projectId)
@@ -4562,6 +4671,14 @@ export async function updateLabQuestLayout(
   questId: string,
   layoutJson: Record<string, unknown>
 ): Promise<LabQuestLayoutResponse> {
+  if (isDemoProjectId(projectId)) {
+    return saveDemoLabLayout(projectId, layoutJson)
+  }
+  if (await shouldUseLocalQuestLab(projectId)) {
+    return questClient.updateLayout(projectId, {
+      layout_json: layoutJson,
+    })
+  }
   const response = await apiClient.post(`${LAB_BASE(projectId)}/quests/${questId}/layout`, {
     layout_json: layoutJson,
   })
@@ -4622,6 +4739,9 @@ export async function listLabPapers(
   projectId: string,
   params?: { questId?: string | null }
 ): Promise<LabListResponse<LabPaper>> {
+  if (isDemoProjectId(projectId)) {
+    return listDemoLabPapers(projectId) ?? { items: [] }
+  }
   if (await shouldUseLocalQuestLab(projectId)) {
     return { items: [] }
   }
@@ -4861,6 +4981,26 @@ export async function listLabMemory(
     typeof params?.limit === 'number'
       ? Math.max(1, Math.min(100, Math.trunc(params.limit)))
       : undefined
+  if (isDemoProjectId(projectId)) {
+    const payload = listDemoLabMemory(projectId) ?? { items: [] }
+    let items = payload.items
+    if (params?.kind) {
+      items = items.filter((item) => item.kind === params.kind)
+    }
+    if (params?.query) {
+      const query = params.query.toLowerCase()
+      items = items.filter((item) =>
+        `${item.title || ''} ${item.summary || ''}`.toLowerCase().includes(query)
+      )
+    }
+    if (params?.branchName) {
+      items = items.filter((item) => item.branch_name === params.branchName)
+    }
+    if (params?.stageKey) {
+      items = items.filter((item) => item.stage_key === params.stageKey)
+    }
+    return { items: items.slice(0, normalizedLimit ?? 50) }
+  }
   if (await shouldUseLocalQuestLab(projectId)) {
     const cards = await questClient.memory(projectId)
     let items = cards.map(mapMemoryCardToEntry)

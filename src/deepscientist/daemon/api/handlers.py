@@ -77,7 +77,6 @@ class ApiHandlers:
                 "productApis": False,
                 "socketIo": False,
                 "notifications": False,
-                "broadcasts": False,
                 "points": False,
                 "arxiv": True,
                 "cliFrontend": False,
@@ -208,8 +207,30 @@ npm --prefix src/ui run build</pre>
     def connectors_availability(self) -> dict:
         return self.app.connector_availability_summary()
 
+    def weixin_login_qr_start(self, body: dict | None = None) -> dict:
+        payload = body if isinstance(body, dict) else {}
+        return self.app.start_weixin_login_qr(force=bool(payload.get("force")))
+
+    def weixin_login_qr_wait(self, body: dict | None = None) -> dict:
+        payload = body if isinstance(body, dict) else {}
+        return self.app.wait_weixin_login_qr(
+            session_key=str(payload.get("session_key") or "").strip(),
+            timeout_ms=int(payload.get("timeout_ms") or 1_500),
+        )
+
+    def lingzhu_health(self) -> dict:
+        return self.app.lingzhu_health_payload()
+
     def baselines(self) -> list[dict]:
         return self.app.artifact_service.baselines.list_entries()
+
+    def baseline_delete(self, baseline_id: str) -> dict | tuple[int, dict]:
+        try:
+            return self.app.artifact_service.delete_baseline(baseline_id)
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "baseline_id": baseline_id}
+        except ValueError as exc:
+            return 400, {"ok": False, "message": str(exc), "baseline_id": baseline_id}
 
     def qq_bindings(self) -> list[dict]:
         return self.app.list_qq_bindings()
@@ -257,6 +278,18 @@ npm --prefix src/ui run build</pre>
                 "no",
                 "off",
             }
+        auto_bind_latest_connectors_raw = body.get("auto_bind_latest_connectors")
+        if auto_bind_latest_connectors_raw is None:
+            auto_bind_latest_connectors = True
+        else:
+            auto_bind_latest_connectors = bool(auto_bind_latest_connectors_raw) and str(
+                auto_bind_latest_connectors_raw
+            ).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
         requested_baseline_ref = body.get("requested_baseline_ref")
         startup_contract = body.get("startup_contract")
         auto_start = body.get("auto_start") is True
@@ -281,6 +314,7 @@ npm --prefix src/ui run build</pre>
                 preferred_connector_conversation_id=preferred_connector_conversation_id,
                 requested_connector_bindings=requested_connector_bindings,
                 force_connector_rebind=force_connector_rebind,
+                auto_bind_latest_connectors=auto_bind_latest_connectors,
                 requested_baseline_ref=requested_baseline_ref if isinstance(requested_baseline_ref, dict) else None,
                 startup_contract=startup_contract if isinstance(startup_contract, dict) else None,
             )
@@ -408,6 +442,7 @@ npm --prefix src/ui run build</pre>
         }
 
     def quest_bindings(self, quest_id: str, body: dict) -> dict | tuple[int, dict]:
+        previous_external = self.app._quest_external_binding(quest_id)
         requested_bindings = (
             [dict(item) for item in body.get("bindings") if isinstance(item, dict)]
             if isinstance(body.get("bindings"), list)
@@ -418,10 +453,24 @@ npm --prefix src/ui run build</pre>
         force_raw = body.get("force")
         force = bool(force_raw) and str(force_raw).strip().lower() not in {"0", "false", "no", "off"}
         if requested_bindings:
-            return self.app.update_quest_bindings(quest_id, requested_bindings, force=force)
-        if connector_name:
-            return self.app.update_quest_connector_binding(quest_id, connector_name, conversation_id, force=force)
-        return self.app.update_quest_binding(quest_id, conversation_id, force=force)
+            result = self.app.update_quest_bindings(quest_id, requested_bindings, force=force)
+        elif connector_name:
+            result = self.app.update_quest_connector_binding(quest_id, connector_name, conversation_id, force=force)
+        else:
+            result = self.app.update_quest_binding(quest_id, conversation_id, force=force)
+        if isinstance(result, tuple):
+            return result
+        current_external = self.app._quest_external_binding(quest_id)
+        transition = self.app._binding_transition_summary(
+            quest_id=quest_id,
+            previous_conversation_id=previous_external,
+            current_conversation_id=current_external,
+        )
+        self.app._announce_binding_transition(transition, notify_new=True, notify_old=True)
+        return {
+            **result,
+            "binding_transition": transition,
+        }
 
     def quest_session(self, quest_id: str) -> dict:
         snapshot = self.app.quest_service.snapshot_fast(quest_id)
@@ -721,6 +770,28 @@ npm --prefix src/ui run build</pre>
     def workflow(self, quest_id: str) -> dict:
         return self.app.quest_service.workflow(quest_id)
 
+    def quest_layout(self, quest_id: str) -> dict:
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
+        payload = self.app.quest_service.read_lab_canvas_state(quest_root)
+        return {
+            "layout_json": payload.get("layout_json") if isinstance(payload.get("layout_json"), dict) else {},
+            "updated_at": payload.get("updated_at"),
+        }
+
+    def quest_layout_update(self, quest_id: str, body: dict) -> dict | tuple[int, dict]:
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
+        raw_layout = body.get("layout_json")
+        if raw_layout is not None and not isinstance(raw_layout, dict):
+            return 400, {"ok": False, "message": "`layout_json` must be an object."}
+        payload = self.app.quest_service.update_lab_canvas_state(
+            quest_root,
+            layout_json=dict(raw_layout or {}),
+        )
+        return {
+            "layout_json": payload.get("layout_json") if isinstance(payload.get("layout_json"), dict) else {},
+            "updated_at": payload.get("updated_at"),
+        }
+
     def node_traces(self, quest_id: str, path: str) -> dict:
         query = self.parse_query(path)
         selection_type = ((query.get("selection_type") or [""])[0] or "").strip() or None
@@ -754,6 +825,14 @@ npm --prefix src/ui run build</pre>
         payload["active_workspace_ref"] = active_workspace_branch
         payload["research_head_ref"] = research_head_branch
         payload["workspace_mode"] = str(research_state.get("workspace_mode") or "quest").strip() or "quest"
+        quest_data = self.app.quest_service.read_quest_yaml(quest_root)
+        active_anchor = str(quest_data.get("active_anchor") or "").strip().lower()
+        active_analysis_campaign_id = str(research_state.get("active_analysis_campaign_id") or "").strip() or None
+        current_workspace_branch = str(research_state.get("current_workspace_branch") or "").strip() or None
+        workspace_mode = str(research_state.get("workspace_mode") or "").strip().lower() or "quest"
+        paper_parent_branch = str(research_state.get("paper_parent_branch") or "").strip() or None
+        paper_parent_run_id = str(research_state.get("paper_parent_run_id") or "").strip() or None
+        next_pending_slice_id = str(research_state.get("next_pending_slice_id") or "").strip() or None
         try:
             branch_summary = self.app.artifact_service.list_research_branches(quest_root)
         except Exception:
@@ -763,6 +842,96 @@ npm --prefix src/ui run build</pre>
             for item in (branch_summary.get("branches") or [])
             if str(item.get("branch_name") or "").strip()
         }
+        active_campaign = {}
+        if active_analysis_campaign_id:
+            try:
+                active_campaign = self.app.artifact_service.get_analysis_campaign(
+                    quest_root,
+                    campaign_id=active_analysis_campaign_id,
+                )
+            except Exception:
+                active_campaign = {}
+        campaign_parent_branch = (
+            str(active_campaign.get("parent_branch") or "").strip() or None
+            if isinstance(active_campaign, dict)
+            else None
+        )
+        campaign_slices = [
+            dict(item)
+            for item in ((active_campaign or {}).get("slices") or [])
+            if isinstance(item, dict)
+        ]
+        campaign_total_slices = len(campaign_slices)
+        campaign_completed_slices = sum(
+            1 for item in campaign_slices if str(item.get("status") or "").strip().lower() == "completed"
+        )
+        slice_by_branch = {
+            str(item.get("branch") or "").strip(): item
+            for item in campaign_slices
+            if str(item.get("branch") or "").strip()
+        }
+
+        def resolve_workflow_state(ref: str, summary: dict[str, object] | None) -> dict[str, object]:
+            branch_kind = self.app.artifact_service._branch_kind_from_name(ref)
+            has_main_result = bool((summary or {}).get("has_main_result"))
+            workflow_state: dict[str, object] = {
+                "analysis_state": "none",
+                "writing_state": "not_ready",
+                "analysis_campaign_id": active_analysis_campaign_id,
+                "total_slices": campaign_total_slices or None,
+                "completed_slices": campaign_completed_slices or None,
+                "next_pending_slice_id": next_pending_slice_id,
+                "paper_parent_branch": paper_parent_branch,
+                "paper_parent_run_id": paper_parent_run_id,
+                "status_reason": None,
+            }
+            if branch_kind == "analysis":
+                slice_entry = slice_by_branch.get(ref)
+                slice_status = str((slice_entry or {}).get("status") or "pending").strip().lower() or "pending"
+                if slice_status == "completed":
+                    workflow_state["analysis_state"] = "completed"
+                    workflow_state["status_reason"] = "Analysis slice completed."
+                elif ref == current_workspace_branch or str((slice_entry or {}).get("slice_id") or "").strip() == next_pending_slice_id:
+                    workflow_state["analysis_state"] = "active"
+                    workflow_state["status_reason"] = (
+                        f"Analysis {campaign_completed_slices}/{campaign_total_slices} done"
+                        if campaign_total_slices
+                        else "Analysis slice active."
+                    )
+                else:
+                    workflow_state["analysis_state"] = "pending"
+                    workflow_state["status_reason"] = "Analysis slice pending."
+                return workflow_state
+            if branch_kind == "paper":
+                if ref == current_workspace_branch and workspace_mode == "paper":
+                    workflow_state["writing_state"] = "completed" if active_anchor == "finalize" else "active"
+                    workflow_state["status_reason"] = (
+                        "Writing finalized." if active_anchor == "finalize" else "Writing workspace active."
+                    )
+                else:
+                    workflow_state["writing_state"] = "ready"
+                    workflow_state["status_reason"] = "Writing workspace prepared."
+                return workflow_state
+            if campaign_parent_branch and ref == campaign_parent_branch:
+                workflow_state["analysis_state"] = "completed" if next_pending_slice_id is None else "active"
+                if has_main_result:
+                    workflow_state["writing_state"] = "ready" if next_pending_slice_id is None else "blocked_by_analysis"
+                workflow_state["status_reason"] = (
+                    "Analysis complete. Ready for writing."
+                    if next_pending_slice_id is None
+                    else (
+                        f"Analysis {campaign_completed_slices}/{campaign_total_slices} done"
+                        + (f" · next: {next_pending_slice_id}" if next_pending_slice_id else "")
+                    )
+                )
+                return workflow_state
+            if has_main_result:
+                workflow_state["writing_state"] = "ready"
+                workflow_state["status_reason"] = "Main experiment recorded. Ready for writing."
+                return workflow_state
+            workflow_state["status_reason"] = "Awaiting main experiment result."
+            return workflow_state
+
         for node in payload.get("nodes", []):
             ref = str(node.get("ref") or "").strip()
             if not ref:
@@ -770,6 +939,7 @@ npm --prefix src/ui run build</pre>
             summary = branch_summary_by_name.get(ref)
             node["active_workspace"] = ref == active_workspace_branch
             node["research_head"] = ref == research_head_branch
+            node["workflow_state"] = resolve_workflow_state(ref, summary if isinstance(summary, dict) else None)
             if not isinstance(summary, dict):
                 continue
             node["branch_no"] = summary.get("branch_no")
@@ -784,6 +954,7 @@ npm --prefix src/ui run build</pre>
             node["idea_draft_path"] = summary.get("idea_draft_path")
             node["latest_main_experiment"] = summary.get("latest_main_experiment")
             node["experiment_count"] = summary.get("experiment_count")
+            node["has_main_result"] = summary.get("has_main_result")
         return payload
 
     def git_log(self, quest_id: str, path: str) -> dict:
@@ -982,6 +1153,125 @@ npm --prefix src/ui run build</pre>
 
     def runs(self, quest_id: str) -> list[dict]:
         return self.app.quest_service.snapshot(quest_id).get("recent_runs", [])
+
+    def arxiv_list(self, path: str = "") -> dict | tuple[int, dict]:
+        query = self.parse_query(path)
+        quest_id = ((query.get("project_id") or [""])[0] or "").strip()
+        if not quest_id:
+            return 400, {"ok": False, "message": "`project_id` is required."}
+        quest_root = self.app.quest_service._quest_root(quest_id)
+        return self.app.artifact_service.arxiv(mode="list", quest_root=quest_root)
+
+    def arxiv_import(self, body: dict | None = None) -> dict | tuple[int, dict]:
+        body = body or {}
+        quest_id = str(body.get("project_id") or "").strip()
+        paper_id = str(body.get("arxiv_id") or "").strip()
+        if not quest_id:
+            return 400, {"ok": False, "message": "`project_id` is required."}
+        if not paper_id:
+            return 400, {"ok": False, "message": "`arxiv_id` is required."}
+        quest_root = self.app.quest_service._quest_root(quest_id)
+        result = self.app.artifact_service.arxiv(
+            paper_id,
+            mode="read",
+            full_text=False,
+            quest_root=quest_root,
+        )
+        if not result.get("ok"):
+            return 400, result
+        return {
+            "status": str(result.get("status") or "processing"),
+            "metadata_status": str(result.get("metadata_status") or ""),
+            "metadata_pending": bool(result.get("metadata_pending")),
+            "title": str(result.get("title") or ""),
+            "message": str(result.get("message") or ""),
+            "abs_url": str(result.get("abs_url") or ""),
+            "file_id": str(result.get("file_id") or ""),
+            "document_id": str(result.get("document_id") or ""),
+            "arxiv_id": str(result.get("paper_id") or paper_id),
+        }
+
+    def annotations_file(self, file_id: str, path: str = "") -> dict | tuple[int, dict]:
+        try:
+            return self.app.annotation_service.list_annotations(file_id)
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "file_id": file_id}
+        except ValueError as exc:
+            return 400, {"ok": False, "message": str(exc), "file_id": file_id}
+
+    def annotations_project(self, project_id: str, path: str = "") -> dict | tuple[int, dict]:
+        query = self.parse_query(path)
+        search_query = ((query.get("q") or [""])[0] or "").strip() or None
+        color = ((query.get("color") or [""])[0] or "").strip() or None
+        tag = ((query.get("tag") or [""])[0] or "").strip() or None
+        page_raw = ((query.get("page") or [""])[0] or "").strip()
+        limit_raw = ((query.get("limit") or ["100"])[0] or "100").strip()
+        try:
+            page = int(page_raw) if page_raw else None
+        except ValueError:
+            page = None
+        try:
+            limit = max(1, min(int(limit_raw), 500))
+        except ValueError:
+            limit = 100
+        try:
+            return self.app.annotation_service.search_annotations(
+                project_id,
+                query=search_query,
+                color=color,
+                tag=tag,
+                page=page,
+                limit=limit,
+            )
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "project_id": project_id}
+
+    def annotation_create(self, body: dict) -> dict | tuple[int, dict]:
+        file_id = str(body.get("file_id") or "").strip()
+        if not file_id:
+            return 400, {"ok": False, "message": "`file_id` is required."}
+        try:
+            return self.app.annotation_service.create_annotation(
+                file_id=file_id,
+                position=body.get("position"),
+                content=body.get("content"),
+                comment=body.get("comment"),
+                kind=body.get("kind"),
+                color=body.get("color"),
+                tags=body.get("tags"),
+            )
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "file_id": file_id}
+        except ValueError as exc:
+            return 400, {"ok": False, "message": str(exc), "file_id": file_id}
+
+    def annotation_detail(self, annotation_id: str) -> dict | tuple[int, dict]:
+        try:
+            return self.app.annotation_service.get_annotation(annotation_id)
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "annotation_id": annotation_id}
+
+    def annotation_update(self, annotation_id: str, body: dict) -> dict | tuple[int, dict]:
+        try:
+            return self.app.annotation_service.update_annotation(
+                annotation_id,
+                comment=body.get("comment") if "comment" in body else None,
+                kind=body.get("kind") if "kind" in body else None,
+                position=body.get("position") if "position" in body else None,
+                content=body.get("content") if "content" in body else None,
+                color=body.get("color") if "color" in body else None,
+                tags=body.get("tags") if "tags" in body else None,
+            )
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "annotation_id": annotation_id}
+        except ValueError as exc:
+            return 400, {"ok": False, "message": str(exc), "annotation_id": annotation_id}
+
+    def annotation_delete(self, annotation_id: str) -> dict | tuple[int, dict]:
+        try:
+            return self.app.annotation_service.delete_annotation(annotation_id)
+        except FileNotFoundError as exc:
+            return 404, {"ok": False, "message": str(exc), "annotation_id": annotation_id}
 
     def quest_memory(self, quest_id: str) -> list[dict]:
         quest_service = self._fresh_quest_service()

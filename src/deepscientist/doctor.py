@@ -265,7 +265,8 @@ def _check_codex(config_manager: ConfigManager) -> dict[str, Any]:
             errors=[f"Runner binary `{binary}` could not be resolved."],
             guidance=[
                 "Run `npm install -g @researai/deepscientist` again so the bundled Codex dependency is installed.",
-                "Then run `codex` once and complete login.",
+                "If `codex` is still missing, install it explicitly with `npm install -g @openai/codex`.",
+                "Then run `codex --login` (or `codex`) once and complete login.",
             ],
             details={"binary": binary},
         )
@@ -285,7 +286,9 @@ def _check_codex(config_manager: ConfigManager) -> dict[str, Any]:
             details={"resolved_binary": resolved_binary},
         )
     if not probe_guidance:
-        probe_guidance = ["Run `codex` manually once and complete login, then retry `ds doctor`."]
+        probe_guidance = [
+            "Run `codex --login` (or `codex`) manually once and complete login, then retry `ds doctor`.",
+        ]
     return _make_check(
         check_id="codex",
         label="Codex CLI",

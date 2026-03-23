@@ -459,12 +459,6 @@ const SOURCE_EXACT: Record<string, Record<AutoLocale, string>> = {
     ko: '이 계정은 비활성화되었습니다. 지원팀에 문의해 주세요.',
     ru: 'Этот аккаунт отключён. Обратитесь в поддержку.',
   },
-  'Adjust workspace appearance, project details, and AutoFigure defaults.': {
-    fr: 'Ajustez l’apparence de l’espace de travail, les détails du projet et les réglages AutoFigure par défaut.',
-    ja: 'ワークスペースの外観、プロジェクト情報、AutoFigure の既定設定を調整します。',
-    ko: '워크스페이스 모양, 프로젝트 세부정보, AutoFigure 기본값을 조정합니다.',
-    ru: 'Настройте внешний вид рабочего пространства, сведения о проекте и параметры AutoFigure по умолчанию.',
-  },
   'Choose how the app should look.': {
     fr: 'Choisissez l’apparence de l’application.',
     ja: 'アプリの見た目を選択します。',
@@ -638,12 +632,6 @@ const SOURCE_EXACT: Record<string, Record<AutoLocale, string>> = {
     ja: 'デフォルトに戻す',
     ko: '기본값으로 재설정',
     ru: 'Сбросить к значениям по умолчанию',
-  },
-  'Reset all AutoFigure settings to defaults?': {
-    fr: 'Réinitialiser tous les réglages AutoFigure par défaut ?',
-    ja: 'AutoFigure のすべての設定をデフォルトに戻しますか？',
-    ko: '모든 AutoFigure 설정을 기본값으로 되돌릴까요?',
-    ru: 'Сбросить все настройки AutoFigure к значениям по умолчанию?',
   },
   'Project not found': {
     fr: 'Projet introuvable',

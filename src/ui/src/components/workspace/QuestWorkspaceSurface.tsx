@@ -955,7 +955,10 @@ function QuestCanvasSurface({
   )
 
   return (
-    <div className="relative h-full min-h-0 overflow-hidden bg-[var(--lab-surface-muted)]">
+    <div
+      className="relative h-full min-h-0 overflow-hidden bg-[var(--lab-surface-muted)]"
+      data-onboarding-id="quest-canvas-surface"
+    >
       <div className="absolute right-4 top-4 z-20 flex max-w-[28rem] flex-col items-end gap-2">
         {error ? (
           <div className="max-w-full rounded-full border border-black/[0.08] bg-white/[0.86] px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.76)]">
@@ -2871,7 +2874,10 @@ function QuestDetails({
   }, [questId, snapshot?.updated_at, workflow?.entries.length])
 
   return (
-    <div className="feed-scrollbar h-full overflow-y-auto overflow-x-hidden">
+    <div
+      className="feed-scrollbar h-full overflow-y-auto overflow-x-hidden"
+      data-onboarding-id="quest-details-surface"
+    >
       <div className="mx-auto flex min-h-full max-w-[1120px] flex-col px-5 pb-10 pt-5 sm:px-6 lg:px-8">
         <DetailSection
           first

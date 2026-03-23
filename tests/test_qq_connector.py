@@ -331,7 +331,7 @@ def test_qq_auto_bind_to_latest_quest_still_happens_when_another_connector_is_pr
         item["conversation_id"] == "qq:direct:user-9" and item["quest_id"] == latest["quest_id"]
         for item in app.list_qq_bindings()
     )
-    assert any(
+    assert not any(
         item["conversation_id"] == "telegram:direct:alice" and item["quest_id"] == latest["quest_id"]
         for item in app.list_connector_bindings("telegram")
     )

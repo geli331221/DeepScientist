@@ -978,12 +978,15 @@ Prefer these patterns:
   - treat the resulting branch as one durable research round or route, not merely a temporary Git container
   - every accepted durable idea submission should normally create a new user-visible canvas node
   - before accepting an idea, unless strong durable evidence already narrows the route to one obvious serious option, run one bounded divergent -> convergent ideation pass instead of collapsing onto the first plausible route
+  - before writing or submitting the final selected idea, durably map at least 5 and usually 5 to 10 related and usable papers; prioritize direct task-modeling or mechanism-neighbor papers and only backfill with the closest adjacent translatable work when the direct pool is truly smaller
   - classify the current framing as `problem-first` or `solution-first`
   - generate a small but genuinely diverse candidate slate before ranking, then shrink it back to a serious frontier that is usually 2 to 3 alternatives and at most 5
   - if the candidates are all from the same mechanism family, widen once with distinct lenses such as abstraction ladder, tension hunting, analogy transfer, inversion, or adjacent-possible reasoning
   - require each serious candidate to answer `why now` / `what changed`
   - before `artifact.submit_idea(...)`, make the winner pass a two-sentence pitch and strongest-objection check
   - before calling it, first finish a concise but durable idea draft in Markdown that explains the route clearly enough for later implementation and review
+  - do not treat the literature floor as optional; if fewer than 5 usable papers are durably mapped, go back to search or record a blocked state instead of forcing the idea through
+  - that final idea draft must use one consistent standard citation format and include a `References` or `Bibliography` section for the survey-stage papers that actually shaped the idea
   - when available, pass that draft through `draft_markdown` so the branch keeps both a compact `idea.md` contract and a richer `draft.md`
   - `continue_line` means the new idea is a child of the current active branch
   - `branch_alternative` means the new idea is a sibling-like branch that starts from the current branch's parent foundation
@@ -1042,6 +1045,8 @@ Prefer these patterns:
 - use `artifact.checkpoint(...)` for meaningful code-state milestones
 - use `artifact.render_git_graph(...)` when the quest needs a refreshed Git history view
 - use `artifact.arxiv(paper_id=..., full_text=False)` to read an already identified arXiv paper
+- `artifact.arxiv(mode='read', paper_id=..., full_text=False)` is the preferred explicit form; it is local-first and will auto-persist the paper into the quest arXiv library when missing
+- use `artifact.arxiv(mode='list')` when you need to inspect the arXiv papers already saved for the current quest
 - keep paper discovery in web search; switch to `artifact.arxiv(..., full_text=True)` only when the full paper body is actually needed
 - use stage-significant artifact writes for progress, milestone, report, run, and decision updates
 - if the runtime exposes `artifact.interact(...)`, use it for structured progress updates, decision requests, and approval responses
@@ -1626,6 +1631,9 @@ If you choose a non-default foundation, record why.
 At the start of `idea`, if related-work coverage or novelty judgment is not already durable and explicit, also open `scout/SKILL.md` as a companion skill before final selection.
 At the start of a fresh or resumed `idea` pass, search quest/global memory first.
 If coverage is still incomplete or stale, actively use the runner's web/search tool for discovery and `artifact.arxiv(...)` for reading shortlisted arXiv papers before selecting a direction.
+Treat literature grounding as a hard gate: do not write or submit a final selected idea until the durable survey covers at least 5 and usually 5 to 10 related and usable papers.
+Those papers should be close enough to the task-modeling problem, failure mode, mechanism, or codebase translation question to justify the selected route with real evidence rather than intuition alone.
+If the direct neighborhood is genuinely smaller, document that shortage explicitly and use the closest adjacent translatable papers to finish the grounding.
 
 Expected outcomes:
 
@@ -1640,6 +1648,7 @@ Expected outcomes:
 - explicit mechanism and risk
 - cheapest falsification path
 - selected direction or rejection decision
+- a final idea draft that uses standard-format citations and a `References` or `Bibliography` section for the papers actually used
 - when the pass is substantial, a research-outline style note can be preferable to loose ideation prose; that note should usually cover:
   - executive summary
   - codebase analysis

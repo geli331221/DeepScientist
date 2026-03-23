@@ -21,8 +21,9 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { AlertTriangle, CheckSquare, HelpCircle, Sparkles, StickyNote } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { acquireFileSocket } from "@/lib/realtime/file-socket";
-import { getFile } from "@/lib/api/files";
+import { createFileObjectUrl, getFile } from "@/lib/api/files";
 import { isCliFileId } from "@/lib/api/cli-file-id";
+import { getQuestNodeProjectId, isQuestNodeId } from "@/lib/api/quest-files";
 import { listProjectMembers } from "@/lib/api/projects";
 import { consumePdfEffects, isPdfEffectHandled, markPdfEffectHandled } from "@/lib/ai/pdf-effect-queue";
 import { useAuthStore } from "@/lib/stores/auth";
@@ -54,7 +55,7 @@ import { apiClient } from "@/lib/api/client";
 import type { ArxivPaper } from "@/lib/types/arxiv";
 import { copyToClipboard } from "@/lib/clipboard";
 import { generateBibTeX } from "@/lib/utils/bibtex";
-import { PDF_CMAP_URL, PDF_WORKER_SRC } from "./lib/pdf-utils";
+import { PDF_CMAP_PACKED, PDF_CMAP_URL, PDF_WORKER_SRC } from "./lib/pdf-utils";
 import {
   AreaHighlight,
   Highlight,
@@ -68,6 +69,7 @@ import type {
   NewHighlight,
   ScaledPosition,
 } from "./react-pdf-highlighter";
+import "./react-pdf-highlighter/style/index.css";
 
 type AnnotationKind = "note" | "question" | "task";
 type ReviewObjectType = "issue" | "suggestion" | "verification";
@@ -1422,15 +1424,32 @@ export default function PdfViewerPlugin({
   const hasExternalPdfUrl = externalPdfUrl.length > 0;
 
   const apiBaseUrl = (apiClient.defaults.baseURL || "").replace(/\/$/, "");
+  const isQuestFile = isQuestNodeId(fileId);
+  const questProjectIdFromFileId = useMemo(
+    () => (fileId && isQuestFile ? getQuestNodeProjectId(fileId) : null),
+    [fileId, isQuestFile]
+  );
+  const projectIdFromContext = useMemo(() => {
+    const candidate =
+      typeof context.customData?.projectId === "string"
+        ? context.customData.projectId.trim()
+        : "";
+    return candidate || null;
+  }, [context.customData]);
   const [cliPdfUrl, setCliPdfUrl] = useState<string | null>(null);
   const [cliPdfLoading, setCliPdfLoading] = useState(false);
   const [cliPdfError, setCliPdfError] = useState<string | null>(null);
+  const [questPdfUrl, setQuestPdfUrl] = useState<string | null>(null);
+  const [questPdfLoading, setQuestPdfLoading] = useState(false);
+  const [questPdfError, setQuestPdfError] = useState<string | null>(null);
 
   // Build PDF URL
   const pdfUrl = hasExternalPdfUrl
     ? externalPdfUrl
     : isCliFile
       ? cliPdfUrl || ""
+      : isQuestFile
+        ? questPdfUrl || ""
       : fileId
         ? `${apiBaseUrl}/api/v1/files/${fileId}/content`
         : // Demo: Use a sample PDF for testing
@@ -1438,7 +1457,7 @@ export default function PdfViewerPlugin({
 
   const token =
     typeof window !== "undefined" ? localStorage.getItem("ds_access_token") : null;
-  const httpHeaders = token && (hasExternalPdfUrl || (!isCliFile && fileId))
+  const httpHeaders = token && (hasExternalPdfUrl || (!isCliFile && !isQuestFile && fileId))
     ? { Authorization: `Bearer ${token}` }
     : undefined;
 
@@ -1490,7 +1509,14 @@ export default function PdfViewerPlugin({
   const { addToast } = useToast();
   const arxivItems = useArxivStore((s) => s.items);
   const arxivErrors = useArxivStore((s) => s.errors);
-  const annotationsFileId = isCliFile || !fileId ? "" : fileId;
+  const arxivFromContext = useMemo(() => {
+    const customData = context.customData as { arxiv?: ArxivPaper } | undefined;
+    return customData?.arxiv ?? null;
+  }, [context.customData]);
+  const isArxivPdf =
+    Boolean(arxivFromContext) ||
+    Boolean(fileId && arxivItems.some((item) => item.fileId === fileId));
+  const annotationsFileId = isCliFile || !fileId || isReadOnlyMode ? "" : fileId;
   const { annotations, createAnnotation, updateAnnotation, deleteAnnotation } =
     useAnnotations(annotationsFileId);
   const currentUser = useAuthStore((s) => s.user);
@@ -1569,11 +1595,6 @@ export default function PdfViewerPlugin({
     [clampReviewSidebarWidth, isResizableAnnotationWorkspace],
   );
 
-  const arxivFromContext = useMemo(() => {
-    const customData = context.customData as { arxiv?: ArxivPaper } | undefined;
-    return customData?.arxiv ?? null;
-  }, [context.customData]);
-
   const arxivPaper = useMemo(() => {
     if (arxivFromContext) return arxivFromContext;
     if (!fileId) return null;
@@ -1581,6 +1602,13 @@ export default function PdfViewerPlugin({
   }, [arxivFromContext, arxivItems, fileId]);
 
   const arxivError = arxivPaper ? arxivErrors[arxivPaper.arxivId] : undefined;
+  const supportsMarkdownView = Boolean(
+    fileId &&
+      !isCliFile &&
+      (!isArxivPdf || arxivPaper?.overview?.trim() || arxivPaper?.abstract?.trim())
+  );
+  const markdownButtonLabel = isArxivPdf ? t("summary") : t("markdown");
+  const markdownButtonTitle = isArxivPdf ? t("open_summary") : t("open_markdown");
 
   useEffect(() => {
     sidebarVisibleRef.current = sidebarVisible;
@@ -1619,7 +1647,7 @@ export default function PdfViewerPlugin({
   }, [context.resourcePath, fileId, findNode]);
 
   const loadPdfMarkdown = useCallback(async (): Promise<string | null> => {
-    if (!fileId || isCliFile) return null;
+    if (!fileId || isCliFile || isArxivPdf) return null;
 
     const cached = markdownCacheRef.current[fileId];
     if (cached) return cached;
@@ -1649,11 +1677,11 @@ export default function PdfViewerPlugin({
 
     markdownLoadPromiseRef.current[fileId] = request;
     return request;
-  }, [fileId, isCliFile]);
+  }, [fileId, isArxivPdf, isCliFile]);
 
   const enrichReferenceWithMarkdown = useCallback(
     async (referenceId: string, selectedText: string) => {
-      if (!fileId || isCliFile) return;
+      if (!fileId || isCliFile || isArxivPdf) return;
       try {
         const markdown = await loadPdfMarkdown();
         const excerpt = locateMarkdownExcerpt(markdown || "", selectedText);
@@ -1667,13 +1695,13 @@ export default function PdfViewerPlugin({
         });
       }
     },
-    [fileId, isCliFile, loadPdfMarkdown, updateWorkspaceReference]
+    [fileId, isArxivPdf, isCliFile, loadPdfMarkdown, updateWorkspaceReference]
   );
 
   useEffect(() => {
-    if (!fileId || isCliFile) return;
+    if (!fileId || isCliFile || isArxivPdf) return;
     void loadPdfMarkdown().catch(() => undefined);
-  }, [fileId, isCliFile, loadPdfMarkdown]);
+  }, [fileId, isArxivPdf, isCliFile, loadPdfMarkdown]);
 
   const handleAskCopilotFromSelection = useCallback(
     (content: Content, position: ScaledPosition) => {
@@ -1708,7 +1736,7 @@ export default function PdfViewerPlugin({
         pageNumber: position.pageNumber,
         selectedText,
         markdownExcerpt: undefined,
-        excerptStatus: fileId && !isCliFile ? "loading" : "idle",
+        excerptStatus: fileId && !isCliFile && !isArxivPdf ? "loading" : "idle",
         rects:
           position.rects?.map((rect) => ({
             left: rect.x1,
@@ -1722,7 +1750,7 @@ export default function PdfViewerPlugin({
 
       window.dispatchEvent(new CustomEvent("ds:copilot:focus", { detail: { focus: true } }));
 
-      if (fileId && !isCliFile) {
+      if (fileId && !isCliFile && !isArxivPdf) {
         void enrichReferenceWithMarkdown(referenceId, selectedText);
       }
     },
@@ -1731,6 +1759,7 @@ export default function PdfViewerPlugin({
       enrichReferenceWithMarkdown,
       fileId,
       fileName,
+      isArxivPdf,
       isCliFile,
       resolveWorkspaceResourcePath,
       tabId,
@@ -1770,6 +1799,11 @@ export default function PdfViewerPlugin({
   }, [currentPage, isReadOnlyMode, tabId, updateWorkspaceTabState]);
 
   useEffect(() => {
+    const resolvedProjectId = projectIdFromContext || questProjectIdFromFileId;
+    if (resolvedProjectId) {
+      setProjectId(resolvedProjectId);
+      return;
+    }
     if (!fileId || isCliFile) return;
     getFile(fileId)
       .then((f: any) => {
@@ -1778,7 +1812,7 @@ export default function PdfViewerPlugin({
       .catch(() => {
         // noop
       });
-  }, [fileId, hasExternalPdfUrl, isCliFile]);
+  }, [fileId, hasExternalPdfUrl, isCliFile, projectIdFromContext, questProjectIdFromFileId]);
 
   useEffect(() => {
     if (!fileId || !isCliFile) {
@@ -1821,6 +1855,47 @@ export default function PdfViewerPlugin({
       }
     };
   }, [fileId, isCliFile]);
+
+  useEffect(() => {
+    if (!fileId || !isQuestFile || isCliFile) {
+      setQuestPdfUrl(null);
+      setQuestPdfLoading(false);
+      setQuestPdfError(null);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setQuestPdfLoading(true);
+    setQuestPdfError(null);
+
+    const loadQuestPdf = async () => {
+      try {
+        objectUrl = await createFileObjectUrl(fileId);
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setQuestPdfUrl(objectUrl);
+      } catch (err) {
+        if (!cancelled) {
+          setQuestPdfError("Failed to load PDF document.");
+        }
+      } finally {
+        if (!cancelled) {
+          setQuestPdfLoading(false);
+        }
+      }
+    };
+
+    void loadQuestPdf();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [fileId, isCliFile, isQuestFile]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -2338,10 +2413,10 @@ export default function PdfViewerPlugin({
       ...context,
       customData: {
         ...(context.customData || {}),
-        pdfView: "markdown",
+        pdfView: isArxivPdf ? "summary" : "markdown",
       },
     });
-  }, [context, fileId, isCliFile, openMarkdownViewFromHost, tabId, updateTabPlugin]);
+  }, [context, fileId, isArxivPdf, isCliFile, openMarkdownViewFromHost, tabId, updateTabPlugin]);
 
   if (shouldRedirectToNotebook) {
     return (
@@ -2365,6 +2440,18 @@ export default function PdfViewerPlugin({
     )
   }
 
+  if (isQuestFile && (questPdfLoading || questPdfError) && !questPdfUrl) {
+    return (
+      <div className="h-full flex items-center justify-center bg-background">
+        {questPdfError ? (
+          <div className="text-sm text-muted-foreground">{questPdfError}</div>
+        ) : (
+          <PdfSpinner />
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Toolbar */}
@@ -2378,7 +2465,9 @@ export default function PdfViewerPlugin({
         onSidebarToggle={toggleSidebar}
         onDownload={handleDownload}
         onInfo={arxivPaper ? () => setInfoOpen(true) : undefined}
-        onMarkdownToggle={openMarkdownViewFromHost || (fileId && !isCliFile) ? handleOpenMarkdown : undefined}
+        onMarkdownToggle={openMarkdownViewFromHost || supportsMarkdownView ? handleOpenMarkdown : undefined}
+        markdownLabel={markdownButtonLabel}
+        markdownTitle={markdownButtonTitle}
         reviewOpinionActive={reviewOpinionActiveFromHost}
         onReviewOpinionToggle={
           reviewOpinionAvailableFromHost && openReviewOpinionViewFromHost
@@ -2403,7 +2492,7 @@ export default function PdfViewerPlugin({
                 httpHeaders={httpHeaders}
                 workerSrc={PDF_WORKER_SRC}
                 cMapUrl={PDF_CMAP_URL}
-                cMapPacked
+                cMapPacked={PDF_CMAP_PACKED}
                 beforeLoad={<PdfSpinner />}
               >
                 {(pdfDocument) => (

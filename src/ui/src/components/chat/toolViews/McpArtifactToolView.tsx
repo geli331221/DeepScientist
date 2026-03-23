@@ -336,6 +336,54 @@ function renderAttachBaseline(resultRecord: Record<string, unknown> | null) {
 }
 
 function renderArxiv(resultRecord: Record<string, unknown> | null, args: Record<string, unknown>) {
+  const mode = asString(resultRecord?.mode) || asString(args.mode) || 'read'
+  if (mode === 'list') {
+    const items = Array.isArray(resultRecord?.items)
+      ? resultRecord.items
+          .map((entry) => asRecord(entry))
+          .filter((entry): entry is NonNullable<ReturnType<typeof asRecord>> => Boolean(entry))
+      : []
+    const count = typeof resultRecord?.count === 'number' ? resultRecord.count : items.length
+
+    return (
+      <>
+        <DsToolSection title="Saved arXiv papers">
+          <div className="space-y-2 text-[12px] leading-6 text-[var(--text-secondary)]">
+            <div>
+              Count: <span className="font-medium text-[var(--text-primary)]">{count}</span>
+            </div>
+            {items.length === 0 ? (
+              <div>No saved arXiv papers yet.</div>
+            ) : (
+              <div className="space-y-2">
+                {items.map((item, index) => (
+                  <div
+                    key={`${asString(item.arxiv_id) || index}`}
+                    className="rounded-[12px] border border-[var(--border-light)] bg-[rgba(255,255,255,0.76)] px-3 py-3"
+                  >
+                    <div className="text-[12px] font-medium text-[var(--text-primary)]">
+                      {asString(item.title) || asString(item.arxiv_id) || `Paper ${index + 1}`}
+                    </div>
+                    {asString(item.arxiv_id) ? (
+                      <div className="mt-1 text-[11px] font-mono text-[var(--text-tertiary)]">
+                        {asString(item.arxiv_id)}
+                      </div>
+                    ) : null}
+                    {asString(item.abstract) ? (
+                      <div className="mt-2 text-[12px] leading-6 text-[var(--text-secondary)]">
+                        {truncateText(asString(item.abstract), 320)}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </DsToolSection>
+      </>
+    )
+  }
+
   const paperId = asString(resultRecord?.paper_id) || asString(args.paper_id)
   const title = asString(resultRecord?.title) || paperId || 'arXiv paper'
   const source = asString(resultRecord?.source)
@@ -554,6 +602,7 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
   const error =
     asString((toolContent.content as Record<string, unknown> | undefined)?.error) || asString(resultRecord?.error)
   const active = toolContent.status === 'calling'
+  const arxivMode = asString(resultRecord?.mode) || asString(args.mode) || 'read'
 
   const titleMap: Record<string, string> = {
     record: active ? 'DeepScientist is recording artifact...' : 'DeepScientist recorded artifact.',
@@ -600,7 +649,13 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
   return (
     <div className="flex flex-col gap-3">
       <DsToolFrame
-        title={titleMap[toolLabel] || (active ? 'DeepScientist is updating artifact...' : 'DeepScientist updated artifact.')}
+        title={
+          toolLabel === 'arxiv' && arxivMode === 'list'
+            ? active
+              ? 'DeepScientist is listing saved arXiv papers...'
+              : 'DeepScientist listed the saved arXiv papers.'
+            : titleMap[toolLabel] || (active ? 'DeepScientist is updating artifact...' : 'DeepScientist updated artifact.')
+        }
         subtitle={recordSummary || subtitleMap[toolLabel] || 'Artifact tools persist branch, report, baseline, and interaction state.'}
         accent={accent}
         meta={

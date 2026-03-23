@@ -16,6 +16,92 @@
 3. 绑定一个可选的可复用 baseline
 4. 持久化 `startup_contract`，供后续 prompt builder 持续读取
 
+## 实战示例：整理后的 quest 025 启动输入
+
+理解这个弹窗最快的方法，不是先背字段定义，而是先看一个真实例子。
+
+下面这个例子来自 quest `025` 的真实启动输入，但我做了必要的整理，让它更适合公开文档和第一次填写时参考。这个任务的目标是：
+
+- 复现官方的 Mandela-Effect baseline
+- 保持原论文任务与评测协议
+- 研究在混合正确 / 错误社会信号下，如何实现更强的 truth-preserving collaboration
+- 使用两个本地 OpenAI-compatible 端点提高吞吐量
+
+### 当前前端里先填的短字段
+
+| 弹窗字段 | 示例值 | 为什么这样填 |
+|---|---|---|
+| `Project title` | `Mandela-Effect Reproduction and Truth-Preserving Collaboration` | 标题清楚，后面在卡片、工作区和搜索里都好认 |
+| `Project ID` | 留空，或者填 `025` | 想自动编号就留空；只有你明确要固定编号时才手动填写 |
+| `Connector delivery` | 第一次建议 `Local only`，如果 QQ 已配置也可以选一个目标 | 当前前端对每个 quest 最多只允许绑定一个外部 connector 目标 |
+| `Reusable baseline` | 第一次可留空；如果官方 baseline 已经导入 registry，就直接选它 | 一旦选中，自动推导的 `baseline_mode` 会变成 `existing` |
+| `Research paper` | `On` | 让项目保持分析和论文式产出在范围内 |
+| `Research intensity` | `Balanced` | 先把 baseline 立稳，再探索一个合理方向 |
+| `Decision mode` | `Autonomous` | 普通路线选择默认自己推进，不把常规决策丢回给用户 |
+| `Launch mode` | `Standard` | 按默认科研主线启动 |
+| `Language` | `English` | 默认用英文组织 kickoff prompt 和用户侧产物 |
+
+### 同一个例子里的长文本字段
+
+`Primary research request`
+
+```text
+Please reproduce the official Mandela-Effect repository and paper, then study how to improve truth-preserving collaboration under mixed correct and incorrect social signals.
+
+The core research question is: how can a multi-agent system remain factually robust under social influence while still learning from correct peers?
+
+Keep the task definition and evaluation protocol aligned with the original work. Focus on prompt-based or system-level methods that improve truth preservation without simply refusing all social information.
+```
+
+`Baseline links`
+
+```text
+https://github.com/bluedream02/Mandela-Effect
+```
+
+`Reference papers / repos`
+
+```text
+https://arxiv.org/abs/2602.00428
+```
+
+`Runtime constraints`
+
+```text
+- Keep the task definition and evaluation protocol aligned with the official baseline unless a change is explicitly justified.
+- Use two OpenAI-compatible local inference endpoints for throughput:
+  - `http://127.0.0.1:8004/v1`
+  - `http://127.0.0.1:8008/v1`
+- Use API key `1234` and model `/model/gpt-oss-120b` on both endpoints.
+- Keep generation settings close to the baseline unless a justified adjustment is required.
+- Implement asynchronous execution, automatic retry on request failure, and resumable scripts.
+- Split requests across both endpoints so throughput stays high without overloading the service.
+- Record failed, degraded, or inconclusive runs honestly instead of hiding them.
+```
+
+`Goals`
+
+```text
+1. Restore and verify the official Mandela-Effect baseline as a trustworthy starting point.
+2. Measure key metrics and failure modes on the designated `gpt-oss-120b` setup.
+3. Propose at least one literature-grounded direction for stronger truth-preserving collaboration.
+4. Produce experiment and analysis artifacts that are strong enough to support paper writing.
+```
+
+### 这个例子在前端里会自动推导出什么
+
+如果 `Reusable baseline` 留空，且 `Research intensity` 选择 `Balanced`，当前前端会自动推导：
+
+- `scope = baseline_plus_direction`
+- `baseline_mode = restore_from_url`
+- `resource_policy = balanced`
+- `time_budget_hours = 24`
+- `git_strategy = semantic_head_plus_controlled_integration`
+
+如果你已经选中了一个可复用 baseline，那么只会有一项不同：
+
+- `baseline_mode = existing`
+
 ## 当前前端数据模型
 
 ### `StartResearchTemplate`
@@ -83,6 +169,12 @@ type StartResearchContractFields = {
   title,
   goal: compiled_prompt,
   quest_id,
+  requested_connector_bindings: [
+    {
+      connector,
+      conversation_id
+    }
+  ],
   requested_baseline_ref: {
     baseline_id,
     variant_id
@@ -137,6 +229,26 @@ type StartResearchContractFields = {
 **`user_language`**
 
 - 声明后续 kickoff 和交流默认偏好的语言。
+
+### Connector 投递
+
+**`requested_connector_bindings`**
+
+- 这是创建项目时随请求一起提交的字段，但不在 `startup_contract` 里面。
+- 当前前端对每个 quest 最多只允许一个外部 connector 目标。
+- 典型结构如下：
+
+```ts
+[
+  {
+    connector: 'qq',
+    conversation_id: 'qq:private:openid-123'
+  }
+]
+```
+
+- 如果你保持项目仅本地运行，这个数组就是空的。
+- 如果你选中的那个目标已经绑定在别的 quest 上，当前项目创建时会把旧绑定替换掉。
 
 ### Baseline 与参考资料
 

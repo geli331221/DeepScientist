@@ -26,6 +26,7 @@ import { ChevronDown, Clock, FileText, GitBranch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { isDemoProjectId } from '@/demo/projects'
 import {
   getLabQuestGraph,
   listLabQuestEvents,
@@ -39,6 +40,7 @@ import {
   type LabQuestEventItem,
   type LabPaper,
   type LabMemoryEntry,
+  type LabCanvasPreferences,
   type LabMetricObjective,
   type LabMetricCurve,
   type LabMetricCurvePoint,
@@ -190,8 +192,11 @@ type QuestLayoutJson = {
   branch?: QuestLayoutMap
   event?: QuestLayoutMap
   stage?: QuestLayoutMap
+  preferences?: LabCanvasPreferences
   [key: string]: unknown
 }
+
+type PathFilterMode = 'all' | 'current' | 'selected'
 
 type BranchStage =
   | 'scout'
@@ -216,6 +221,7 @@ type BranchInsight = {
   completed: boolean
   updatedAt: string | null
   stale: boolean
+  workflowState: LabQuestGraphNode['workflow_state'] | null
 }
 
 type PipelineStepStatus = 'done' | 'active' | 'pending'
@@ -242,6 +248,7 @@ const PAPERS_PANEL_HEIGHT = 420
 const GRAPH_POLL_MS = 30000
 const PANEL_POLL_MS = 30000
 const BACKGROUND_POLL_MS = 45000
+const DEMO_POLL_MS = 1200
 
 const isAnalysisBranch = (branch?: string | null) => {
   if (!branch) return false
@@ -1067,6 +1074,11 @@ const buildSelectionContext = (
   summary: payload.summary ?? null,
 })
 
+const shouldOpenCanonicalStage = (stageKey?: string | null) => {
+  const normalized = String(stageKey || '').trim().toLowerCase()
+  return normalized === 'idea' || normalized === 'experiment' || normalized === 'analysis-campaign' || normalized === 'analysis' || normalized === 'write' || normalized === 'paper'
+}
+
 type BucketCounts = {
   ideasOnly: number
   experimenting: number
@@ -1639,6 +1651,13 @@ const QuestGraphNode = ({ data }: NodeProps) => {
   const showMemoryHint = !nodeData.isEvent && Boolean(nodeData.memoryLabel || memoryPreview)
   return (
     <div
+      data-onboarding-id={
+        nodeData.isHead && !nodeData.isRoot
+          ? 'quest-canvas-focus-node'
+          : nodeData.isRoot
+            ? 'quest-canvas-first-node'
+            : undefined
+      }
       className={cn(
         'lab-quest-graph-node',
         nodeData.isRoot && 'is-root',
@@ -1843,6 +1862,133 @@ function resolveLayoutMap(layoutJson: QuestLayoutJson | null, viewMode: 'branch'
     return candidate as QuestLayoutMap
   }
   return {}
+}
+
+function normalizePathFilterMode(value: unknown): PathFilterMode {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'current' || normalized === 'selected') {
+    return normalized
+  }
+  return 'all'
+}
+
+function resolveCanvasPreferences(layoutJson: QuestLayoutJson | null): LabCanvasPreferences {
+  if (!layoutJson || typeof layoutJson.preferences !== 'object' || !layoutJson.preferences) {
+    return {}
+  }
+  const raw = layoutJson.preferences
+  const curveMode = raw.curveMode === 'full' || raw.curveMode === 'sota' ? raw.curveMode : null
+  const nodeDisplayMode =
+    raw.nodeDisplayMode === 'metric' || raw.nodeDisplayMode === 'summary' ? raw.nodeDisplayMode : null
+  return {
+    curveMetric: typeof raw.curveMetric === 'string' && raw.curveMetric.trim() ? raw.curveMetric.trim() : null,
+    curveMode,
+    nodeDisplayMode,
+    showAnalysis: typeof raw.showAnalysis === 'boolean' ? raw.showAnalysis : null,
+    pathFilterMode: normalizePathFilterMode(raw.pathFilterMode),
+  }
+}
+
+function buildCanvasPreferences(preferences: {
+  curveMetric: string
+  curveMode: 'sota' | 'full'
+  nodeDisplayMode: 'summary' | 'metric'
+  showAnalysis: boolean
+  pathFilterMode: PathFilterMode
+}): LabCanvasPreferences {
+  return {
+    curveMetric: preferences.curveMetric || null,
+    curveMode: preferences.curveMode,
+    nodeDisplayMode: preferences.nodeDisplayMode,
+    showAnalysis: preferences.showAnalysis,
+    pathFilterMode: preferences.pathFilterMode,
+  }
+}
+
+function resolveWorkflowBranchStage(
+  workflowState: LabQuestGraphNode['workflow_state'],
+  fallbackStage: BranchStage
+): BranchStage {
+  if (!workflowState || typeof workflowState !== 'object') return fallbackStage
+  const writingState = String(workflowState.writing_state || '').trim().toLowerCase()
+  if (writingState === 'completed') return 'finalize'
+  if (writingState === 'active') return 'write'
+  if (writingState === 'blocked_by_analysis') return 'analysis-campaign'
+  const analysisState = String(workflowState.analysis_state || '').trim().toLowerCase()
+  if (analysisState === 'pending' || analysisState === 'active' || analysisState === 'completed') {
+    return 'analysis-campaign'
+  }
+  return fallbackStage
+}
+
+function resolveWorkflowEvidenceStatus(workflowState: LabQuestGraphNode['workflow_state']): string | null {
+  if (!workflowState || typeof workflowState !== 'object') return null
+  const reason = String(workflowState.status_reason || '').trim()
+  if (reason) return reason
+  const total =
+    typeof workflowState.total_slices === 'number' && Number.isFinite(workflowState.total_slices)
+      ? workflowState.total_slices
+      : null
+  const completed =
+    typeof workflowState.completed_slices === 'number' && Number.isFinite(workflowState.completed_slices)
+      ? workflowState.completed_slices
+      : null
+  const nextPending = String(workflowState.next_pending_slice_id || '').trim()
+  const writingState = String(workflowState.writing_state || '').trim().toLowerCase()
+  if (writingState === 'blocked_by_analysis') {
+    return total != null
+      ? `Analysis ${completed ?? 0}/${total} done${nextPending ? ` · next: ${nextPending}` : ''}`
+      : 'Writing blocked by analysis.'
+  }
+  if (writingState === 'active') return 'Writing workspace active.'
+  if (writingState === 'ready') return 'Ready for writing.'
+  if (writingState === 'completed') return 'Writing finalized.'
+  const analysisState = String(workflowState.analysis_state || '').trim().toLowerCase()
+  if (analysisState === 'active') {
+    return total != null ? `Analysis ${completed ?? 0}/${total} done` : 'Analysis active.'
+  }
+  if (analysisState === 'completed') return 'Analysis complete.'
+  if (analysisState === 'pending') return 'Analysis pending.'
+  return null
+}
+
+function buildBranchLineageSet(nodes: LabQuestGraphNode[], branchName?: string | null): Set<string> {
+  const lineage = new Set<string>()
+  const target = String(branchName || '').trim()
+  if (!target) return lineage
+  const nodeByBranch = new Map<string, LabQuestGraphNode>()
+  nodes.forEach((node) => {
+    if (node.node_kind === 'baseline_root' || node.node_kind === 'placeholder') return
+    if (node.branch_name && !nodeByBranch.has(node.branch_name)) {
+      nodeByBranch.set(node.branch_name, node)
+    }
+  })
+  let current: string | null = target
+  const seen = new Set<string>()
+  while (current && !seen.has(current)) {
+    seen.add(current)
+    lineage.add(current)
+    const parentBranch = String(nodeByBranch.get(current)?.parent_branch || '').trim() || null
+    current = parentBranch
+  }
+  return lineage
+}
+
+function filterNodesByBranchLineage(nodes: LabQuestGraphNode[], lineage: Set<string>): LabQuestGraphNode[] {
+  if (!lineage.size) return nodes
+  const visibleNodeIds = new Set(
+    nodes
+      .filter((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder')
+      .filter((node) => node.branch_name && lineage.has(node.branch_name))
+      .map((node) => node.node_id)
+  )
+  return nodes.filter((node) => {
+    if (node.node_kind === 'baseline_root') return true
+    if (node.node_kind === 'placeholder') {
+      return !node.parent_branch || visibleNodeIds.has(node.parent_branch)
+    }
+    return Boolean(node.branch_name && lineage.has(node.branch_name))
+  })
 }
 
 type FloatingPanelState = {
@@ -2367,6 +2513,10 @@ function LabQuestGraphCanvasInner({
 }: LabQuestGraphCanvasProps) {
   const graphFetcher = fetchGraph ?? getLabQuestGraph
   const eventFetcher = fetchEvents ?? listLabQuestEvents
+  const isDemoProject = isDemoProjectId(projectId)
+  const graphPollMs = isDemoProject ? DEMO_POLL_MS : GRAPH_POLL_MS
+  const panelPollMs = isDemoProject ? DEMO_POLL_MS : PANEL_POLL_MS
+  const backgroundPollMs = isDemoProject ? DEMO_POLL_MS : BACKGROUND_POLL_MS
   const { t } = useI18n('lab')
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme)
   const edgePalette = React.useMemo(() => resolveEdgePalette(resolvedTheme), [resolvedTheme])
@@ -2387,6 +2537,9 @@ function LabQuestGraphCanvasInner({
   const [search, setSearch] = React.useState('')
   const [timeRange, setTimeRange] = React.useState<'all' | '7d' | '30d' | '90d'>('all')
   const [showAnalysis, setShowAnalysis] = React.useState(false)
+  const [pathFilterMode, setPathFilterMode] = React.useState<PathFilterMode>('all')
+  const analysisVisibilityTouchedRef = React.useRef(false)
+  const canvasStateHydratedRef = React.useRef(false)
   const [eventFilter, setEventFilter] = React.useState<EventFilterMode>('activity')
   const [hoverCard, setHoverCard] = React.useState<GraphHoverCardState | null>(null)
   const hoverClearTimerRef = React.useRef<number | null>(null)
@@ -2398,6 +2551,7 @@ function LabQuestGraphCanvasInner({
     () => resolveLabCanvasViewSemantic(viewMode),
     [viewMode]
   )
+  const canvasStateKey = React.useMemo(() => `${projectId}:${questId}`, [projectId, questId])
 
   React.useEffect(() => {
     return () => {
@@ -2518,6 +2672,17 @@ function LabQuestGraphCanvasInner({
     setViewMode(preferredViewMode)
   }, [preferredViewMode, viewMode])
 
+  React.useEffect(() => {
+    analysisVisibilityTouchedRef.current = false
+    canvasStateHydratedRef.current = false
+    setShowAnalysis(false)
+    setPathFilterMode('all')
+    setCurveMode('sota')
+    setCurveMetric('')
+    setNodeDisplayMode('summary')
+    setLayoutOverride({})
+  }, [projectId, questId])
+
   const livePollingEnabled = isPageVisible && !atEventId
   const shouldPollGraph = livePollingEnabled
   const shouldPollBranchData = livePollingEnabled && (viewMode === 'branch' || !branchesPanel.collapsed)
@@ -2529,38 +2694,49 @@ function LabQuestGraphCanvasInner({
     livePollingEnabled && (!eventsPanel.collapsed || viewMode === 'event' || viewMode === 'stage')
   const shouldPollBranchInsights =
     livePollingEnabled && (viewMode === 'branch' || !branchesPanel.collapsed || !eventsPanel.collapsed)
-  const branchGraphQueryEnabled = Boolean(projectId && questId && viewMode !== 'branch')
+  const hasQuestScope = Boolean(projectId && questId)
+  const branchViewDataEnabled = hasQuestScope && (showFloatingPanels || viewMode === 'branch')
+  const eventPanelDataEnabled = hasQuestScope && showFloatingPanels
+  const decisionDataEnabled = hasQuestScope && (showFloatingPanels || viewMode === 'event')
+  const papersDataEnabled = hasQuestScope && showFloatingPanels
+  const piQaDataEnabled = hasQuestScope && showFloatingPanels
+  const agentsDataEnabled = Boolean(projectId) && (showFloatingPanels || viewMode === 'branch')
+  const branchGraphQueryEnabled = hasQuestScope && viewMode !== 'branch'
 
   const branchGraphQuery = useQuery({
     queryKey: ['lab-quest-graph', projectId, questId, 'branch', search],
     queryFn: () => graphFetcher(projectId, questId, { view: 'branch', search }),
     enabled: branchGraphQueryEnabled,
+    retry: false,
     staleTime: 15000,
-    refetchInterval: branchGraphQueryEnabled && shouldPollBranchData ? BACKGROUND_POLL_MS : false,
+    refetchInterval: branchGraphQueryEnabled && shouldPollBranchData ? backgroundPollMs : false,
   })
 
   const graphQuery = useQuery({
     queryKey: ['lab-quest-graph', projectId, questId, viewMode, search, atEventId ?? null],
     queryFn: () => graphFetcher(projectId, questId, { view: viewMode, search, atEventId }),
-    enabled: Boolean(projectId && questId),
+    enabled: hasQuestScope,
+    retry: false,
     staleTime: 15000,
-    refetchInterval: shouldPollGraph ? GRAPH_POLL_MS : false,
+    refetchInterval: hasQuestScope && shouldPollGraph ? graphPollMs : false,
   })
 
   const eventsQuery = useQuery({
     queryKey: ['lab-quest-events', projectId, questId, 'canvas'],
     queryFn: () => eventFetcher(projectId, questId, { limit: 40, includePayload: true }),
-    enabled: Boolean(projectId && questId),
+    enabled: eventPanelDataEnabled,
+    retry: false,
     staleTime: 10000,
-    refetchInterval: shouldPollEventsData ? PANEL_POLL_MS : false,
+    refetchInterval: eventPanelDataEnabled && shouldPollEventsData ? panelPollMs : false,
   })
 
   const papersQuery = useQuery({
     queryKey: ['lab-papers', projectId, questId],
     queryFn: () => listLabPapers(projectId, { questId }),
-    enabled: Boolean(projectId && questId),
+    enabled: papersDataEnabled,
+    retry: false,
     staleTime: 15000,
-    refetchInterval: shouldPollPapersData ? BACKGROUND_POLL_MS : false,
+    refetchInterval: papersDataEnabled && shouldPollPapersData ? backgroundPollMs : false,
   })
 
   const memoryQuery = useQuery({
@@ -2571,17 +2747,19 @@ function LabQuestGraphCanvasInner({
         atEventId,
         limit: 120,
       }),
-    enabled: Boolean(projectId && questId),
+    enabled: branchViewDataEnabled,
+    retry: false,
     staleTime: 10000,
-    refetchInterval: shouldPollBranchInsights ? PANEL_POLL_MS : false,
+    refetchInterval: branchViewDataEnabled && shouldPollBranchInsights ? panelPollMs : false,
   })
 
   const agentsQuery = useQuery({
     queryKey: ['lab-agents', projectId],
     queryFn: () => listLabAgents(projectId, { silent: true }),
-    enabled: Boolean(projectId),
+    enabled: agentsDataEnabled,
+    retry: false,
     staleTime: 15000,
-    refetchInterval: shouldPollAgentsData ? BACKGROUND_POLL_MS : false,
+    refetchInterval: agentsDataEnabled && shouldPollAgentsData ? backgroundPollMs : false,
   })
 
   const decisionEventsQuery = useQuery({
@@ -2592,9 +2770,10 @@ function LabQuestGraphCanvasInner({
         limit: 200,
         includePayload: true,
       }),
-    enabled: Boolean(projectId && questId),
+    enabled: decisionDataEnabled,
+    retry: false,
     staleTime: 10000,
-    refetchInterval: shouldPollDecisionData ? PANEL_POLL_MS : false,
+    refetchInterval: decisionDataEnabled && shouldPollDecisionData ? panelPollMs : false,
   })
 
   const piQaEventsQuery = useQuery({
@@ -2605,9 +2784,10 @@ function LabQuestGraphCanvasInner({
         limit: 80,
         includePayload: true,
       }),
-    enabled: Boolean(projectId && questId),
+    enabled: piQaDataEnabled,
+    retry: false,
     staleTime: 10000,
-    refetchInterval: shouldPollDecisionData ? PANEL_POLL_MS : false,
+    refetchInterval: piQaDataEnabled && shouldPollDecisionData ? panelPollMs : false,
   })
 
   const branchInsightEventsQuery = useQuery({
@@ -2624,9 +2804,10 @@ function LabQuestGraphCanvasInner({
         limit: 800,
         includePayload: true,
       }),
-    enabled: Boolean(projectId && questId),
+    enabled: branchViewDataEnabled,
+    retry: false,
     staleTime: 10000,
-    refetchInterval: shouldPollBranchInsights ? PANEL_POLL_MS : false,
+    refetchInterval: branchViewDataEnabled && shouldPollBranchInsights ? panelPollMs : false,
   })
 
   const layoutMutation = useMutation({
@@ -2732,18 +2913,64 @@ function LabQuestGraphCanvasInner({
     | QuestLayoutJson
     | null
 
+  React.useEffect(() => {
+    if (canvasStateHydratedRef.current) return
+    if (graphQuery.isLoading || branchDataIsLoading) return
+    const preferences = resolveCanvasPreferences(layoutJson)
+    if (preferences.curveMode === 'full' || preferences.curveMode === 'sota') {
+      setCurveMode(preferences.curveMode)
+    }
+    if (preferences.nodeDisplayMode === 'metric' || preferences.nodeDisplayMode === 'summary') {
+      setNodeDisplayMode(preferences.nodeDisplayMode)
+    }
+    if (typeof preferences.curveMetric === 'string' && preferences.curveMetric.trim()) {
+      setCurveMetric(preferences.curveMetric.trim())
+    }
+    if (typeof preferences.showAnalysis === 'boolean') {
+      analysisVisibilityTouchedRef.current = true
+      setShowAnalysis(preferences.showAnalysis)
+    }
+    setPathFilterMode(normalizePathFilterMode(preferences.pathFilterMode))
+    canvasStateHydratedRef.current = true
+  }, [branchDataIsLoading, canvasStateKey, graphQuery.isLoading, layoutJson])
+
   const headBranch = graphQuery.data?.head_branch ?? branchGraphData?.head_branch
 
   const branchNodesRaw = branchGraphData?.nodes ?? EMPTY_GRAPH_NODES
+  React.useEffect(() => {
+    if (analysisVisibilityTouchedRef.current) return
+    const hasAnalysisNodes = branchNodesRaw.some((node) => isAnalysisBranch(node.branch_name))
+    if (hasAnalysisNodes && !showAnalysis) {
+      setShowAnalysis(true)
+    }
+  }, [branchNodesRaw, showAnalysis])
   const branchNodesFiltered = React.useMemo(() => {
     if (showAnalysis) return branchNodesRaw
-    return branchNodesRaw.filter((node) => !isAnalysisBranch(node.branch_name))
+    const hiddenNodeIds = new Set(
+      branchNodesRaw.filter((node) => isAnalysisBranch(node.branch_name)).map((node) => node.node_id)
+    )
+    return branchNodesRaw.filter((node) => {
+      if (isAnalysisBranch(node.branch_name)) return false
+      if (node.node_kind === 'placeholder' && node.parent_branch && hiddenNodeIds.has(node.parent_branch)) {
+        return false
+      }
+      return true
+    })
   }, [branchNodesRaw, showAnalysis])
 
   const viewNodesRaw = graphQuery.data?.nodes ?? EMPTY_GRAPH_NODES
   const viewNodesFiltered = React.useMemo(() => {
     if (showAnalysis) return viewNodesRaw
-    return viewNodesRaw.filter((node) => !isAnalysisBranch(node.branch_name))
+    const hiddenNodeIds = new Set(
+      viewNodesRaw.filter((node) => isAnalysisBranch(node.branch_name)).map((node) => node.node_id)
+    )
+    return viewNodesRaw.filter((node) => {
+      if (isAnalysisBranch(node.branch_name)) return false
+      if (node.node_kind === 'placeholder' && node.parent_branch && hiddenNodeIds.has(node.parent_branch)) {
+        return false
+      }
+      return true
+    })
   }, [showAnalysis, viewNodesRaw])
 
   const filterByTime = React.useCallback(
@@ -2760,15 +2987,37 @@ function LabQuestGraphCanvasInner({
     [timeRange, viewMode]
   )
 
-  const branchNodes = React.useMemo(
+  const branchNodesBase = React.useMemo(
     () => branchNodesFiltered.filter(filterByTime),
     [branchNodesFiltered, filterByTime]
   )
 
-  const viewNodesAll = React.useMemo(
+  const visibleBranchLineage = React.useMemo(() => {
+    if (pathFilterMode === 'all') return new Set<string>()
+    const fallbackBranch =
+      branchNodesBase.find((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder')?.branch_name ||
+      null
+    const targetBranch =
+      pathFilterMode === 'selected'
+        ? activeBranch || headBranch || fallbackBranch
+        : headBranch || activeBranch || fallbackBranch
+    return buildBranchLineageSet(branchNodesBase, targetBranch)
+  }, [activeBranch, branchNodesBase, headBranch, pathFilterMode])
+
+  const branchNodes = React.useMemo(() => {
+    if (pathFilterMode === 'all') return branchNodesBase
+    return filterNodesByBranchLineage(branchNodesBase, visibleBranchLineage)
+  }, [branchNodesBase, pathFilterMode, visibleBranchLineage])
+
+  const viewNodesAllBase = React.useMemo(
     () => viewNodesFiltered.filter(filterByTime),
     [filterByTime, viewNodesFiltered]
   )
+
+  const viewNodesAll = React.useMemo(() => {
+    if (viewMode !== 'branch' || pathFilterMode === 'all') return viewNodesAllBase
+    return filterNodesByBranchLineage(viewNodesAllBase, visibleBranchLineage)
+  }, [pathFilterMode, viewMode, viewNodesAllBase, visibleBranchLineage])
 
   const viewNodes = React.useMemo(() => {
     if (viewMode === 'event' && eventTraceMode === 'compact') {
@@ -2838,21 +3087,38 @@ function LabQuestGraphCanvasInner({
       const branchEvents = groupedEvents.get(branchName) ?? []
       const fallbackNode = branchNodeMap.get(branchName)
       const fallbackStage = String(fallbackNode?.stage_key || 'baseline') as BranchStage
-      let stage: BranchStage = STAGE_ORDER.includes(fallbackStage) ? fallbackStage : 'baseline'
-      let writingEligible = false
-      let writingActive = false
-      let completed = false
+      const workflowState = fallbackNode?.workflow_state ?? null
+      const hasWorkflowState = Boolean(
+        workflowState &&
+          (String(workflowState.analysis_state || '').trim() ||
+            String(workflowState.writing_state || '').trim() ||
+            String(workflowState.status_reason || '').trim() ||
+            String(workflowState.analysis_campaign_id || '').trim())
+      )
+      let stage: BranchStage = resolveWorkflowBranchStage(
+        workflowState,
+        STAGE_ORDER.includes(fallbackStage) ? fallbackStage : 'baseline'
+      )
+      const workflowWritingState = String(workflowState?.writing_state || '').trim().toLowerCase()
+      let writingEligible =
+        workflowWritingState === 'ready' ||
+        workflowWritingState === 'active' ||
+        workflowWritingState === 'completed'
+      let writingActive = workflowWritingState === 'active'
+      let completed = workflowWritingState === 'completed'
       let verdict: string | null = null
       let latestDecisionEvent: LabQuestEventItem | null = null
 
       branchEvents.forEach((event) => {
-        const stageKey = resolveEventStageKey(event)
-        if (
-          stageKey &&
-          stageKey !== 'decision' &&
-          STAGE_ORDER.includes(stageKey as BranchStage)
-        ) {
-          stage = elevateBranchStage(stage, stageKey as BranchStage)
+        if (!hasWorkflowState) {
+          const stageKey = resolveEventStageKey(event)
+          if (
+            stageKey &&
+            stageKey !== 'decision' &&
+            STAGE_ORDER.includes(stageKey as BranchStage)
+          ) {
+            stage = elevateBranchStage(stage, stageKey as BranchStage)
+          }
         }
         if (isDecisionEvent(event)) {
           latestDecisionEvent = event
@@ -2861,22 +3127,26 @@ function LabQuestGraphCanvasInner({
         if (currentVerdict) {
           verdict = currentVerdict
         }
-        if (currentVerdict === 'good' && (stage === 'experiment' || stage === 'analysis-campaign')) {
-          writingEligible = true
-        }
-        if (isWritingEvent(event)) {
-          writingActive = true
+        if (!hasWorkflowState) {
+          if (currentVerdict === 'good' && (stage === 'experiment' || stage === 'analysis-campaign')) {
+            writingEligible = true
+          }
+          if (isWritingEvent(event)) {
+            writingActive = true
+          }
         }
       })
 
-      if (stage === 'write' || stage === 'finalize') {
-        writingEligible = true
-      }
-      if (stage === 'finalize') {
-        completed = true
-        writingActive = false
-      } else if (stage === 'write') {
-        writingActive = true
+      if (!hasWorkflowState) {
+        if (stage === 'write' || stage === 'finalize') {
+          writingEligible = true
+        }
+        if (stage === 'finalize') {
+          completed = true
+          writingActive = false
+        } else if (stage === 'write') {
+          writingActive = true
+        }
       }
 
       const latestEvent = branchEvents.length ? branchEvents[branchEvents.length - 1] : null
@@ -2890,8 +3160,9 @@ function LabQuestGraphCanvasInner({
         ? clampCanvasText(resolveDecisionReason(latestDecisionEvent), 100)
         : null
       const stale = Boolean(updatedAt) && Date.now() - parseEventTime(updatedAt) > STALE_BRANCH_MS
-      const evidenceParts = [`stage ${BRANCH_STAGE_LABELS[stage]}`]
-      if (verdict) {
+      const workflowEvidence = resolveWorkflowEvidenceStatus(workflowState)
+      const evidenceParts = workflowEvidence ? [workflowEvidence] : [`stage ${BRANCH_STAGE_LABELS[stage]}`]
+      if (verdict && !workflowEvidence) {
         evidenceParts.push(`verdict ${verdict}`)
       }
       if (decisionReason) {
@@ -2913,6 +3184,7 @@ function LabQuestGraphCanvasInner({
         completed,
         updatedAt,
         stale,
+        workflowState,
       })
     })
 
@@ -3645,24 +3917,29 @@ function LabQuestGraphCanvasInner({
     }
   }, [flow, highlightBranch, highlightNodeId, nodes])
 
-  const sortedBranches = React.useMemo(() => {
-    return branchNodes
-      .filter((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder')
-      .sort((left, right) => {
-      const leftName = String(left.branch_name || '')
-      const rightName = String(right.branch_name || '')
-      if (headBranch && leftName === headBranch && rightName !== headBranch) return -1
-      if (headBranch && rightName === headBranch && leftName !== headBranch) return 1
-      if (leftName === 'main' && rightName !== 'main') return -1
-      if (rightName === 'main' && leftName !== 'main') return 1
-      const leftInsight = left.branch_name ? branchInsights.get(left.branch_name) : null
-      const rightInsight = right.branch_name ? branchInsights.get(right.branch_name) : null
-      const leftTime = parseEventTime(leftInsight?.updatedAt || left.created_at)
-      const rightTime = parseEventTime(rightInsight?.updatedAt || right.created_at)
-      if (leftTime !== rightTime) return rightTime - leftTime
-      return leftName.localeCompare(rightName)
-    })
-  }, [branchInsights, branchNodes, headBranch])
+  const sortBranches = React.useCallback(
+    (nodes: LabQuestGraphNode[]) =>
+      nodes
+        .filter((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder')
+        .sort((left, right) => {
+          const leftName = String(left.branch_name || '')
+          const rightName = String(right.branch_name || '')
+          if (headBranch && leftName === headBranch && rightName !== headBranch) return -1
+          if (headBranch && rightName === headBranch && leftName !== headBranch) return 1
+          if (leftName === 'main' && rightName !== 'main') return -1
+          if (rightName === 'main' && leftName !== 'main') return 1
+          const leftInsight = left.branch_name ? branchInsights.get(left.branch_name) : null
+          const rightInsight = right.branch_name ? branchInsights.get(right.branch_name) : null
+          const leftTime = parseEventTime(leftInsight?.updatedAt || left.created_at)
+          const rightTime = parseEventTime(rightInsight?.updatedAt || right.created_at)
+          if (leftTime !== rightTime) return rightTime - leftTime
+          return leftName.localeCompare(rightName)
+        }),
+    [branchInsights, headBranch]
+  )
+
+  const sortedBranchesAll = React.useMemo(() => sortBranches(branchNodesBase), [branchNodesBase, sortBranches])
+  const sortedBranches = React.useMemo(() => sortBranches(branchNodes), [branchNodes, sortBranches])
 
   const recentEvents = eventsQuery.data?.items ?? []
   const papers = papersQuery.data?.items ?? []
@@ -4080,17 +4357,28 @@ function LabQuestGraphCanvasInner({
         return
       }
       const questData = data as QuestNodeData
+      const preferStageNode =
+        questData.nodeKind !== 'baseline_root' &&
+        questData.nodeKind !== 'placeholder' &&
+        shouldOpenCanonicalStage(questData.stageKey)
       const selectionType =
-        questData.nodeKind === 'baseline_root'
-          ? 'baseline_node'
-          : questData.nodeKind === 'placeholder'
-            ? 'workflow_placeholder'
-            : 'branch_node'
+        preferStageNode
+          ? 'stage_node'
+          : questData.nodeKind === 'baseline_root'
+            ? 'baseline_node'
+            : questData.nodeKind === 'placeholder'
+              ? 'workflow_placeholder'
+              : 'branch_node'
       if (questData.branchName) {
+        const selectionRef =
+          selectionType === 'branch_node'
+            ? questData.branchName
+            : selectionType === 'stage_node'
+              ? `stage:${questData.branchName}:${questData.stageKey}`
+              : node.id
         const selection = buildSelectionContext(questId, {
           selectionType,
-          selectionRef:
-            selectionType === 'branch_node' ? questData.branchName : node.id,
+          selectionRef,
           branchName: questData.branchName,
           branchNo: questData.branchNo ?? null,
           parentBranch: questData.parentBranch ?? null,
@@ -4161,15 +4449,26 @@ function LabQuestGraphCanvasInner({
 
   React.useEffect(() => {
     if (interactionLocked) return
-    if (!Object.keys(layoutOverride).length) return
+    if (!canvasStateHydratedRef.current) return
     if (saveTimeoutRef.current) {
       window.clearTimeout(saveTimeoutRef.current)
     }
     saveTimeoutRef.current = window.setTimeout(() => {
       const currentLayout = resolveLayoutMap(layoutJson, viewMode)
+      const preferences = buildCanvasPreferences({
+        curveMetric,
+        curveMode,
+        nodeDisplayMode,
+        showAnalysis,
+        pathFilterMode,
+      })
       const nextLayout: QuestLayoutJson = {
         ...(layoutJson ?? {}),
+        preferences,
         [viewMode]: { ...currentLayout, ...layoutOverride },
+      }
+      if (JSON.stringify(nextLayout) === JSON.stringify(layoutJson ?? {})) {
+        return
       }
       layoutMutation.mutate(nextLayout)
     }, 800)
@@ -4178,7 +4477,18 @@ function LabQuestGraphCanvasInner({
         window.clearTimeout(saveTimeoutRef.current)
       }
     }
-  }, [interactionLocked, layoutJson, layoutMutation, layoutOverride, viewMode])
+  }, [
+    curveMetric,
+    curveMode,
+    interactionLocked,
+    layoutJson,
+    layoutMutation,
+    layoutOverride,
+    nodeDisplayMode,
+    pathFilterMode,
+    showAnalysis,
+    viewMode,
+  ])
 
   const baselineGateState = React.useMemo(() => {
     const fromGovernance = String(graphQuery.data?.governance_vm?.governance?.formalBaselineState || '').trim().toLowerCase()
@@ -4193,9 +4503,18 @@ function LabQuestGraphCanvasInner({
     return 'pending'
   }, [branchNodes, graphQuery.data?.governance_vm?.governance?.formalBaselineState])
   const baselineReady = baselineGateState === 'confirmed' || baselineGateState === 'waived'
+  const visibleBranchNameSet = React.useMemo(
+    () =>
+      new Set(
+        sortedBranches
+          .map((node) => String(node.branch_name || '').trim())
+          .filter((branchName): branchName is string => Boolean(branchName))
+      ),
+    [sortedBranches]
+  )
   const selectedBranchName =
-    activeBranch ||
-    headBranch ||
+    (activeBranch && (pathFilterMode !== 'current' || visibleBranchNameSet.has(activeBranch)) ? activeBranch : null) ||
+    (headBranch && visibleBranchNameSet.has(headBranch) ? headBranch : null) ||
     sortedBranches.find((node) => node.node_kind !== 'baseline_root' && node.node_kind !== 'placeholder')?.branch_name ||
     null
   const selectedBranchInsight = selectedBranchName ? branchInsights.get(selectedBranchName) ?? null : null
@@ -4213,6 +4532,9 @@ function LabQuestGraphCanvasInner({
   )
   const selectedBranchPipelineSteps = React.useMemo(() => {
     const stageRank = selectedBranchInsight ? resolveStageRank(selectedBranchInsight.stage) : -1
+    const analysisState = String(selectedBranchInsight?.workflowState?.analysis_state || '').trim().toLowerCase()
+    const writingState = String(selectedBranchInsight?.workflowState?.writing_state || '').trim().toLowerCase()
+    const workflowReason = String(selectedBranchInsight?.workflowState?.status_reason || '').trim()
     const statusForStage = (target: BranchStage, dependsOnReady = false): PipelineStepStatus => {
       const targetRank = resolveStageRank(target)
       if (stageRank > targetRank) return 'done'
@@ -4274,7 +4596,9 @@ function LabQuestGraphCanvasInner({
         description: t(
           'quest_process_step_outcome_desc',
           undefined,
-          'Run follow-up analyses and verify claims.'
+          workflowReason && (analysisState === 'active' || analysisState === 'completed' || writingState === 'blocked_by_analysis')
+            ? workflowReason
+            : 'Run follow-up analyses and verify claims.'
         ),
       },
       {
@@ -4284,7 +4608,9 @@ function LabQuestGraphCanvasInner({
         description: t(
           'quest_process_step_writing_desc',
           undefined,
-          'Draft and finalize paper artifacts.'
+          workflowReason && (writingState === 'blocked_by_analysis' || writingState === 'active' || writingState === 'ready')
+            ? workflowReason
+            : 'Draft and finalize paper artifacts.'
         ),
       },
       {
@@ -4305,10 +4631,10 @@ function LabQuestGraphCanvasInner({
     }>
   }, [baselineGateState, baselineReady, selectedBranchHasDecision, selectedBranchInsight, t])
   const selectedBranchNode = selectedBranchName
-    ? sortedBranches.find((node) => node.branch_name === selectedBranchName) || null
+    ? sortedBranchesAll.find((node) => node.branch_name === selectedBranchName) || null
     : null
   const recommendedBranchName = React.useMemo(() => {
-    const candidates = sortedBranches
+    const candidates = sortedBranchesAll
       .map((node) => {
         const branchName = node.branch_name || ''
         if (!branchName) return null
@@ -4330,11 +4656,11 @@ function LabQuestGraphCanvasInner({
       })
     if (!candidates.length) return null
     return candidates[0].branchName
-  }, [branchInsights, sortedBranches])
+  }, [branchInsights, sortedBranchesAll])
   const recommendedPath = React.useMemo(() => {
     if (!recommendedBranchName) return []
     const nodeByBranch = new Map<string, LabQuestGraphNode>()
-    sortedBranches.forEach((node) => {
+    sortedBranchesAll.forEach((node) => {
       if (node.branch_name) nodeByBranch.set(node.branch_name, node)
     })
     const path: string[] = []
@@ -4347,7 +4673,7 @@ function LabQuestGraphCanvasInner({
       current = parentBranch
     }
     return path.reverse()
-  }, [recommendedBranchName, sortedBranches])
+  }, [recommendedBranchName, sortedBranchesAll])
   const selectedBranchCurves = selectedBranchNode ? resolveNodeMetricCurves(selectedBranchNode) : null
   const selectedBranchMetricTables = React.useMemo(() => {
     const keys = new Set<string>()
@@ -4574,12 +4900,17 @@ function LabQuestGraphCanvasInner({
         >
         <div className="lab-quest-panel__header">
           <div>
-            <div className="lab-quest-panel__subtitle">{branchNodes.length} total</div>
+            <div className="lab-quest-panel__subtitle">
+              {pathFilterMode === 'all' ? `${branchNodes.length} total` : `${branchNodes.length}/${branchNodesBase.length} shown`}
+            </div>
           </div>
           <button
             type="button"
             className="lab-quest-panel__toggle"
-            onClick={() => setShowAnalysis((prev) => !prev)}
+            onClick={() => {
+              analysisVisibilityTouchedRef.current = true
+              setShowAnalysis((prev) => !prev)
+            }}
           >
             {showAnalysis ? 'Hide analysis' : 'Show analysis'}
           </button>
@@ -4589,12 +4920,42 @@ function LabQuestGraphCanvasInner({
             Branch filters are disabled in stage view.
           </div>
         ) : (
-          <Input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search branches"
-            className="lab-quest-search"
-          />
+          <>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--lab-text-muted)]">
+                {t('quest_path_filter_label', undefined, 'Path filter')}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant={pathFilterMode === 'all' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPathFilterMode('all')}
+                >
+                  {t('quest_path_filter_all', undefined, 'All')}
+                </Button>
+                <Button
+                  variant={pathFilterMode === 'current' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPathFilterMode('current')}
+                >
+                  {t('quest_path_filter_current', undefined, 'Current path')}
+                </Button>
+                <Button
+                  variant={pathFilterMode === 'selected' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPathFilterMode('selected')}
+                >
+                  {t('quest_path_filter_selected', undefined, 'Selected path')}
+                </Button>
+              </div>
+            </div>
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search branches"
+              className="lab-quest-search"
+            />
+          </>
         )}
         <div className="mt-2 space-y-2 border-y border-dashed border-[var(--lab-border)] py-2">
           <div className="flex items-center justify-between gap-2">

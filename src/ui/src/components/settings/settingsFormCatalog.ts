@@ -339,10 +339,10 @@ export const configSections: SettingsSection[] = [
       },
       {
         key: 'connectors.system_enabled.lingzhu',
-        label: 'Show Lingzhu connector',
+        label: 'Show Lingzhu (Rokid Glasses) connector',
         kind: 'boolean',
-        description: 'If disabled, Lingzhu is hidden from the product UI and DeepScientist will not expose its companion configuration flow.',
-        whereToGet: 'Enable this only when you plan to use the Lingzhu companion path.',
+        description: 'Compatibility flag for the Lingzhu companion path. Lingzhu settings remain visible so Rokid binding values can always be configured.',
+        whereToGet: 'You usually do not need to change this. Lingzhu setup is now always exposed in Settings.',
       },
     ],
   },

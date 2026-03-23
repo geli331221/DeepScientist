@@ -185,7 +185,7 @@ function StageFactRows({ items }: { items: QuestStageField[] }) {
           <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
             {item.label}
           </div>
-          <StageRichText value={item.display_value || item.value} />
+          <StageRichText value={item.value ?? item.display_value} />
         </div>
       ))}
     </div>
@@ -374,7 +374,9 @@ function StageHistoryList({
               {item.artifact_kind ? <StagePill>{item.artifact_kind}</StagePill> : null}
             </div>
             {item.summary ? (
-              <div className="mt-1 text-sm leading-6 text-muted-foreground">{compactText(item.summary, 260)}</div>
+              <div className="mt-1">
+                <StageRichText value={item.summary} className="text-muted-foreground" />
+              </div>
             ) : null}
             <div className="mt-2 text-[11px] text-muted-foreground">
               {formatTimestamp(item.created_at)}
@@ -447,6 +449,68 @@ function StagePathActions({
           </StageActionButton>
         )
       })}
+    </div>
+  )
+}
+
+function StageInlineContent({
+  title,
+  value,
+  tone = 'default',
+}: {
+  title: string
+  value: unknown
+  tone?: 'default' | 'muted'
+}) {
+  if (value == null || stringifyValue(value) === '—') return null
+  return (
+    <div
+      className={cn(
+        'rounded-[22px] border px-4 py-4',
+        tone === 'muted'
+          ? 'border-black/[0.05] bg-black/[0.02] dark:border-white/[0.08] dark:bg-white/[0.03]'
+          : 'border-black/[0.06] bg-white dark:border-white/[0.08] dark:bg-[rgba(255,255,255,0.02)]'
+      )}
+    >
+      <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+        {title}
+      </div>
+      <StageRichText value={value} />
+    </div>
+  )
+}
+
+function StageTraceActions({
+  items,
+}: {
+  items: Array<Record<string, unknown>>
+}) {
+  if (!items.length) return null
+  return (
+    <div className="space-y-3">
+      {items.map((item, index) => (
+        <div
+          key={String(item.action_id || item.created_at || index)}
+          className="rounded-[18px] border border-black/[0.06] bg-black/[0.02] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.03]"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm font-semibold text-foreground">
+              {asString(item.title) || `Trace ${index + 1}`}
+            </div>
+            {asString(item.status) ? <StagePill>{asString(item.status)}</StagePill> : null}
+            {asString(item.tool_name) ? <StagePill>{asString(item.tool_name)}</StagePill> : null}
+            {asString(item.artifact_kind) ? <StagePill>{asString(item.artifact_kind)}</StagePill> : null}
+          </div>
+          {asString(item.created_at) ? (
+            <div className="mt-1 text-[11px] text-muted-foreground">{formatTimestamp(asString(item.created_at))}</div>
+          ) : null}
+          {item.summary != null && stringifyValue(item.summary) !== '—' ? (
+            <div className="mt-3">
+              <StageRichText value={item.summary} />
+            </div>
+          ) : null}
+        </div>
+      ))}
     </div>
   )
 }
@@ -548,6 +612,13 @@ function AnalysisSliceList({
                 <StageSummaryGrid items={summaryCards} />
               </div>
             ) : null}
+            {asString(item.plan_markdown) || asString(item.result_markdown) || asString(item.mirror_markdown) ? (
+              <div className="mt-3 grid gap-3">
+                <StageInlineContent title="Plan" value={item.plan_markdown} tone="muted" />
+                <StageInlineContent title="Result" value={item.result_markdown} tone="muted" />
+                <StageInlineContent title="Mirror" value={item.mirror_markdown} tone="muted" />
+              </div>
+            ) : null}
             <StagePathActions
               paths={[
                 { label: 'Plan', path: asString(item.plan_path) },
@@ -635,6 +706,8 @@ export function QuestStageSurface({
 
   const stage = (stageQuery.data as QuestStageViewPayload | undefined) ?? null
   const stageDetails = asRecord(stage?.details)
+  const latestArtifact = asRecord(stageDetails.latest_artifact)
+  const latestArtifactPayload = latestArtifact.payload
   const stagePaper = asRecord(stageDetails.paper)
   const stagePaperBuild = asRecord(stagePaper.build)
   const keyFiles = stage?.sections?.key_files || []
@@ -750,7 +823,7 @@ export function QuestStageSurface({
     stage.scope_paths?.length
       ? {
           label: 'Scope',
-          value: compactText(stage.scope_paths.join('\n'), 220),
+          value: stage.scope_paths.join(', '),
           hint: 'Explorer is scoped to these paths for this node.',
         }
       : null,
@@ -784,7 +857,7 @@ export function QuestStageSurface({
     paper.selected_outline
       ? {
           label: 'Selected Outline',
-          value: compactText(asRecord(paper.selected_outline).story || 'Ready', 180),
+          value: asString(asRecord(paper.selected_outline).title) || 'Ready',
         }
       : null,
   ].filter(Boolean) as StageSummaryCard[]
@@ -830,6 +903,16 @@ export function QuestStageSurface({
   const stageEvaluationSummaryCards = experimentEvaluationSummaryCards.length
     ? experimentEvaluationSummaryCards
     : branchEvaluationSummaryCards
+  const ideaMarkdown = asString(idea.idea_markdown)
+  const experimentRunMarkdown = asString(experiment.run_markdown)
+  const experimentTraceMarkdown = asString(experiment.trace_markdown)
+  const experimentTraceActions = asRecordList(experiment.trace_actions)
+  const experimentResultPayload = experiment.result_payload
+  const analysisCharterMarkdown = asString(analysis.charter_markdown)
+  const analysisTodoManifestMarkdown = asString(analysis.todo_manifest_markdown)
+  const analysisSummaryMarkdown = asString(analysis.summary_markdown)
+  const analysisTraceMarkdown = asString(analysis.trace_markdown)
+  const analysisTraceActions = asRecordList(analysis.trace_actions)
 
   const paperSummaryCards = [
     {
@@ -899,7 +982,7 @@ export function QuestStageSurface({
     availableTabs.length && !availableTabs.includes(activeTab) ? availableTabs[0] : activeTab
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto">
+    <div className="h-full min-h-0 overflow-y-auto" data-onboarding-id="quest-stage-surface">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8 lg:px-10">
         <section className="rounded-[32px] border border-black/[0.06] bg-white/[0.92] px-6 py-6 shadow-[0_24px_70px_rgba(15,23,42,0.08)] backdrop-blur dark:border-white/[0.08] dark:bg-[rgba(18,18,20,0.82)]">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1169,6 +1252,47 @@ export function QuestStageSurface({
           </StageSection>
             ) : null}
 
+            {ideaMarkdown ? (
+          <StageSection title="Idea Document" hint="This is the durable idea document submitted through artifact tools.">
+            <StageInlineContent title="Idea Markdown" value={ideaMarkdown} />
+          </StageSection>
+            ) : null}
+
+            {(experimentRunMarkdown ||
+              experimentResultPayload != null ||
+              experimentTraceMarkdown ||
+              experimentTraceActions.length) ? (
+          <StageSection
+            title="Main Experiment Record"
+            hint="This section renders the durable experiment narrative and result payload directly in the tab."
+          >
+            <div className="grid gap-4">
+              <StageInlineContent title="Run Narrative" value={experimentRunMarkdown} />
+              <StageInlineContent title="Structured Result" value={experimentResultPayload} />
+              <StageInlineContent title="Trace Summary" value={experimentTraceMarkdown} tone="muted" />
+              {experimentTraceActions.length ? <StageTraceActions items={experimentTraceActions} /> : null}
+            </div>
+          </StageSection>
+            ) : null}
+
+            {latestArtifactPayload != null ? (
+          <StageSection
+            title="Latest Artifact Payload"
+            hint="This shows the raw recorded artifact payload so the stage page can be checked directly against the durable JSON keys and values."
+          >
+            <StageKeyValueList
+              items={[
+                { label: 'Artifact ID', value: latestArtifact.artifact_id },
+                { label: 'Artifact Kind', value: latestArtifact.artifact_kind },
+                { label: 'Artifact Path', value: latestArtifact.artifact_path },
+              ]}
+            />
+            <div className="mt-4">
+              <StageInlineContent title="Payload JSON" value={latestArtifactPayload} tone="muted" />
+            </div>
+          </StageSection>
+            ) : null}
+
             <StageSection title="Files">
           <StageFileList
             items={keyFiles}
@@ -1188,8 +1312,17 @@ export function QuestStageSurface({
               countArray(analysis.slices)) && (
               <StageSection
                 title="Supplementary Experiment Protocol"
-                hint="This tab contains the full supplementary experiment contract. Open linked files from here instead of reading summary cards."
+                hint="This tab contains the full supplementary experiment contract and inline durable markdown for the campaign and slices."
               >
+                {analysisCharterMarkdown || analysisTodoManifestMarkdown || analysisSummaryMarkdown || analysisTraceMarkdown ? (
+                  <div className="mb-6 grid gap-3">
+                    <StageInlineContent title="Campaign Charter" value={analysisCharterMarkdown} />
+                    <StageInlineContent title="Todo Manifest" value={analysisTodoManifestMarkdown} />
+                    <StageInlineContent title="Campaign Summary" value={analysisSummaryMarkdown} />
+                    <StageInlineContent title="Trace Summary" value={analysisTraceMarkdown} tone="muted" />
+                  </div>
+                ) : null}
+
                 {Object.keys(asRecord(analysis.campaign_origin)).length ? (
                   <div>
                     <div className="mb-3 text-sm font-semibold text-foreground">Campaign Origin</div>
@@ -1243,6 +1376,12 @@ export function QuestStageSurface({
                     void openDocument(documentId)
                   }}
                 />
+                {analysisTraceActions.length ? (
+                  <div className="mt-6">
+                    <div className="mb-3 text-sm font-semibold text-foreground">Recent Trace</div>
+                    <StageTraceActions items={analysisTraceActions} />
+                  </div>
+                ) : null}
               </StageSection>
             )}
 

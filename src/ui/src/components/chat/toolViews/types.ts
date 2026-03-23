@@ -20,5 +20,6 @@ export interface ToolViewProps {
   active?: boolean
   panelMode?: 'tool' | 'terminal' | 'inline'
   chrome?: 'default' | 'bare'
+  preferBashTerminalRender?: boolean
   onLiveStateChange?: (state: BashExecLiveState) => void
 }

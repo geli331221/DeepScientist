@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { DocsPage } from '@/components/docs/DocsPage'
+import { OnboardingOverlay } from '@/components/onboarding/OnboardingOverlay'
 import { SettingsPage, type ConfigDocumentName } from '@/components/settings/SettingsPage'
 import type { ConnectorName } from '@/components/settings/connectorCatalog'
 import { I18nProvider, useI18n } from '@/lib/i18n'
@@ -11,14 +12,14 @@ function normalizeConfigName(value?: string): ConfigDocumentName | null {
   if (value === 'connector' || value === 'connectors') {
     return 'connectors'
   }
-  if (value && ['config', 'runners', 'plugins', 'mcp_servers'].includes(value)) {
+  if (value && ['config', 'runners', 'plugins', 'mcp_servers', 'baselines'].includes(value)) {
     return value as ConfigDocumentName
   }
   return null
 }
 
 function normalizeConnectorName(value?: string): ConnectorName | null {
-  if (value && ['qq', 'telegram', 'discord', 'slack', 'feishu', 'whatsapp', 'lingzhu'].includes(value)) {
+  if (value && ['qq', 'weixin', 'telegram', 'discord', 'slack', 'feishu', 'whatsapp', 'lingzhu'].includes(value)) {
     return value as ConnectorName
   }
   return null
@@ -82,7 +83,7 @@ function SettingsRoutePage() {
     <SettingsPage
       requestedConfigName={routeConfigName ?? state?.configName ?? null}
       requestedConnectorName={routeConnectorName}
-      onRequestedConfigConsumed={() => navigate('.', { replace: true, state: null })}
+      onRequestedConfigConsumed={state?.configName ? () => navigate('.', { replace: true, state: null }) : undefined}
       runtimeAddress={window.location.origin}
       locale={locale}
     />
@@ -91,17 +92,21 @@ function SettingsRoutePage() {
 
 function AppRoutes() {
   return (
-    <Routes>
-      <Route path="/" element={<LandingPage />} />
-      <Route path="/projects/:projectId" element={<ProjectWorkspacePage />} />
-      <Route path="/docs/*" element={<DocsRoutePage />} />
-      <Route path="/settings/connector" element={<SettingsRoutePage />} />
-      <Route path="/settings/connector/:connectorName" element={<SettingsRoutePage />} />
-      <Route path="/settings/connectors" element={<SettingsRoutePage />} />
-      <Route path="/settings" element={<SettingsRoutePage />} />
-      <Route path="/settings/:configName" element={<SettingsRoutePage />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/projects/:projectId" element={<ProjectWorkspacePage />} />
+        <Route path="/tutorial/demo/:scenarioId" element={<Navigate to="/projects/demo-memory" replace />} />
+        <Route path="/docs/*" element={<DocsRoutePage />} />
+        <Route path="/settings/connector" element={<SettingsRoutePage />} />
+        <Route path="/settings/connector/:connectorName" element={<SettingsRoutePage />} />
+        <Route path="/settings/connectors" element={<SettingsRoutePage />} />
+        <Route path="/settings" element={<SettingsRoutePage />} />
+        <Route path="/settings/:configName" element={<SettingsRoutePage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+      <OnboardingOverlay />
+    </>
   )
 }
 

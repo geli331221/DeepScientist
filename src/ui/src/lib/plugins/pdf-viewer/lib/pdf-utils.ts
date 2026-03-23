@@ -6,6 +6,7 @@
  * @module plugins/pdf-viewer/lib/pdf-utils
  */
 
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type { BoundingRect, PAGE_DIMENSIONS } from "../types";
 
 // ============================================================
@@ -14,14 +15,21 @@ import type { BoundingRect, PAGE_DIMENSIONS } from "../types";
 
 /**
  * PDF.js worker source URL
- * Served from `public/` to ensure the Worker version matches the installed `pdfjs-dist` version.
+ *
+ * Import the worker as a Vite asset so the final URL is emitted under `/ui/assets/...`
+ * instead of falling through the SPA router at the site root.
  */
-export const PDF_WORKER_SRC = "/pdf.worker.min.mjs?v=4.10.38";
+export const PDF_WORKER_SRC = pdfWorkerUrl;
 
 /**
  * CMap URL for PDF.js (for non-standard character encodings)
  */
-export const PDF_CMAP_URL = "/cmaps/";
+export const PDF_CMAP_URL: string | undefined = undefined;
+
+/**
+ * Whether PDF.js should treat CMap assets as packed.
+ */
+export const PDF_CMAP_PACKED = false;
 
 // ============================================================
 // Coordinate Conversion

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
+import os
 import time
 from hashlib import sha256
 from hmac import new as hmac_new
@@ -12,6 +14,17 @@ from urllib.request import Request
 
 from ..network import urlopen_with_proxy as urlopen
 from ..shared import append_jsonl, ensure_dir, utc_now
+from ..connector.weixin_support import (
+    WEIXIN_UPLOAD_MEDIA_FILE,
+    WEIXIN_UPLOAD_MEDIA_IMAGE,
+    WEIXIN_UPLOAD_MEDIA_VIDEO,
+    download_weixin_remote_attachment,
+    get_weixin_context_token,
+    normalize_weixin_base_url,
+    normalize_weixin_cdn_base_url,
+    send_weixin_message,
+    upload_local_media_to_weixin,
+)
 from .base import BaseConnectorBridge, BridgeWebhookResult
 
 
@@ -755,6 +768,440 @@ class QQConnectorBridge(BaseConnectorBridge):
             "expires_at": now + expires_in,
         }
         return access_token
+
+
+class WeixinSendItemsError(RuntimeError):
+    def __init__(self, message: str, *, message_ids: list[str], failed_index: int) -> None:
+        super().__init__(message)
+        self.message_ids = list(message_ids)
+        self.failed_index = int(failed_index)
+
+
+class WeixinConnectorBridge(BaseConnectorBridge):
+    name = "weixin"
+    _MEDIA_ITEM_TYPES = {2, 4, 5}
+    _MEDIA_SEND_INITIAL_DELAY_SECONDS = 0.8
+    _MEDIA_SEND_RETRY_DELAYS_SECONDS = (1.5, 3.0)
+
+    def deliver(self, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+        return self.deliver_direct(payload, config)
+
+    def deliver_direct(self, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+        token = self.read_secret(config, "bot_token", "bot_token_env")
+        if not token:
+            return None
+        target = self.extract_target(payload.get("conversation_id"))
+        to_user_id = str(target.get("chat_id") or "").strip()
+        if not to_user_id:
+            return {
+                "ok": False,
+                "queued": False,
+                "transport": "weixin-ilink",
+                "error": "Weixin outbound target is empty.",
+            }
+        connector_root = self._connector_root(config)
+        context_token = get_weixin_context_token(connector_root, to_user_id)
+        if not context_token:
+            return {
+                "ok": False,
+                "queued": False,
+                "transport": "weixin-ilink",
+                "error": f"Weixin context_token is missing for `{to_user_id}`. Wait for one inbound message first.",
+            }
+
+        native_attachments, residual_attachments, warnings = self._partition_native_attachments(payload.get("attachments"))
+        rendered_text = self.render_text(payload.get("text"), residual_attachments)
+        base_url = normalize_weixin_base_url(config.get("base_url"))
+        cdn_base_url = normalize_weixin_cdn_base_url(config.get("cdn_base_url"))
+        route_tag = str(config.get("route_tag") or "").strip() or None
+        timeout_ms = int(config.get("request_timeout_ms") or 15_000)
+        parts: list[dict[str, Any]] = []
+        temp_dir = ensure_dir(connector_root / "tmp")
+
+        try:
+            if native_attachments:
+                item_list: list[dict[str, Any]] = []
+                for index, attachment in enumerate(native_attachments, start=1):
+                    media_type, message_item, resolved_path = self._prepare_attachment_item(
+                        attachment=attachment,
+                        to_user_id=to_user_id,
+                        base_url=base_url,
+                        cdn_base_url=cdn_base_url,
+                        token=token,
+                        route_tag=route_tag,
+                        timeout_ms=timeout_ms,
+                        quest_root=payload.get("quest_root"),
+                        temp_dir=temp_dir,
+                    )
+                    item_list.append(message_item)
+                    parts.append(
+                        {
+                            "part": f"attachment_{index}",
+                            "ok": True,
+                            "media_type": media_type,
+                            "path": str(resolved_path),
+                        }
+                    )
+                if rendered_text:
+                    item_list.append(
+                        {
+                            "type": 1,
+                            "text_item": {"text": rendered_text},
+                        }
+                    )
+                    parts.append({"part": "text", "ok": True})
+                try:
+                    send_result = self._send_items(
+                        to_user_id=to_user_id,
+                        context_token=context_token,
+                        item_list=item_list,
+                        base_url=base_url,
+                        token=token,
+                        route_tag=route_tag,
+                        timeout_ms=timeout_ms,
+                    )
+                    message_ids = list(send_result.get("message_ids") or [])
+                    if not message_ids and send_result.get("message_id"):
+                        message_ids = [str(send_result.get("message_id"))]
+                    for index, part in enumerate(parts):
+                        if index < len(message_ids):
+                            part["message_id"] = message_ids[index]
+                except WeixinSendItemsError as exc:
+                    for index, part in enumerate(parts):
+                        if index < len(exc.message_ids):
+                            part["message_id"] = exc.message_ids[index]
+                        elif index == exc.failed_index:
+                            part["ok"] = False
+                            part["error"] = str(exc)
+                        elif index > exc.failed_index:
+                            part["ok"] = False
+                            part["error"] = "Skipped because an earlier Weixin send failed."
+                    raise
+            elif rendered_text:
+                parts.append(
+                    {
+                        "part": "text",
+                        **self._send_text(
+                            to_user_id=to_user_id,
+                            context_token=context_token,
+                            text=rendered_text,
+                            base_url=base_url,
+                            token=token,
+                            route_tag=route_tag,
+                            timeout_ms=timeout_ms,
+                        ),
+                    }
+                )
+            else:
+                warnings.append("Weixin outbound payload contained neither text nor sendable attachments.")
+        except Exception as exc:
+            return {
+                "ok": False,
+                "queued": False,
+                "transport": "weixin-ilink",
+                "parts": parts,
+                "warnings": warnings,
+                "error": str(exc),
+            }
+
+        succeeded = [item for item in parts if bool(item.get("ok"))]
+        failed = [item for item in parts if not bool(item.get("ok"))]
+        error_messages = [str(item.get("error") or "").strip() for item in failed if str(item.get("error") or "").strip()]
+        error_messages.extend(warnings)
+        last_success = succeeded[-1] if succeeded else {}
+        return {
+            "ok": bool(succeeded),
+            "queued": False,
+            "partial": bool(succeeded and (failed or warnings)),
+            "transport": "weixin-ilink",
+            "message_id": last_success.get("message_id"),
+            "parts": parts,
+            "warnings": warnings,
+            "error": "; ".join(error_messages) if error_messages else None,
+        }
+
+    @staticmethod
+    def _partition_native_attachments(
+        attachments: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+        native_items: list[dict[str, Any]] = []
+        residual_items: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for index, raw_item in enumerate(attachments if isinstance(attachments, list) else [], start=1):
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(raw_item)
+            if str(item.get("path_error") or "").strip():
+                warnings.append(f"attachment {index}: path resolution failed for {item.get('path')}")
+                continue
+            connector_delivery = item.get("connector_delivery") if isinstance(item.get("connector_delivery"), dict) else {}
+            weixin_delivery = connector_delivery.get("weixin") if isinstance(connector_delivery.get("weixin"), dict) else {}
+            media_kind = str(weixin_delivery.get("media_kind") or "").strip().lower()
+            if media_kind in {"image", "video", "file"}:
+                item["weixin_media_kind"] = media_kind
+            if WeixinConnectorBridge._has_sendable_attachment_reference(item):
+                native_items.append(item)
+                continue
+            if media_kind in {"image", "video", "file"}:
+                warnings.append(
+                    "attachment "
+                    f"{index}: Weixin native media delivery was requested but no usable path/url/source_path/output_path/artifact_path was provided."
+                )
+            residual_items.append(item)
+        return native_items, residual_items, warnings
+
+    @staticmethod
+    def _connector_root(config: dict[str, Any]) -> Path:
+        raw = str(config.get("_connector_root") or "").strip()
+        if raw:
+            return ensure_dir(Path(raw))
+        return ensure_dir(Path.cwd() / ".deepscientist-weixin")
+
+    @staticmethod
+    def _next_client_id() -> str:
+        return f"openclaw-weixin:{int(time.time() * 1000)}-{os.urandom(4).hex()}"
+
+    @classmethod
+    def _item_type(cls, item: dict[str, Any]) -> int:
+        return int(item.get("type") or 0)
+
+    @classmethod
+    def _is_media_item(cls, item: dict[str, Any]) -> bool:
+        return cls._item_type(item) in cls._MEDIA_ITEM_TYPES
+
+    @classmethod
+    def _retry_delays_for_item(cls, item: dict[str, Any], exc: Exception) -> tuple[float, ...]:
+        message = str(exc or "").strip().lower()
+        if "ret=-2" in message and cls._item_type(item) in {4, 5}:
+            return cls._MEDIA_SEND_RETRY_DELAYS_SECONDS
+        return ()
+
+    def _send_items(
+        self,
+        *,
+        to_user_id: str,
+        context_token: str,
+        item_list: list[dict[str, Any]],
+        base_url: str,
+        token: str,
+        route_tag: str | None,
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        if not item_list:
+            return {"ok": False, "error": "Weixin outbound item_list is empty."}
+        message_ids: list[str] = []
+        for item in item_list:
+            media_item = self._is_media_item(item)
+            if media_item:
+                time.sleep(self._MEDIA_SEND_INITIAL_DELAY_SECONDS)
+            retry_delays: tuple[float, ...] = ()
+            for attempt in range(1 + len(self._MEDIA_SEND_RETRY_DELAYS_SECONDS)):
+                client_id = self._next_client_id()
+                try:
+                    send_weixin_message(
+                        base_url=base_url,
+                        token=token,
+                        route_tag=route_tag,
+                        timeout_ms=timeout_ms,
+                        body={
+                            "msg": {
+                                "from_user_id": "",
+                                "to_user_id": to_user_id,
+                                "client_id": client_id,
+                                "message_type": 2,
+                                "message_state": 2,
+                                "context_token": context_token,
+                                "item_list": [item],
+                            }
+                        },
+                    )
+                    message_ids.append(client_id)
+                    break
+                except Exception as exc:
+                    retry_delays = self._retry_delays_for_item(item, exc)
+                    if attempt >= len(retry_delays):
+                        raise WeixinSendItemsError(
+                            str(exc),
+                            message_ids=message_ids,
+                            failed_index=len(message_ids),
+                        ) from exc
+                    time.sleep(retry_delays[attempt])
+        return {
+            "ok": True,
+            "message_id": message_ids[-1],
+            "message_ids": message_ids,
+        }
+
+    def _send_text(
+        self,
+        *,
+        to_user_id: str,
+        context_token: str,
+        text: str,
+        base_url: str,
+        token: str,
+        route_tag: str | None,
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        if not str(text or "").strip():
+            return {"ok": False, "error": "Weixin text content is empty."}
+        return self._send_items(
+            to_user_id=to_user_id,
+            context_token=context_token,
+            item_list=[
+                {
+                    "type": 1,
+                    "text_item": {"text": text},
+                }
+            ],
+            base_url=base_url,
+            token=token,
+            route_tag=route_tag,
+            timeout_ms=timeout_ms,
+        )
+
+    def _prepare_attachment_item(
+        self,
+        *,
+        attachment: dict[str, Any],
+        to_user_id: str,
+        base_url: str,
+        cdn_base_url: str,
+        token: str,
+        route_tag: str | None,
+        timeout_ms: int,
+        quest_root: Any,
+        temp_dir: Path,
+    ) -> tuple[str, dict[str, Any], Path]:
+        resolved_path = self._resolve_attachment_path(attachment=attachment, quest_root=quest_root, temp_dir=temp_dir)
+        media_type, message_item = self._build_media_item(
+            attachment=attachment,
+            file_path=resolved_path,
+            to_user_id=to_user_id,
+            base_url=base_url,
+            cdn_base_url=cdn_base_url,
+            token=token,
+            route_tag=route_tag,
+            timeout_ms=timeout_ms,
+        )
+        return media_type, message_item, resolved_path
+
+    def _build_media_item(
+        self,
+        *,
+        attachment: dict[str, Any],
+        file_path: Path,
+        to_user_id: str,
+        base_url: str,
+        cdn_base_url: str,
+        token: str,
+        route_tag: str | None,
+        timeout_ms: int,
+    ) -> tuple[str, dict[str, Any]]:
+        requested_media_kind = str(attachment.get("weixin_media_kind") or "").strip().lower()
+        content_type = str(attachment.get("content_type") or "").strip().lower()
+        mime_type = content_type or str(mimetypes.guess_type(file_path.name)[0] or "application/octet-stream").lower()
+        if requested_media_kind == "image" or (not requested_media_kind and mime_type.startswith("image/")):
+            uploaded = upload_local_media_to_weixin(
+                file_path=file_path,
+                to_user_id=to_user_id,
+                base_url=base_url,
+                cdn_base_url=cdn_base_url,
+                token=token,
+                media_type=WEIXIN_UPLOAD_MEDIA_IMAGE,
+                route_tag=route_tag,
+                timeout_ms=timeout_ms,
+            )
+            return "image", {
+                "type": 2,
+                "image_item": {
+                    "media": {
+                        "encrypt_query_param": uploaded["download_param"],
+                        "aes_key": uploaded["aes_key_base64"],
+                        "encrypt_type": 1,
+                    },
+                    "mid_size": uploaded["ciphertext_size"],
+                },
+            }
+        if requested_media_kind == "video" or (not requested_media_kind and mime_type.startswith("video/")):
+            uploaded = upload_local_media_to_weixin(
+                file_path=file_path,
+                to_user_id=to_user_id,
+                base_url=base_url,
+                cdn_base_url=cdn_base_url,
+                token=token,
+                media_type=WEIXIN_UPLOAD_MEDIA_VIDEO,
+                route_tag=route_tag,
+                timeout_ms=timeout_ms,
+            )
+            return "video", {
+                "type": 5,
+                "video_item": {
+                    "media": {
+                        "encrypt_query_param": uploaded["download_param"],
+                        "aes_key": uploaded["aes_key_base64"],
+                        "encrypt_type": 1,
+                    },
+                    "video_size": uploaded["ciphertext_size"],
+                },
+            }
+        uploaded = upload_local_media_to_weixin(
+            file_path=file_path,
+            to_user_id=to_user_id,
+            base_url=base_url,
+            cdn_base_url=cdn_base_url,
+            token=token,
+            media_type=WEIXIN_UPLOAD_MEDIA_FILE,
+            route_tag=route_tag,
+            timeout_ms=timeout_ms,
+        )
+        return "file", {
+            "type": 4,
+            "file_item": {
+                "media": {
+                    "encrypt_query_param": uploaded["download_param"],
+                    "aes_key": uploaded["aes_key_base64"],
+                    "encrypt_type": 1,
+                },
+                "file_name": file_path.name,
+                "len": str(uploaded["file_size"]),
+            },
+        }
+
+    @staticmethod
+    def _has_sendable_attachment_reference(attachment: dict[str, Any]) -> bool:
+        for key in ("path", "source_path", "output_path", "artifact_path", "url"):
+            if str(attachment.get(key) or "").strip():
+                return True
+        return False
+
+    def _resolve_attachment_path(self, *, attachment: dict[str, Any], quest_root: Any, temp_dir: Path) -> Path:
+        base_root = Path(str(quest_root or "").strip()) if str(quest_root or "").strip() else Path.cwd()
+        last_error: Exception | None = None
+        for key in ("path", "source_path", "output_path", "artifact_path"):
+            raw_path = str(attachment.get(key) or "").strip()
+            if not raw_path:
+                continue
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = (base_root / candidate).resolve()
+            else:
+                candidate = candidate.resolve()
+            if not candidate.exists():
+                last_error = FileNotFoundError(f"Weixin attachment {key} does not exist: {candidate}")
+                continue
+            if not candidate.is_file():
+                last_error = IsADirectoryError(f"Weixin attachment {key} is not a file: {candidate}")
+                continue
+            return candidate
+        raw_url = str(attachment.get("url") or "").strip()
+        if raw_url:
+            return download_weixin_remote_attachment(url=raw_url, dest_dir=temp_dir)
+        if last_error is not None:
+            raise last_error
+        raise FileNotFoundError(
+            "Weixin attachment requires a usable `path`, `source_path`, `output_path`, `artifact_path`, or `url`."
+        )
 
 
 class PassthroughConnectorBridge(BaseConnectorBridge):

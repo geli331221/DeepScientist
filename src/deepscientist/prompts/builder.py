@@ -283,6 +283,21 @@ class PromptBuilder:
                     "- qq_structured_delivery_rule: when you want native QQ markdown or native QQ image/file delivery, request it through artifact.interact(connector_hints=..., attachments=[...]) instead of inventing connector-specific inline tag syntax.",
                 ]
             )
+        elif connector == "weixin":
+            lines.extend(
+                [
+                    "- weixin_surface_rule: Weixin is a concise operator surface, not a full artifact browser.",
+                    "- weixin_default_mode: keep outbound replies concise, respectful, text-first, and progress-aware.",
+                    "- weixin_length_rule: for ordinary Weixin progress replies, normally use only 2 to 4 short sentences, or 3 very short bullets at most.",
+                    "- weixin_summary_first_rule: start with the user-facing conclusion, then the immediate meaning, then the next action.",
+                    "- weixin_progress_shape_rule: make the current task, the main difficulty or latest real progress, and the next concrete next step explicit whenever possible.",
+                    "- weixin_eta_rule: for important long-running phases, include a rough ETA or next check-in window when it is helpful and defensible.",
+                    "- weixin_internal_detail_rule: do not proactively dump file inventories, path lists, retry counters, or monitor-log style telemetry unless the user asked for them or they explain a real risk.",
+                    "- weixin_context_token_rule: reply continuity is managed by the runtime through `context_token`; do not invent your own reply token scheme.",
+                    "- weixin_media_rule: when you want native Weixin image, video, or file delivery, request it through artifact.interact(..., attachments=[...]) with `connector_delivery={'weixin': {'media_kind': ...}}` instead of inventing connector-specific inline tag syntax.",
+                    "- weixin_inbound_media_rule: inbound Weixin image, video, and file messages can arrive as quest-local attachments under `userfiles/weixin/...`; read those files when the user sent media.",
+                ]
+            )
         else:
             lines.append("- connector_media_rule: if the active surface is not QQ, keep using the general artifact interaction discipline for milestone delivery.")
 
@@ -687,6 +702,8 @@ class PromptBuilder:
             f"- delivery_mode: {'paper_required' if need_research_paper else 'algorithm_first'}",
             "- idea_stage_rule: every accepted idea submission should normally create a new branch/worktree and a new user-visible research node.",
             "- idea_draft_rule: before `artifact.submit_idea(...)`, first finish a concise durable Markdown draft for the chosen route; keep `idea.md` compact and `draft.md` richer.",
+            "- idea_literature_floor_rule: before writing or submitting a final selected idea, durably survey at least 5 and usually 5 to 10 related and usable papers; prioritize direct task-modeling or mechanism-neighbor work and only backfill with the closest adjacent translatable papers when necessary.",
+            "- idea_reference_rule: the final selected-idea draft should use one consistent standard citation format and include a `References` or `Bibliography` section for the survey-stage papers that actually shaped the motivation, mechanism, or claim boundary.",
             "- lineage_rule: normal idea routing uses exactly two lineage intents: `continue_line` creates a child of the current active branch; `branch_alternative` creates a sibling-like branch from the current branch's parent foundation.",
             "- revise_rule: `artifact.submit_idea(mode='revise', ...)` is maintenance-only compatibility for the same branch and should not be the default research-route mechanism.",
             "- post_main_result_rule: after every `artifact.record_main_experiment(...)`, first interpret the measured result and only then choose the next route.",
@@ -806,6 +823,8 @@ class PromptBuilder:
             "- idea_why_now_protocol: every serious idea candidate should answer why now or what changed, not just what the mechanism is",
             "- idea_balance_protocol: when the search space is not tiny, carry at least one conservative route and one higher-upside route into the final comparison",
             "- idea_pitch_protocol: before artifact.submit_idea(...), make the winner pass a two-sentence pitch, a strongest-objection check, and a concrete why-now statement",
+            "- idea_literature_floor_protocol: do not write or submit the final selected idea until the durable survey covers at least 5 and usually 5 to 10 related and usable papers; if fewer than 5 direct papers exist, document the shortage and use the closest adjacent translatable work instead of skipping the gate",
+            "- idea_reference_protocol: the final selected-idea draft should cite the survey-stage papers it actually uses and end with a standard-format `References` or `Bibliography` section",
             "- experiment_milestone_protocol: immediately after artifact.record_main_experiment(...) writes the durable result, send a threaded milestone that explains what was run, the main result, whether primary performance improved / worsened / stayed mixed versus the active baseline or best prior anchor, whether the route still looks promising, and the exact next step",
             "- analysis_milestone_protocol: immediately after a meaningful completed analysis-campaign synthesis or route-significant campaign checkpoint, send a threaded milestone that explains which campaign question or slice set just closed, whether the claim boundary became stronger / weaker / mixed, the main caveat, and the exact next route",
             "- paper_milestone_protocol: immediately after a meaningful paper or draft milestone such as selected outline, evidence-complete draft, major revision package, or bundle-ready paper, send a threaded milestone that explains what document milestone is now complete, which claims are now supportable, what still needs strengthening, and the exact next revision or execution route",
@@ -952,7 +971,16 @@ class PromptBuilder:
         attachment_root = active_workspace_root / "baselines" / "imported"
         if attachment_root.exists():
             attachments = [read_yaml(path, {}) for path in sorted(attachment_root.glob("*/attachment.yaml"))]
-            attachments = [item for item in attachments if isinstance(item, dict) and item]
+            attachments = [
+                item
+                for item in attachments
+                if isinstance(item, dict)
+                and item
+                and (
+                    not str(item.get("source_baseline_id") or "").strip()
+                    or not self.baseline_registry.is_deleted(str(item.get("source_baseline_id") or "").strip())
+                )
+            ]
             if attachments:
                 attachment = max(
                     attachments,

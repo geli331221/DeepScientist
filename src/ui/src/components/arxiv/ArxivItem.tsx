@@ -11,6 +11,8 @@ function formatError(code: string): string {
       return "Invalid ID";
     case "metadata_failed":
       return "Not found or metadata failed";
+    case "metadata_pending":
+      return "Metadata pending";
     case "download_failed":
       return "Download failed";
     case "already_exists":
@@ -53,18 +55,21 @@ export function ArxivItem({
 }: ArxivItemProps) {
   const isProcessing = paper.status === "processing";
   const isFailed = paper.status === "failed" || Boolean(errorCode);
+  const isMetadataPending = paper.metadataStatus === "pending";
   const canOpen = Boolean(paper.fileId) && paper.status === "ready";
   const title = paper.title || paper.displayName || paper.arxivId || "Untitled";
   const subtitle =
     paper.authors && paper.authors.length > 0
       ? paper.authors.join(", ")
+      : paper.metadataStatus === "pending"
+      ? `arXiv ${paper.arxivId} | Metadata pending`
       : paper.arxivId
       ? `arXiv ${paper.arxivId}`
       : "Metadata pending";
   const year = formatYear(paper.publishedAt);
   const statusClass = isFailed
     ? "bg-red-500/20 text-red-200"
-    : isProcessing
+    : isProcessing || isMetadataPending
     ? "bg-amber-500/20 text-amber-100"
     : "bg-emerald-500/20 text-emerald-100";
 
@@ -89,7 +94,13 @@ export function ArxivItem({
     .filter(Boolean)
     .join(" | ");
 
-  const compactStatusLabel = isFailed ? "Failed" : isProcessing ? "Processing" : "Ready";
+  const compactStatusLabel = isFailed
+    ? "Failed"
+    : isProcessing
+    ? "Processing"
+    : isMetadataPending
+    ? "Metadata"
+    : "Ready";
 
   return (
     <div onContextMenu={(e) => onContextMenu?.(paper, e)}>
@@ -116,16 +127,16 @@ export function ArxivItem({
         }}
       >
         {variant === "compact" ? (
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-start gap-2">
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium text-[var(--text-on-dark)]">
+              <div className="line-clamp-2 break-words text-sm font-medium leading-5 text-[var(--text-on-dark)]">
                 {title}
               </div>
               <div className="truncate text-[11px] text-[var(--text-muted-on-dark)]">
                 {compactMeta}
               </div>
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex shrink-0 items-center gap-1 pt-0.5">
               <span
                 className={cn(
                   "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide",

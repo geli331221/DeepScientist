@@ -12,7 +12,7 @@ from websockets.exceptions import ConnectionClosed
 from ..bridges.connectors import QQConnectorBridge
 from ..connector_runtime import format_conversation_id
 from ..network import urlopen_with_proxy as urlopen, websocket_connect_with_proxy as websocket_connect
-from ..qq_profiles import qq_profile_label
+from ..connector.qq_profiles import qq_profile_label
 from ..shared import read_json, utc_now, write_json
 
 

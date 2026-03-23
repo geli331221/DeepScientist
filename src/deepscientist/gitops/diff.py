@@ -299,45 +299,41 @@ def _collect_branch_state(repo: Path) -> dict[str, dict[str, Any]]:
             continue
         state = branch_state[branch_name]
         state.setdefault("branch", branch_name)
-        state["updated_at"] = record.get("updated_at") or state.get("updated_at")
-        if record.get("kind") == "run":
-            state["run_id"] = record.get("run_id") or state.get("run_id")
-            state["run_kind"] = record.get("run_kind") or state.get("run_kind")
+        artifact_sort_key = _artifact_record_sort_key(record, path)
+        current_artifact_sort_key = state.get("_latest_artifact_sort_key")
+        if current_artifact_sort_key is None or artifact_sort_key > current_artifact_sort_key:
+            state["_latest_artifact_sort_key"] = artifact_sort_key
+            state["updated_at"] = record.get("updated_at") or record.get("created_at") or state.get("updated_at")
         if record.get("idea_id"):
             state["idea_id"] = record.get("idea_id")
         if record.get("parent_branch"):
             state["parent_branch"] = record.get("parent_branch")
         if record.get("worktree_root"):
             state["worktree_root"] = record.get("worktree_root")
-        latest_metric = extract_latest_metric(record)
+        resolved_run_result = _resolve_run_result_payload(repo, record)
+        latest_metric = extract_latest_metric(resolved_run_result if record.get("kind") == "run" else record)
         if latest_metric is not None:
             state["latest_metric"] = latest_metric
         if record.get("kind") == "run":
-            state["latest_result"] = {
-                "run_id": record.get("run_id"),
-                "run_kind": record.get("run_kind"),
-                "status": record.get("status"),
-                "summary": record.get("summary") or record.get("reason"),
-                "verdict": record.get("verdict"),
-                "paths": record.get("paths") or {},
-                "details": record.get("details") or {},
-                "metrics_summary": record.get("metrics_summary") or {},
-                "metric_rows": record.get("metric_rows") or [],
-                "metric_contract": record.get("metric_contract") or {},
-                "baseline_ref": record.get("baseline_ref") or {},
-                "baseline_comparisons": record.get("baseline_comparisons") or {},
-                "progress_eval": record.get("progress_eval") or {},
-                "evaluation_summary": record.get("evaluation_summary")
-                or ((record.get("details") or {}) if isinstance(record.get("details"), dict) else {}).get("evaluation_summary")
-                or {},
-                "files_changed": record.get("files_changed") or [],
-                "evidence_paths": record.get("evidence_paths") or [],
-                "updated_at": record.get("updated_at"),
-            }
-            state["breakthrough"] = bool(((record.get("progress_eval") or {}).get("breakthrough")))
-            state["breakthrough_level"] = ((record.get("progress_eval") or {}).get("breakthrough_level"))
+            candidate_sort_key = _run_result_sort_key(record, resolved_run_result, path)
+            current_sort_key = state.get("_latest_result_sort_key")
+            if current_sort_key is None or candidate_sort_key > current_sort_key:
+                state["_latest_result_sort_key"] = candidate_sort_key
+                state["latest_result"] = resolved_run_result
+                state["run_id"] = resolved_run_result.get("run_id") or state.get("run_id")
+                state["run_kind"] = resolved_run_result.get("run_kind") or state.get("run_kind")
+                progress_eval = (
+                    resolved_run_result.get("progress_eval")
+                    if isinstance(resolved_run_result.get("progress_eval"), dict)
+                    else {}
+                )
+                state["breakthrough"] = bool(progress_eval.get("breakthrough"))
+                state["breakthrough_level"] = progress_eval.get("breakthrough_level")
         if record.get("summary") or record.get("message") or record.get("reason"):
-            state["latest_summary"] = record.get("summary") or record.get("message") or record.get("reason")
+            current_summary_sort_key = state.get("_latest_summary_sort_key")
+            if current_summary_sort_key is None or artifact_sort_key > current_summary_sort_key:
+                state["_latest_summary_sort_key"] = artifact_sort_key
+                state["latest_summary"] = record.get("summary") or record.get("message") or record.get("reason")
         state["recent_artifacts"].append(
             {
                 "artifact_id": record.get("artifact_id"),
@@ -346,10 +342,105 @@ def _collect_branch_state(repo: Path) -> dict[str, dict[str, Any]]:
                 "reason": record.get("reason"),
                 "updated_at": record.get("updated_at"),
                 "status": record.get("status"),
+                "_sort_key": artifact_sort_key,
             }
         )
+        state["recent_artifacts"].sort(key=lambda item: item.get("_sort_key") or ("", 0, ""))
         state["recent_artifacts"] = state["recent_artifacts"][-4:]
+    for state in branch_state.values():
+        latest_result = state.get("latest_result")
+        if isinstance(latest_result, dict):
+            result_metric = extract_latest_metric(latest_result)
+            if result_metric is not None:
+                state["latest_metric"] = result_metric
+        for item in state.get("recent_artifacts", []):
+            if isinstance(item, dict):
+                item.pop("_sort_key", None)
     return branch_state
+
+
+def _resolve_run_result_payload(repo: Path, record: dict[str, Any]) -> dict[str, Any]:
+    details = dict(record.get("details") or {}) if isinstance(record.get("details"), dict) else {}
+    paths = dict(record.get("paths") or {}) if isinstance(record.get("paths"), dict) else {}
+    result_payload: dict[str, Any] = {}
+    result_json_path = _resolve_result_json_path(repo, paths.get("result_json"))
+    if result_json_path and result_json_path.exists():
+        loaded = read_json(result_json_path, {})
+        if isinstance(loaded, dict):
+            result_payload = loaded
+
+    evaluation_summary = (
+        record.get("evaluation_summary")
+        or details.get("evaluation_summary")
+        or result_payload.get("evaluation_summary")
+        or {}
+    )
+    progress_eval = record.get("progress_eval")
+    if not isinstance(progress_eval, dict):
+        progress_eval = result_payload.get("progress_eval") if isinstance(result_payload.get("progress_eval"), dict) else {}
+
+    return {
+        "run_id": record.get("run_id") or result_payload.get("run_id"),
+        "run_kind": record.get("run_kind") or result_payload.get("run_kind"),
+        "status": record.get("status") or result_payload.get("status"),
+        "summary": record.get("summary") or record.get("reason") or result_payload.get("summary"),
+        "verdict": record.get("verdict") or result_payload.get("verdict"),
+        "paths": paths or (result_payload.get("paths") if isinstance(result_payload.get("paths"), dict) else {}) or {},
+        "details": details,
+        "metrics_summary": record.get("metrics_summary") or result_payload.get("metrics_summary") or {},
+        "metric_rows": record.get("metric_rows") or result_payload.get("metric_rows") or [],
+        "metric_contract": record.get("metric_contract") or result_payload.get("metric_contract") or {},
+        "baseline_ref": record.get("baseline_ref") or result_payload.get("baseline_ref") or {},
+        "baseline_comparisons": record.get("baseline_comparisons") or result_payload.get("baseline_comparisons") or {},
+        "progress_eval": progress_eval or {},
+        "evaluation_summary": evaluation_summary or {},
+        "files_changed": record.get("files_changed") or result_payload.get("files_changed") or [],
+        "evidence_paths": record.get("evidence_paths") or result_payload.get("evidence_paths") or [],
+        "updated_at": record.get("updated_at") or result_payload.get("updated_at"),
+    }
+
+
+def _resolve_result_json_path(repo: Path, raw_path: object) -> Path | None:
+    normalized = str(raw_path or "").strip()
+    if not normalized:
+        return None
+    candidate = Path(normalized).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return repo / candidate
+
+
+def _artifact_record_sort_key(record: dict[str, Any], path: Path) -> tuple[str, int, str]:
+    updated_at = str(record.get("updated_at") or record.get("created_at") or "").strip()
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return (updated_at, mtime_ns, str(path))
+
+
+def _run_result_sort_key(record: dict[str, Any], payload: dict[str, Any], path: Path) -> tuple[int, str, int, str]:
+    quality = 0
+    if extract_latest_metric(payload):
+        quality += 8
+    if payload.get("baseline_comparisons"):
+        quality += 4
+    if payload.get("progress_eval"):
+        quality += 4
+    if payload.get("metrics_summary"):
+        quality += 3
+    if payload.get("metric_rows"):
+        quality += 3
+    if payload.get("verdict"):
+        quality += 2
+    paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+    if paths.get("result_json"):
+        quality += 2
+    if paths.get("run_md"):
+        quality += 1
+    updated_at = str(payload.get("updated_at") or record.get("updated_at") or record.get("created_at") or "")
+    _, mtime_ns, path_str = _artifact_record_sort_key(record, path)
+    return (quality, updated_at, mtime_ns, path_str)
 
 
 def _classify_ref(ref: str, state: dict[str, Any]) -> dict[str, str]:

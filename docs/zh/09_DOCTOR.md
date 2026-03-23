@@ -10,21 +10,35 @@
    npm install -g @researai/deepscientist
    ```
 
-2. 先直接尝试启动：
+2. 先确保 Codex 已安装并完成认证：
+
+   ```bash
+   codex --login
+   ```
+
+   如果 `codex` 缺失，请显式修复：
+
+   ```bash
+   npm install -g @openai/codex
+   ```
+
+   如果你的 Codex CLI 版本没有 `--login`，就运行 `codex` 并在交互式界面里完成认证。
+
+3. 先直接尝试启动：
 
    ```bash
    ds
    ```
 
-3. 如果启动失败，或者看起来不正常，再运行：
+4. 如果启动失败，或者看起来不正常，再运行：
 
    ```bash
    ds doctor
    ```
 
-4. 从上到下阅读诊断结果，优先修复失败项。
+5. 从上到下阅读诊断结果，优先修复失败项。
 
-5. 修完后重新运行 `ds doctor`，直到检查通过，再运行 `ds`。
+6. 修完后重新运行 `ds doctor`，直到检查通过，再运行 `ds`。
 
 ## `ds doctor` 会检查什么
 
@@ -49,15 +63,37 @@
 npm install -g @researai/deepscientist
 ```
 
+如果装完以后 `codex` 仍然不可用，请显式安装：
+
+```bash
+npm install -g @openai/codex
+```
+
 ### 已安装 Codex，但还没有登录
 
 运行：
 
 ```bash
-codex
+codex --login
 ```
 
+如果你的 Codex CLI 版本没有 `--login`，就运行 `codex` 并在交互式界面里完成认证。
+
 先完成一次登录，再重新执行 `ds doctor`。
+
+### 当前配置的 Codex 模型不可用
+
+DeepScientist 会在启动前强制做一次真实的 Codex hello 探测。当前版本里，这个探测会先使用：
+
+```text
+~/DeepScientist/config/runners.yaml
+```
+
+里配置的 runner 模型，默认值是 `gpt-5.4`。如果你的 Codex 账号或本地 CLI 配置不能访问这个模型，DeepScientist 现在会自动重试当前 Codex 默认模型，并把后续运行持久化为 `model: inherit`。如果你仍然想指定某个具体模型，再手动改配置并重新执行：
+
+```bash
+ds doctor
+```
 
 ### 没有安装 `uv`
 
