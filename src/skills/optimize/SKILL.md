@@ -54,8 +54,8 @@ Before broad optimization search or candidate management becomes substantial, ma
 
 Use:
 
-- `references/optimize-checklist-template.md`
-- `references/candidate-board-template.md`
+- the integrated `optimize checklist template` appendix section
+- the integrated `candidate board template` appendix section
 
 `OPTIMIZE_CHECKLIST.md` is the execution control surface.
 It should track:
@@ -81,52 +81,321 @@ It should track:
 - observed result
 - promote / archive recommendation
 
-## Reference routing
+## Required MCP-driven workflow
 
-Use the optimize references deliberately instead of opening them all at once.
+Treat this as the concrete optimize workflow. Do not skip these steps just because the quest is algorithm-first.
 
-- `references/method-brief-template.md`
-  - use when a candidate brief is still under-specified
-  - use before `submission_mode='candidate'` creation
+### 1. Recover the optimization state first
 
-- `references/brief-shaping-playbook.md`
-  - use when a direction is still fuzzy and needs to be turned into a ranking-ready candidate brief
-  - use before widening the slate with more half-specified variants
-  - use to preserve the "clarify -> compare approaches -> recommend -> self-check" discipline for candidate briefs
+At the start of each meaningful optimize pass, use this order unless a stronger local reason exists:
 
-- `references/candidate-ranking-template.md`
-  - use when several candidate briefs compete for promotion
-  - use before promoting briefs into durable lines
+1. `artifact.get_optimization_frontier(...)`
+2. `memory.list_recent(scope='quest', limit=5)`
+3. `memory.search(...)`
+4. `artifact.get_quest_state(detail='summary')`
+5. `artifact.read_quest_documents(...)` when exact durable wording matters
 
-- `references/candidate-board-template.md`
-  - use whenever the candidate pool becomes larger than a few items
-  - use to keep brief-level and implementation-level candidates visible in one place
+Do not create new candidates before the frontier, recent optimization lessons, and current runtime refs are checked.
+If the frontier is missing or obviously stale, recover that state before proposing more work.
 
-- `references/optimize-checklist-template.md`
-  - use at the start of each meaningful optimize pass
-  - use whenever the frontier or run queue changed materially
+### 2. Shape candidate briefs before branch promotion
 
-- `references/frontier-review-template.md`
-  - use when the next route is unclear
-  - use after a measured result, after repeated failures, or before fusion
+When the next direction is still fuzzy, do not jump straight into code or branch creation.
+First turn the direction into a compact candidate brief.
 
-- `references/codegen-route-playbook.md`
-  - use before choosing between brief-only, stepwise generation, diff patching, or full rewrite
+The brief-shaping sequence is:
 
-- `references/debug-response-template.md`
-  - use when a candidate failed and still looks strategically valuable
+1. clarify the bottleneck, constraints, and comparability boundary
+2. identify the incumbent or baseline that this brief must beat or complement
+3. generate a small differentiated slate, usually `2-3` serious approaches
+4. compare them on one shared surface
+5. recommend exactly one lead brief
+6. self-check the recommended brief before submission
 
-- `references/fusion-playbook.md`
-  - use when at least two lines have complementary strengths and fusion is genuinely under consideration
+Every serious brief should answer:
 
-- `references/plateau-response-playbook.md`
-  - use when a line keeps producing non-improving results
+- bottleneck
+- why_current_line_is_limited
+- mechanism
+- why_now
+- keep_unchanged
+- expected_gain
+- implementation_surface
+- main_risks
 
-- `references/optimization-memory-template.md`
-  - use when writing reusable success / failure / fusion lessons back into memory
+The durable call for this step is usually:
 
-- `references/prompt-patterns.md`
-  - use when shaping or revising optimize sub-prompts so they remain stable and structurally consistent
+- `artifact.submit_idea(mode='create', submission_mode='candidate', ...)`
+
+Use `idea` when the mechanism family itself is still unresolved.
+Use `optimize` when the family is already chosen and the work is now branchless brief shaping, ranking, or within-line search.
+
+### 3. Rank candidate briefs on one explicit surface
+
+Before promoting a line, compare the serious briefs on one shared ranking surface.
+At minimum evaluate:
+
+- expected information gain
+- feasibility in current repo
+- comparability against baseline
+- implementation surface
+- novelty or distinctiveness
+- family diversity
+- change-layer diversity
+- incumbent-improvement potential
+- failure risk
+
+Then state:
+
+- winner justification
+- non-winner defer / reject reasons
+- promotion cap: how many lines should actually be promoted now
+
+Do not promote every plausible brief.
+Default rule: promote only `1-3` candidate briefs, and usually fewer.
+
+The durable call for this step is one of:
+
+- `artifact.submit_idea(mode='create', submission_mode='line', source_candidate_id=..., ...)`
+- `artifact.record(payload={'kind': 'decision', 'action': 'branch'|'continue'|'stop', ...})`
+
+### 4. Hand off promoted lines into experiment cleanly
+
+Once a brief is promoted, the next main work belongs to `experiment`, not to vague optimize chatter.
+Before substantial implementation or compute:
+
+- activate or confirm the intended durable line
+- update `OPTIMIZE_CHECKLIST.md`
+- update `CANDIDATE_BOARD.md`
+- create or revise `PLAN.md`
+- create or revise `CHECKLIST.md`
+- define the smoke queue and full-eval queue explicitly
+
+Then hand off into `experiment` for:
+
+- one clean implementation pass
+- one bounded smoke or pilot run
+- one real measured main run
+
+Do not keep reshaping the method after the run contract is already concrete.
+
+### 5. Record every meaningful result durably
+
+Use these artifact forms consistently:
+
+- candidate brief:
+  - `artifact.submit_idea(..., submission_mode='candidate')`
+- durable optimization line:
+  - `artifact.submit_idea(..., submission_mode='line')`
+- implementation-level candidate attempt inside one line:
+  - `artifact.record(payload={'kind': 'report', 'report_type': 'optimization_candidate', ...})`
+- real measured main result:
+  - `artifact.record_main_experiment(...)`
+- route change after the result:
+  - `artifact.record(payload={'kind': 'decision', 'action': 'iterate'|'branch'|'continue'|'stop', ...})`
+
+Do not treat chat summaries as substitutes for these durable records.
+
+### 6. Manage process lifecycle explicitly
+
+Optimize uses the same long-run process discipline as `experiment`.
+
+- Use `bash_exec` for smoke checks, quick validations, and long runs.
+- Before launching a new run, inspect current managed sessions first.
+- Do not start a duplicate process for the same purpose if a valid live session already exists.
+- Use bounded smoke before long runs unless direct quick validation is already cheap and equally informative.
+- Use `bash_exec(mode='detach', ...)` for long runs and monitor with `list/read/await`.
+- Read logs before retrying a failed or suspicious run; do not relaunch blindly.
+- Kill only on explicit invalidity, supersession, or checked no-progress conditions.
+- After pause, resume, or daemon recovery, recover session state before spawning new runs.
+
+### 7. Route from evidence, not from momentum
+
+After every real measured result:
+
+1. refresh the frontier
+2. compare the result against the incumbent and backlog
+3. choose exactly one dominant next action:
+   - explore
+   - exploit
+   - fusion
+   - debug
+   - stop
+4. record that route durably
+
+Do not treat one candidate creation, one smoke pass, or one detached launch as stage completion.
+
+## Integrated templates and playbooks
+
+Use the following integrated structures directly inside this skill. They replace the old optimize reference files conceptually, even if those files still exist on disk.
+
+### Candidate brief template
+
+Every serious candidate brief should include:
+
+- title
+- bottleneck
+- why_current_line_is_limited
+- mechanism
+- mechanism_family
+- change_layer: `Tier1` / `Tier2` / `Tier3`
+- source_lens
+- keep_unchanged
+- expected_gain
+- implementation_surface
+- risks
+- foundation
+- promote_now
+- next_target
+
+### Brief-shaping playbook
+
+Use this when a candidate direction is still fuzzy and needs to become a ranking-ready brief.
+
+- clarify the concrete bottleneck before widening
+- resolve the evaluation or comparability boundary
+- identify the main hard constraint
+- identify the current incumbent
+- generate only a small differentiated slate
+- compare on one shared surface
+- recommend exactly one lead brief
+- self-check for ambiguity, overlap, and weak justification
+
+### Candidate ranking template
+
+When several briefs compete, produce:
+
+- candidate set
+- ranking scope
+- comparison surface
+- ranked candidates with score summary, why each ranks there, and promote / hold / reject
+- winner justification
+- non-winner notes
+- promotion cap
+
+### Candidate board template
+
+`CANDIDATE_BOARD.md` should expose at least these columns:
+
+- candidate id
+- level: `brief` or `implementation`
+- parent
+- strategy
+- status
+- expected gain
+- observed result
+- promote / archive recommendation
+
+### Optimize checklist template
+
+`OPTIMIZE_CHECKLIST.md` should track at least:
+
+- frontier has been refreshed
+- primary optimize submode chosen
+- current route mode chosen
+- recent optimization memory reviewed
+- brief slate checked for family diversity
+- candidate briefs updated or confirmed
+- candidate ranking updated
+- promotion decision made
+- current implementation pool recorded
+- smoke queue defined
+- full-eval queue defined
+- failures classified
+- stagnation check performed
+- fusion eligibility checked
+- next concrete action written
+
+### Frontier review template
+
+Whenever route choice is unclear, write down:
+
+- current frontier
+- evidence summary
+- route choice
+- active optimize submode
+- immediate next action
+
+### Code-generation route playbook
+
+Choose one route deliberately:
+
+- brief-only when the direction is still unclear
+- stepwise generation for first substantial implementation of a new line
+- diff / patch generation for improve / exploit / debug / most fusion work
+- full rewrite only when the current implementation is structurally broken or mismatched
+
+Do not jump to a rewrite merely because one local patch failed.
+
+### Debug response template
+
+When a candidate fails but still looks strategically valuable, record:
+
+- error
+- retrieved memory
+- root cause
+- minimal fix
+- keep unchanged
+- next check
+- archive threshold
+
+### Fusion playbook
+
+Before opening a fusion candidate, answer:
+
+- what exactly is being fused?
+- why are the source strengths complementary rather than redundant?
+- what remains unchanged for comparability?
+- what bounded evidence would prove the fusion worthwhile?
+- what bounded first validation step should run before any broad rollout?
+
+Do not fuse two weak lines or two same-mechanism lines under different names.
+
+### Optimization memory template
+
+When writing reusable optimization lessons, capture:
+
+- type
+- context
+- observation
+- why it matters
+- retrieval hint
+- reuse hint
+
+### Plateau response playbook
+
+If one line keeps producing non-improving results:
+
+1. state that the line is plateauing
+2. identify the most likely root cause
+3. choose one larger route change:
+   - widen search
+   - promote a stronger alternative
+   - fuse
+   - debug
+   - stop
+4. record one explicit non-repeat rule
+
+Do not hide plateau under a sequence of tiny "one more tweak" loops.
+
+### Prompt patterns worth preserving
+
+For candidate-brief, improve, fusion, and debug prompts, preserve:
+
+- introduction
+- task description
+- memory
+- previous solution or previous line
+- instructions
+- explicit response format
+
+Preserve these reasoning contracts whenever possible:
+
+- WHAT is changing?
+- WHY is the current line limited?
+- HOW should the change address the limitation?
+- KEEP UNCHANGED
+- NEXT ACTION
 
 ## Non-negotiable rules
 
@@ -134,7 +403,7 @@ Use the optimize references deliberately instead of opening them all at once.
 - Do not create a new Git branch/worktree for every implementation-level candidate.
 - Use `artifact.submit_idea(..., submission_mode='candidate')` for candidate briefs that should be ranked before promotion.
 - Use `artifact.submit_idea(..., submission_mode='line')` only for directions that deserve a durable optimization line and branch/worktree.
-- Use `artifact.record(kind='report', report_type='optimization_candidate', ...)` for implementation-level candidate attempts inside one durable line.
+- Use `artifact.record(payload={'kind': 'report', 'report_type': 'optimization_candidate', ...})` for implementation-level candidate attempts inside one durable line.
 - Before deciding the next route, call `artifact.get_optimization_frontier(...)` when available and use it as the primary optimization-state summary.
 - Keep all major optimization successes and failures durable through artifacts and memory.
 - Do not drift into paper-outline, bundle, or finalize work by default while this stage is active.
@@ -171,7 +440,7 @@ Use these three object levels consistently:
    This opens a real branch/worktree and becomes a formal optimization path.
 
 3. implementation-level candidate attempt
-   `artifact.record(kind='report', report_type='optimization_candidate', ...)`
+   `artifact.record(payload={'kind': 'report', 'report_type': 'optimization_candidate', ...})`
    This is a within-line attempt such as one patch, one smoke candidate, one debug candidate, or one fusion candidate.
 
 ## Recommended workflow
@@ -255,8 +524,8 @@ Good candidate-brief fields include:
 
 Do not promote every candidate automatically.
 
-Use `references/method-brief-template.md` for the minimum acceptable candidate-brief structure.
-Use `references/brief-shaping-playbook.md` when the brief is still too vague, too implementation-first, or too collapsed onto one familiar mechanism.
+Use the integrated `method brief template` section for the minimum acceptable candidate-brief structure.
+Use the integrated `brief shaping playbook` section when the brief is still too vague, too implementation-first, or too collapsed onto one familiar mechanism.
 
 Candidate briefs should explicitly answer:
 
@@ -340,7 +609,7 @@ Promotion should use:
 `artifact.submit_idea(mode='create', submission_mode='line', source_candidate_id=..., ...)`
 
 When several candidate briefs are plausible, rank them explicitly before promotion.
-Use `references/candidate-ranking-template.md` for the minimum acceptable ranking record.
+Use the integrated `candidate ranking template` section for the minimum acceptable ranking record.
 
 Default promotion rule:
 
@@ -395,7 +664,7 @@ Prefer these route meanings:
 - `debug`: rescue a candidate or line blocked by a concrete failure mode
 - `stop`: the current frontier is saturated or the remaining routes are not justified
 
-Use `references/frontier-review-template.md` when the next route is unclear.
+Use the integrated `frontier review template` section when the next route is unclear.
 
 Interpret frontier state with these default heuristics:
 
@@ -564,7 +833,7 @@ Write at least one quest memory card when you learn something reusable, such as:
 - a fusion lesson
 - a reason a candidate should not be retried
 
-Use `references/optimization-memory-template.md` for the minimum acceptable memory-card shape.
+Use the integrated `optimization memory template` section for the minimum acceptable memory-card shape.
 
 Do not write generic "we tried some optimization" memory cards.
 Each card should be retrieval-friendly and decision-relevant.
@@ -575,8 +844,8 @@ Use:
 
 - `artifact.submit_idea(..., submission_mode='candidate')` for candidate briefs
 - `artifact.submit_idea(..., submission_mode='line')` for durable promoted lines
-- `artifact.record(kind='report', report_type='optimization_candidate', ...)` for within-line attempts
-- `artifact.record(kind='decision', action='iterate'|'branch'|'continue'|'stop', ...)` for route changes
+- `artifact.record(payload={'kind': 'report', 'report_type': 'optimization_candidate', ...})` for within-line attempts
+- `artifact.record(payload={'kind': 'decision', 'action': 'iterate'|'branch'|'continue'|'stop', ...})` for route changes
 - `artifact.record_main_experiment(...)` for real measured line results
 
 When the optimize pass is about ranking or promotion, also record one durable decision explaining:
@@ -652,7 +921,7 @@ Prefer:
 4. full rewrite
    - only when the current implementation is too broken or too structurally mismatched for diff patching to remain safe
 
-Use `references/codegen-route-playbook.md` before committing to a larger rewrite.
+Use the integrated `codegen route playbook` section before committing to a larger rewrite.
 
 ## Debug protocol
 
@@ -676,7 +945,7 @@ Good debug prompts should make these explicit:
 - the minimal fix
 - what must remain unchanged
 
-Use `references/debug-response-template.md` for the minimum acceptable debug response shape.
+Use the integrated `debug response template` section for the minimum acceptable debug response shape.
 
 Archive rather than debug when:
 
@@ -696,7 +965,7 @@ Before opening a fusion candidate:
 - define what remains unchanged for comparability
 - define the bounded evidence that would prove the fusion was worthwhile
 
-Use `references/fusion-playbook.md` before launching cross-line fusion.
+Use the integrated `fusion playbook` section before launching cross-line fusion.
 
 Do not fuse:
 
@@ -725,7 +994,7 @@ And preserve these recurring reasoning contracts:
 - KEEP UNCHANGED
 - explicit next action
 
-Use `references/prompt-patterns.md` as the canonical optimization prompt crib sheet.
+Use the integrated `prompt patterns` section as the canonical optimization prompt crib sheet.
 
 ## Plateau and fusion protocol
 
@@ -737,8 +1006,8 @@ If one line shows repeated non-improving results:
 - record the stagnation explicitly
 - either widen the search or fuse with another line
 
-Use `references/fusion-playbook.md` before launching cross-line fusion.
-Use `references/plateau-response-playbook.md` when deciding how to respond to repeated non-improving results.
+Use the integrated `fusion playbook` section before launching cross-line fusion.
+Use the integrated `plateau response playbook` section when deciding how to respond to repeated non-improving results.
 
 Good fusion candidates usually satisfy both:
 
@@ -830,3 +1099,545 @@ This stage is complete only when one of these is durably true:
 - the optimization frontier says stop and that stop decision is durably recorded
 
 Do not treat one candidate creation or one smoke pass as stage completion.
+
+## Integrated reference appendix
+
+This appendix inlines the former `optimize/references/*.md` material so the skill remains self-contained.
+
+### brief-shaping-playbook.md
+
+# Brief Shaping Playbook
+
+Use this reference when a candidate direction is still fuzzy and needs to become a structured, ranking-ready brief.
+
+This playbook borrows the useful part of product-style brainstorming without importing a full software-spec workflow.
+The goal is not a long design document.
+The goal is a compact candidate brief that is clear enough to compare, rank, and either submit as `submission_mode='candidate'` or reject.
+
+## 1. Clarify before widening
+
+Before generating more variants, resolve the minimum ambiguity around:
+
+- the concrete bottleneck
+- the evaluation or comparability boundary
+- the main hard constraint: data, metric, compute, latency, memory, interface, or training budget
+- the current incumbent or baseline that this brief must beat or complement
+
+If one unknown would materially change every candidate, clarify it first instead of generating a noisy slate.
+Prefer one question at a time when clarification is genuinely needed.
+If the answer is already available from durable state, use that instead of asking.
+
+## 2. Generate a small differentiated slate
+
+Default target: `2-3` serious approaches.
+
+The slate should usually include:
+
+- one incumbent-deepening refinement
+- one orthogonal mechanism
+- one broader shift candidate when justified
+
+Do not produce several renamed variants of the same mechanism family.
+If two variants differ only by parameter choice or patch detail, keep only the sharper one.
+
+For each candidate, write:
+
+- bottleneck
+- why_current_line_is_limited
+- mechanism
+- why_now
+- keep_unchanged
+- expected_gain
+- main_risks
+
+## 3. Compare on one shared surface
+
+Before recommending a winner, compare the serious candidates on the same dimensions:
+
+- expected upside
+- comparability safety
+- implementation surface
+- mechanism distinctness
+- failure risk
+- reason this route is better now than the nearby alternatives
+
+Do not let each candidate justify itself with a different scoring story.
+Use one comparison surface so ranking is auditable.
+
+## 4. Recommend exactly one lead brief
+
+After comparison, recommend one lead brief and explain:
+
+- why it is the best next move now
+- why the main alternatives are deferred instead of promoted
+- what evidence would quickly disconfirm the lead brief
+
+Do not say "all are promising" and promote everything.
+If the slate is still too close to call, return to widening once or narrow the slate further.
+
+## 5. Self-check before submission
+
+Before calling `artifact.submit_idea(..., submission_mode='candidate', ...)`, check:
+
+- Is the bottleneck concrete rather than generic?
+- Does `why_current_line_is_limited` explain a real gap instead of restating the mechanism?
+- Does `why_now` explain what changed in evidence, failure pattern, or frontier state?
+- Is the comparability boundary explicit?
+- Is the recommendation based on tradeoffs rather than implementation convenience?
+- Would the brief still make sense if handed to another agent with no chat context?
+
+If any answer is no, refine the brief before submission.
+
+## 6. Output shape
+
+A good final brief package is short and structured:
+
+1. brief title
+2. one-paragraph bottleneck and constraint summary
+3. a `2-3` candidate comparison table or bullet slate
+4. recommended brief with tradeoff summary
+5. self-check outcome
+6. fields ready for the integrated `method-brief-template.md` section
+
+Keep it compact.
+This is a shaping pass for optimization candidates, not a paper draft or engineering spec.
+
+### candidate-board-template.md
+
+# CANDIDATE_BOARD.md
+
+| Candidate ID | Level | Parent | Strategy | Status | Expected Gain | Observed Result | Promote / Archive |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| cand-001 | brief | current-head | explore | proposed | Better tail accuracy | n/a | pending |
+| cand-002 | impl | cand-001 | exploit | smoke_passed | Faster convergence | smoke ok | consider promote |
+
+Notes:
+
+- `Level` should be `brief` or `implementation`
+- `Parent` may be a branch, idea id, run id, or candidate id
+- `Strategy` should usually be one of `explore`, `exploit`, `fusion`, `debug`
+- `Promote / Archive` should be a clear recommendation, not an empty placeholder
+
+### candidate-ranking-template.md
+
+# Candidate Ranking Template
+
+## Candidate Set
+
+- Candidate IDs:
+- Ranking scope:
+- Comparison surface:
+
+## Criteria
+
+- expected information gain
+- feasibility in current repo
+- comparability against baseline
+- implementation surface
+- likely novelty or distinctiveness
+- risk of redundant overlap
+- incumbent-improvement potential
+- distinctness from other candidates
+- mechanism-family diversity
+- change-layer diversity
+
+## Ranked Candidates
+
+1. `candidate_id`
+   Score summary:
+   Why it ranks here:
+   Promote / hold / reject:
+
+2. `candidate_id`
+   Score summary:
+   Why it ranks here:
+   Promote / hold / reject:
+
+3. `candidate_id`
+   Score summary:
+   Why it ranks here:
+   Promote / hold / reject:
+
+## Winner Justification
+
+Why the selected candidate should become a durable line now.
+
+## Non-Winner Notes
+
+Why the other candidates were deferred, fused, or rejected.
+
+## Promotion Cap
+
+- how many candidates should be promoted now:
+- why more promotion would dilute the frontier:
+- same-family cap override justification:
+
+### codegen-route-playbook.md
+
+# Codegen Route Playbook
+
+Choose the code-generation route deliberately.
+
+## Use brief-only
+
+Use no-code candidate briefs when:
+
+- the direction is still underspecified
+- multiple distinct directions still need ranking
+- a new line should not be promoted yet
+
+## Use stepwise generation
+
+Prefer stepwise generation when:
+
+- a new durable line is being implemented for the first time
+- the change spans data processing, model design, and training/evaluation
+- a modular decomposition will reduce large integrated errors
+- a plan -> refine -> implement sequence is safer than one monolithic edit
+
+## Use diff / patch generation
+
+Prefer diff / patch generation when:
+
+- a strong current implementation already exists
+- the current change is local enough to preserve most of the line
+- the task is improve, exploit, debug, or most fusion work
+- the desired change can be described as a bounded delta from the current solution
+
+## Use full rewrite
+
+Use a full rewrite only when:
+
+- the existing implementation is structurally broken
+- the desired architecture no longer matches the current codebase shape
+- diff patching would be more fragile than replacement
+
+Do not jump to a rewrite merely because one local patch failed.
+
+## Response shape
+
+For non-trivial codegen work, prefer this shape:
+
+1. short plan
+2. bounded implementation surface
+3. keep-unchanged contract
+4. validation step
+
+Do not go from a vague idea directly into a large patch with no intermediate plan.
+
+### debug-response-template.md
+
+# Debug Response Template
+
+## Error
+
+What concrete error or failure occurred?
+
+## Retrieved Memory
+
+What similar failure pattern or repair lesson should be reused before changing code?
+
+## Root Cause
+
+What is the most likely underlying cause?
+
+## Minimal Fix
+
+What is the smallest plausible fix?
+
+## Keep Unchanged
+
+What parts of the line must remain unchanged for comparability and stability?
+
+## Next Check
+
+What bounded smoke or validation check should confirm the fix?
+
+## Archive Threshold
+
+What outcome would prove this candidate should be archived instead of debugged again?
+
+### frontier-review-template.md
+
+# Frontier Review Template
+
+## Current Frontier
+
+- mode:
+- best branch:
+- best run:
+- stagnant branches:
+- candidate backlog:
+- fusion candidates:
+
+## Evidence Summary
+
+- strongest support:
+- strongest contradiction:
+- biggest unresolved risk:
+
+## Route Choice
+
+- explore / exploit / fusion / debug / stop:
+- why this is the best next move:
+
+## Active Optimize Submode
+
+- brief / rank / seed / loop / fusion / debug:
+- why this submode is dominant now:
+
+## Immediate Next Action
+
+- exact next step:
+- what result will trigger another frontier review:
+- what result would force a different mode:
+
+### fusion-playbook.md
+
+# Fusion Playbook
+
+Use fusion only when:
+
+- at least two lines have real strengths
+- the strengths are complementary
+- one line alone is no longer improving fast enough
+
+Before fusion, write down:
+
+- source line A:
+  strongest mechanism:
+  strongest evidence:
+  main weakness:
+  what must survive the fusion:
+
+- source line B:
+  strongest mechanism:
+  strongest evidence:
+  main weakness:
+  what must survive the fusion:
+
+Then answer:
+
+- what exactly is being fused?
+- why does this combination address a real bottleneck?
+- why are the source strengths complementary rather than redundant?
+- what remains unchanged for comparability?
+- what evidence would prove the fusion was worth it?
+- what bounded first validation step should run before any broad rollout?
+
+Do not fuse:
+
+- two lines with the same mechanism under different names
+- two weak lines with no clear strengths
+- merely because multiple branches exist
+
+### method-brief-template.md
+
+# Method Brief Template
+
+## Title
+
+One short line naming the candidate direction.
+
+## Bottleneck
+
+What concrete bottleneck or limitation does this target?
+
+## Why Current Line Is Limited
+
+Why is the current best line or baseline not already solving this?
+
+## Mechanism
+
+What specific intervention or design change is proposed?
+
+## Mechanism Family
+
+Name the family explicitly, for example `adapter`, `loss`, `architecture`, `augmentation`, `ensemble`, `retrieval`, `objective-shift`.
+
+## Change Layer
+
+One of:
+
+- `Tier1`: local optimization / training detail
+- `Tier2`: representation or component change
+- `Tier3`: paradigm or system-level shift
+
+## Source Lens
+
+Where did this candidate come from?
+
+- baseline_refinement
+- orthogonal_mechanism
+- failure_repair
+- cross_domain_transfer
+- objective_shift
+- search_widening
+
+## Keep Unchanged
+
+What must remain stable for comparability?
+
+## Expected Gain
+
+What evidence should improve if this works?
+
+## Implementation Surface
+
+- main files or modules likely involved:
+- likely change scope: local / moderate / broad
+
+## Risks
+
+- Main failure mode
+- Comparability risk
+- Implementation risk
+
+## Foundation
+
+- Source branch / run / baseline:
+- Why this foundation is the right starting point:
+
+## Promote Now
+
+- yes / no
+- why:
+
+## Next Target
+
+Usually `optimize` or `experiment`.
+
+### optimization-memory-template.md
+
+# Optimization Memory Template
+
+## Type
+
+- success pattern / failure pattern / fusion lesson
+
+## Context
+
+- task:
+- branch or idea:
+- candidate id:
+- strategy:
+
+## Observation
+
+What actually happened?
+
+## Why It Matters
+
+Why should a later optimization pass retrieve this?
+
+## Retrieval Hint
+
+- query keywords:
+- closest line or mechanism family:
+- when this should be recalled first:
+
+## Reuse Hint
+
+When should this lesson be reused, and when should it be avoided?
+
+### optimize-checklist-template.md
+
+# OPTIMIZE_CHECKLIST.md
+
+- [ ] Read `artifact.get_optimization_frontier(...)` or equivalent durable frontier summary
+- [ ] Select the primary optimize submode: `brief`, `rank`, `seed`, `loop`, `fusion`, or `debug`
+- [ ] Confirm whether the current pass is `explore`, `exploit`, `fusion`, `debug`, or `stop`
+- [ ] Review recent optimization memory before generating new candidates
+- [ ] Check whether the current brief slate covers more than one mechanism family
+- [ ] Candidate briefs updated or confirmed
+- [ ] Candidate ranking updated
+- [ ] Promote only the strongest brief(s) into durable line(s) if justified
+- [ ] Current implementation candidate pool recorded
+- [ ] Smoke queue defined
+- [ ] Full-eval queue defined
+- [ ] Recent failures classified and either debugged or archived
+- [ ] Stagnation check performed
+- [ ] Family-shift trigger checked
+- [ ] Fusion eligibility checked
+- [ ] Next concrete action written
+
+### plateau-response-playbook.md
+
+# Plateau Response Playbook
+
+Use this when one line keeps producing non-improving results.
+
+## Plateau indicators
+
+- repeated non-improving results on the same line
+- repeated "small tweak" proposals with no structural change
+- candidate queue filled with near-duplicate mechanisms
+
+## Required response
+
+1. state that the line is plateauing
+2. identify the most likely root cause of the plateau
+3. choose one of:
+   - widen search
+   - promote a stronger alternative
+   - fuse with another line
+   - debug a strategically valuable blocked candidate
+   - stop the line
+4. record one explicit non-repeat rule so the next pass does not retry the same low-information move
+
+## Do not do
+
+- keep proposing near-identical local tweaks
+- rerun the same unchanged candidate
+- fuse without a clear complementary mechanism
+- hide a plateau under a sequence of tiny "one more tweak" edits
+
+### prompt-patterns.md
+
+# Optimization Prompt Patterns
+
+These prompt structures are worth preserving across optimize subroutines.
+
+## Common skeleton
+
+- Introduction
+- Task description
+- Memory
+- Previous solution or previous line
+- Instructions
+- assistant_prefix when a stable response lead-in reduces drift
+- Explicit response format
+
+## Common reasoning contract
+
+- WHAT is changing?
+- WHY is the current line limited?
+- HOW should the change address the limitation?
+- KEEP UNCHANGED: what must remain stable for comparability?
+- NEXT ACTION: what concrete step follows this prompt?
+
+## Plateau pattern
+
+When the line is stagnating:
+
+- explicitly state that the current approach has plateaued
+- forbid trivial hyperparameter-only tweaks when a deeper change is needed
+- require a larger representational or architectural shift
+
+## Fusion pattern
+
+When combining lines:
+
+- identify the real strength of each source line
+- explain why those strengths are complementary
+- avoid combining everything
+- preserve the comparison surface
+
+## Debug pattern
+
+For debugging:
+
+- restate the concrete error
+- state the likely root cause
+- require the minimal targeted fix
+- preserve the original solution intent unless the bug proves the design invalid

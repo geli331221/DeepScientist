@@ -73,17 +73,6 @@ def test_new_companion_skill_reference_files_exist() -> None:
     assert (root / "rebuttal" / "references" / "evidence-update-template.md").exists()
     assert (root / "rebuttal" / "references" / "review-matrix-template.md").exists()
     assert (root / "rebuttal" / "references" / "response-letter-template.md").exists()
-    assert (root / "optimize" / "references" / "optimize-checklist-template.md").exists()
-    assert (root / "optimize" / "references" / "candidate-board-template.md").exists()
-    assert (root / "optimize" / "references" / "method-brief-template.md").exists()
-    assert (root / "optimize" / "references" / "candidate-ranking-template.md").exists()
-    assert (root / "optimize" / "references" / "frontier-review-template.md").exists()
-    assert (root / "optimize" / "references" / "optimization-memory-template.md").exists()
-    assert (root / "optimize" / "references" / "fusion-playbook.md").exists()
-    assert (root / "optimize" / "references" / "codegen-route-playbook.md").exists()
-    assert (root / "optimize" / "references" / "debug-response-template.md").exists()
-    assert (root / "optimize" / "references" / "prompt-patterns.md").exists()
-    assert (root / "optimize" / "references" / "plateau-response-playbook.md").exists()
 
 
 def test_stage_plan_and_checklist_templates_exist() -> None:

@@ -581,6 +581,18 @@ def normalize_metric_contract(
 def selected_baseline_metrics(entry: dict[str, Any] | None, selected_variant_id: str | None = None) -> dict[str, Any]:
     if not isinstance(entry, dict) or not entry:
         return {}
+
+    def with_primary_metric(summary: dict[str, float], primary_metric: object) -> dict[str, float]:
+        resolved = OrderedDict(summary)
+        if isinstance(primary_metric, dict):
+            metric_id = str(
+                primary_metric.get("metric_id") or primary_metric.get("name") or primary_metric.get("id") or ""
+            ).strip()
+            value = to_number(primary_metric.get("value"))
+            if metric_id and value is not None and metric_id not in resolved:
+                resolved[metric_id] = value
+        return dict(resolved)
+
     variants = entry.get("baseline_variants") if isinstance(entry.get("baseline_variants"), list) else []
     target_id = str(selected_variant_id or entry.get("default_variant_id") or "").strip()
     selected_variant = None
@@ -592,15 +604,33 @@ def selected_baseline_metrics(entry: dict[str, Any] | None, selected_variant_id:
     if selected_variant is None and variants:
         selected_variant = next((item for item in variants if isinstance(item, dict)), None)
     if isinstance(selected_variant, dict):
-        summary = extract_numeric_metric_map(metrics_summary=selected_variant.get("metrics_summary"))
+        summary = with_primary_metric(
+            extract_numeric_metric_map(metrics_summary=selected_variant.get("metrics_summary")),
+            selected_variant.get("primary_metric"),
+        )
         if summary:
             return summary
-    return extract_numeric_metric_map(metrics_summary=entry.get("metrics_summary"))
+    return with_primary_metric(
+        extract_numeric_metric_map(metrics_summary=entry.get("metrics_summary")),
+        entry.get("primary_metric"),
+    )
 
 
 def baseline_metric_lines(entry: dict[str, Any] | None, selected_variant_id: str | None = None) -> list[dict[str, Any]]:
     if not isinstance(entry, dict) or not entry:
         return []
+
+    def metrics_with_primary(summary: object, primary_metric: object) -> dict[str, float]:
+        resolved = OrderedDict(extract_numeric_metric_map(metrics_summary=summary))
+        if isinstance(primary_metric, dict):
+            metric_id = str(
+                primary_metric.get("metric_id") or primary_metric.get("name") or primary_metric.get("id") or ""
+            ).strip()
+            value = to_number(primary_metric.get("value"))
+            if metric_id and value is not None and metric_id not in resolved:
+                resolved[metric_id] = value
+        return dict(resolved)
+
     baseline_id = str(entry.get("baseline_id") or entry.get("entry_id") or "").strip() or None
     selected_id = str(selected_variant_id or entry.get("default_variant_id") or "").strip() or None
     lines: list[dict[str, Any]] = []
@@ -609,7 +639,7 @@ def baseline_metric_lines(entry: dict[str, Any] | None, selected_variant_id: str
         if not isinstance(variant, dict):
             continue
         variant_id = str(variant.get("variant_id") or "").strip() or None
-        metrics_summary = extract_numeric_metric_map(metrics_summary=variant.get("metrics_summary"))
+        metrics_summary = metrics_with_primary(variant.get("metrics_summary"), variant.get("primary_metric"))
         for metric_id, value in metrics_summary.items():
             lines.append(
                 {
@@ -624,7 +654,7 @@ def baseline_metric_lines(entry: dict[str, Any] | None, selected_variant_id: str
             )
     if lines:
         return lines
-    for metric_id, value in extract_numeric_metric_map(metrics_summary=entry.get("metrics_summary")).items():
+    for metric_id, value in metrics_with_primary(entry.get("metrics_summary"), entry.get("primary_metric")).items():
         lines.append(
             {
                 "metric_id": metric_id,

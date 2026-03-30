@@ -65,8 +65,8 @@ def test_prompt_builder_includes_layered_runtime_context(temp_home: Path) -> Non
     assert "#F3EEE8" in prompt
     assert "plt.rcParams.update" in prompt
     assert "AutoFigure-Edit" in prompt
-    assert len(prompt.splitlines()) < 900
-    assert len(prompt) < 50000
+    assert len(prompt.splitlines()) < 1600
+    assert len(prompt) < 100000
 
 
 def test_prompt_builder_includes_recovery_resume_packet_for_daemon_recovery(temp_home: Path) -> None:
@@ -574,6 +574,8 @@ def test_prompt_builder_mentions_decision_request_options_and_timeout(temp_home:
     )
 
     assert "1 to 3 concrete options" in prompt
+    assert "how strongly you recommend it" in prompt
+    assert "impact it would have on speed, quality, cost, or risk" in prompt
     assert "wait up to 1 day" in prompt
     assert "choose the best option yourself" in prompt
     assert "notify the user of the chosen option" in prompt
@@ -812,8 +814,8 @@ def test_prompt_builder_delegates_stage_specific_sop_to_skills(temp_home: Path) 
 
     for prompt in (experiment_prompt, idea_prompt, analysis_prompt, write_prompt):
         assert "stage_contract_protocol:" in prompt
-        assert len(prompt.splitlines()) < 900
-        assert len(prompt) < 50000
+        assert len(prompt.splitlines()) < 1600
+        assert len(prompt) < 100000
 
     assert "RUN.md" not in experiment_prompt
     assert "problem-first vs solution-first" not in idea_prompt
@@ -1262,3 +1264,18 @@ def test_prompt_builder_mentions_memory_contract_without_redundant_stage_playboo
     assert "## Priority Memory For This Turn" in prompt
     assert "memory_injection_rule:" in prompt
     assert "stage_contract_protocol:" in prompt
+
+
+def test_prompt_builder_prefers_beginner_friendly_abstract_user_updates(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="experiment",
+        user_message="Please keep me updated in a way I can understand.",
+        model="gpt-5.4",
+    )
+
+    assert "novice_context_protocol:" in prompt
+    assert "omit file paths, file names" in prompt
+    assert "translate them into user-facing meaning such as baseline record, draft, experiment result, or supplementary run" in prompt

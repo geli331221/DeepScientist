@@ -3472,6 +3472,11 @@ function QuestDetails({
     () => buildMetricsTimelineRunSignature(workflow?.entries),
     [workflow?.entries]
   )
+  const metricsTimelineSeries = metricsTimeline?.series || []
+  const hasMetricsOverview = metricsTimelineSeries.length > 0
+  const hasMainExperimentMetricPoints = metricsTimelineSeries.some(
+    (series) => (series.points?.length || 0) > 0
+  )
   const statusLine =
     snapshot?.summary?.status_line || 'Research workspace ready.'
   const pendingDecisionCount = snapshot?.counts?.pending_decision_count || 0
@@ -3535,22 +3540,29 @@ function QuestDetails({
         <DetailSection
           first
           title="Metrics Overview"
-          hint="One chart per metric across recorded main experiments, with baseline reference lines."
+          hint="Shows baseline metrics immediately and overlays main-experiment traces once recorded."
           actions={<WorkspaceRefreshButton onRefresh={onRefresh} label="Refresh metrics" />}
         >
-          {metricsTimeline?.series?.length ? (
-            <div className="grid gap-5 xl:grid-cols-2">
-              {metricsTimeline.series.map((series) => (
-                <MetricTimelineCard
-                  key={series.metric_id}
-                  series={series}
-                  primaryMetricId={metricsTimeline.primary_metric_id}
-                />
-              ))}
+          {hasMetricsOverview ? (
+            <div className="space-y-4">
+              {!hasMainExperimentMetricPoints ? (
+                <div className="rounded-[22px] border border-dashed border-black/[0.10] bg-black/[0.02] px-4 py-3 text-sm text-muted-foreground dark:border-white/[0.12] dark:bg-white/[0.03]">
+                  Showing baseline-only metrics. Main-experiment traces will appear after the first recorded result.
+                </div>
+              ) : null}
+              <div className="grid gap-5 xl:grid-cols-2">
+                {metricsTimelineSeries.map((series) => (
+                  <MetricTimelineCard
+                    key={series.metric_id}
+                    series={series}
+                    primaryMetricId={metricsTimeline.primary_metric_id}
+                  />
+                ))}
+              </div>
             </div>
           ) : (
             <div className="rounded-[24px] border border-dashed border-black/[0.10] px-4 py-6 text-sm text-muted-foreground dark:border-white/[0.12]">
-              Main-experiment charts will appear after the first recorded result.
+              Attach a baseline with recorded metrics to populate this section. Main-experiment traces will overlay after the first recorded result.
             </div>
           )}
         </DetailSection>

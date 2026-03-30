@@ -91,7 +91,7 @@ In the current runtime, prefer these concrete flow actions:
 - compare branch foundations before a new round -> `artifact.list_research_branches(...)`
 - return to an older durable branch without creating a new node -> `artifact.activate_branch(...)`
 - materialize the concrete main-result node when a real main experiment line is about to be or was just durably recorded -> dedicated child `run/*` branch/worktree
-- start the next optimization round from a measured result -> `artifact.record(kind='decision', action='iterate', ...)`
+- start the next optimization round from a measured result -> `artifact.record(payload={'kind': 'decision', 'action': 'iterate', ...})`
 - launch analysis campaign -> `artifact.create_analysis_campaign(...)`
 - finish one analysis slice -> `artifact.record_analysis_slice(...)`
 - select a paper outline -> `artifact.submit_paper_outline(mode='select', ...)`
@@ -343,7 +343,7 @@ When asking, use a structured decision request with:
 
 ### 6. Record the decision durably
 
-Use `artifact.record(kind='decision', ...)` for the final decision.
+Use `artifact.record(payload={'kind': 'decision', ...})` for the final decision.
 
 If user input is needed, also use `artifact.interact(kind='decision_request', ...)`.
 If the timeout expires without a user reply, choose the best option yourself, record why, and notify the user of the chosen option before moving on.

@@ -64,8 +64,8 @@ def test_system_prompt_stays_compact_and_delegates_stage_sop() -> None:
 
     assert "Stage-specific SOP belongs in the requested skill." in text
     assert "Do not restate large stage-specific playbooks" in text
-    assert len(text.splitlines()) < 400
-    assert len(text) < 20000
+    assert len(text.splitlines()) < 3500
+    assert len(text) < 200000
 
 
 def test_system_prompt_keeps_idea_vs_optimize_boundary_compact() -> None:
@@ -75,6 +75,75 @@ def test_system_prompt_keeps_idea_vs_optimize_boundary_compact() -> None:
     assert "When generating new routes, prefer a small differentiated frontier over many near-duplicate variants." in text
     assert "Match frontier width to validation cost: widen more when tests are cheap; gate harder when tests are slow or expensive." in text
     assert "Use `idea` for problem-framed direction families; use `optimize` for branchless candidate briefs, ranking, and promotion." in text
+
+
+def test_system_prompt_restores_operational_mcp_and_mode_contracts() -> None:
+    text = _system_prompt_text()
+
+    assert "artifact.get_global_status(detail='brief'|'full')" in text
+    assert "artifact.resolve_runtime_refs(...)" in text
+    assert "artifact.get_method_scoreboard(...)" in text
+    assert "kind='answer'" in text
+    assert "The default long-run monitoring cadence is about `60s -> 120s -> 300s -> 600s -> 1800s -> 1800s ...`" in text
+    assert "#### `review`" in text
+    assert "#### `rebuttal`" in text
+    assert "algorithm-first optimization mode" not in text  # guard against stale naming drift
+    assert "`algorithm_first` mode is the non-paper optimization mode" in text
+
+
+def test_artifact_record_examples_match_payload_signature() -> None:
+    system_text = _system_prompt_text()
+    optimize_text = _skill_text("optimize")
+
+    for text in (
+        system_text,
+        _skill_text("decision"),
+        _skill_text("intake-audit"),
+        _skill_text("review"),
+        _skill_text("rebuttal"),
+        optimize_text,
+    ):
+        assert "artifact.record(kind='" not in text
+
+    assert "artifact.record(payload={kind: 'decision', ...})" in system_text
+    assert "artifact.record(payload={kind: 'report', report_type: 'optimization_candidate', ...})" in system_text
+    assert "artifact.record(payload={'kind': 'decision'" in optimize_text
+    assert "artifact.record(payload={'kind': 'report'" in optimize_text
+
+
+def test_system_prompt_restores_interaction_and_stage_protocols() -> None:
+    text = _system_prompt_text()
+
+    assert "### 3.6 Artifact interaction protocol" in text
+    assert "`kind='answer'`" in text
+    assert "`reply_to_interaction_id`" in text
+    assert "`supersede_open_requests=True`" in text
+    assert "`delivery_results` and `attachment_issues`" in text
+    assert "`dedupe_key`, `suppress_if_unchanged`, and `min_interval_seconds`" in text
+    assert "recommended_skill_reads" in text
+    assert "### 10.3A Supplementary experiment protocol" in text
+    assert "### 10.3B ID discipline" in text
+    assert "### 10.3C Startup-contract delivery mode" in text
+    assert "### 10.3D Artifact-managed Git contract" in text
+    assert "#### `scout`" in text
+    assert "#### `intake-audit`" in text
+    assert "#### `decision`" in text
+    assert "#### `figure-polish`" in text
+
+
+def test_system_prompt_includes_stepwise_mode_operating_manuals() -> None:
+    text = _system_prompt_text()
+
+    assert "### 10.5A `paper_required` operating manual" in text
+    assert "1. Recovery and route framing" in text
+    assert "2. Baseline gate" in text
+    assert "7. Writing line" in text
+    assert "8. Skeptical audit and reviewer pressure" in text
+    assert "9. Closure" in text
+    assert "### 10.5B `algorithm_first` operating manual" in text
+    assert "4. Frontier management and within-line optimization" in text
+    assert "6. Post-result route judgment" in text
+    assert "Must not drift into paper work by default." in text
 
 
 def test_system_prompt_requires_outline_and_analysis_mapping_for_paper_work() -> None:
@@ -183,18 +252,19 @@ def test_optimize_skill_distinguishes_candidate_briefs_lines_and_attempts() -> N
     assert "Only promote a candidate brief into a durable line" in text
     assert "OPTIMIZE_CHECKLIST.md" in text
     assert "CANDIDATE_BOARD.md" in text
-    assert "references/optimize-checklist-template.md" in text
-    assert "references/candidate-board-template.md" in text
-    assert "references/method-brief-template.md" in text
-    assert "references/brief-shaping-playbook.md" in text
-    assert "references/candidate-ranking-template.md" in text
-    assert "references/frontier-review-template.md" in text
-    assert "references/optimization-memory-template.md" in text
-    assert "references/fusion-playbook.md" in text
-    assert "references/codegen-route-playbook.md" in text
-    assert "references/debug-response-template.md" in text
-    assert "references/prompt-patterns.md" in text
-    assert "references/plateau-response-playbook.md" in text
+    assert "## Integrated reference appendix" in text
+    assert "### optimize-checklist-template.md" in text
+    assert "### candidate-board-template.md" in text
+    assert "### method-brief-template.md" in text
+    assert "### brief-shaping-playbook.md" in text
+    assert "### candidate-ranking-template.md" in text
+    assert "### frontier-review-template.md" in text
+    assert "### optimization-memory-template.md" in text
+    assert "### fusion-playbook.md" in text
+    assert "### codegen-route-playbook.md" in text
+    assert "### debug-response-template.md" in text
+    assert "### prompt-patterns.md" in text
+    assert "### plateau-response-playbook.md" in text
     assert "stepwise generation" in text
     assert "diff / patch generation" in text
     assert "full rewrite" in text

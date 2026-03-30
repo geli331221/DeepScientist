@@ -423,7 +423,7 @@ Open additional skills only when the rebuttal workflow requires them:
 
 Use these tools deliberately:
 
-- `artifact.record(kind='decision', ...)`
+- `artifact.record(payload={'kind': 'decision', ...})`
   - route choice, claim downgrade, literature-audit launch, baseline-recovery launch, supplementary-experiment launch, rebuttal completion recommendation
 - `artifact.create_analysis_campaign(...)`
   - multi-slice reviewer-driven supplementary work

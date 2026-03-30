@@ -193,7 +193,7 @@ If the evidence is insufficient for a durable backfill, record that insufficienc
 
 ### 5. Choose the next anchor
 
-After reconciliation, write one durable route decision with `artifact.record(kind='decision', ...)`.
+After reconciliation, write one durable route decision with `artifact.record(payload={'kind': 'decision', ...})`.
 
 Typical next anchors:
 

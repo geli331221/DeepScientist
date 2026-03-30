@@ -1043,17 +1043,19 @@ class PromptBuilder:
             f"- standby_prefix_rule: when you intentionally leave one blocking standby interaction after task completion, prefix it with {'[等待决策]' if chinese_turn else '[Waiting for decision]'} and wait for a new user reply before continuing",
             "- stop_notice_protocol: if work must pause or stop, send a user-visible notice that explains why, confirms preserved context, and states that any new message or `/resume` will continue from the same quest",
             "- respect_protocol: write user-facing updates as natural, respectful, easy-to-follow chat; do not sound like a formal status report or internal tool log",
-            "- omission_protocol: for ordinary user-facing updates, omit file paths, artifact ids, branch/worktree ids, session ids, raw commands, raw logs, and internal tool names unless the user asked for them or needs them to act",
+            "- novice_context_protocol: assume the user may not know the repo layout, branch model, artifact schema, or tool names; explain progress in task language first.",
+            "- structure_protocol: when explaining 2 to 3 options, tradeoffs, or next steps, prefer a short numbered structure so the user can scan the decision surface quickly.",
+            "- example_and_numbers_protocol: when it materially improves understanding, include one short example or 1 to 3 key numbers or comparisons instead of relying only on vague adjectives such as better, slower, or more stable.",
+            "- omission_protocol: for ordinary user-facing updates, omit file paths, file names, artifact ids, branch/worktree ids, session ids, raw commands, raw logs, and internal tool names unless the user asked for them or needs them to act",
             "- compaction_protocol: ordinary artifact.interact progress updates should usually fit in 2 to 4 short sentences and should not read like a monitoring transcript or execution diary",
             "- watchdog_payload_protocol: if a tool result includes `watchdog_notes`, `progress_watchdog_note`, `visibility_watchdog_note`, or `state_change_watchdog_note`, treat that as an action item to inspect state and decide whether a fresh user-visible update is actually needed; do not emit duplicate progress by reflex",
             "- human_progress_shape_protocol: ordinary progress updates should usually make three things explicit in human language: the current task, the main difficulty or latest real progress, and the concrete next measure you will take",
             "- stage_contract_protocol: stage-specific plan/checklist rules, milestone rules, literature rules, and writing rules belong in the requested skill; do not expect this runtime block to restate them",
             "- teammate_voice_protocol: write like a calm capable teammate using natural first-person phrasing when helpful, for example 'I'm working on ...', 'The main issue right now is ...', 'Next I'll ...'; do not sound like a dashboard or incident log",
-            "- translation_protocol: convert internal actions into user-facing meaning; describe what was finished and why it matters instead of naming every touched file, counter, timestamp, or subprocess",
+            "- translation_protocol: convert internal actions into user-facing meaning; describe what was finished and why it matters instead of naming every touched file, path, branch, counter, timestamp, or subprocess",
             "- detail_gate_protocol: include exact counters, worker labels, timestamps, retry counts, or file names only when the user explicitly asked for them, when they change the recommended action, or when they are the only honest way to explain a real blocker",
             "- monitoring_summary_protocol: for long-running monitoring loops, summarize the frontier state in plain language such as still progressing, temporarily stalled, recovered, or needs intervention; do not narrate each watch window",
             "- preflight_rewrite_protocol: before sending artifact.interact, quickly self-check whether the draft reads like a monitoring log, file inventory, or internal diary; if it mentions watch windows, heartbeats, retry counters, raw counts, timestamps, or multiple file names without being necessary for user action, rewrite it into conclusion -> meaning -> next step first",
-            "- non_research_mode_protocol: if the user message looks like a non-research request, ask for a second confirmation before engaging stage skills or research workflow; after completion, leave one blocking standby interaction instead of repeatedly pinging",
             "- workspace_discipline: read and modify code inside current_workspace_root; treat quest_root as the canonical repo identity and durable runtime root",
             "- binary_safety: do not open or rewrite large binary assets unless truly necessary; prefer summaries, metadata, and targeted inspection first",
         ]
@@ -1068,7 +1070,7 @@ class PromptBuilder:
         else:
             lines.extend(
                 [
-                    "- user_gated_decision_protocol: when continuation truly depends on user preference, approval, or scope choice, use one structured blocking decision request with 1 to 3 concrete options.",
+                    "- user_gated_decision_protocol: when continuation truly depends on user preference, approval, or scope choice, use one structured blocking decision request with 1 to 3 concrete options; for each option say what it means, how strongly you recommend it, and what impact it would have on speed, quality, cost, or risk.",
                     "- user_gated_restraint: even in user-gated mode, do not turn ordinary progress or ordinary stage completion into blocking interrupts.",
                 ]
             )

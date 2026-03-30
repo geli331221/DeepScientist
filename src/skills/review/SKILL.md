@@ -356,7 +356,7 @@ Open additional skills only when the review workflow requires them:
 
 Use these tools deliberately:
 
-- `artifact.record(kind='decision', ...)`
+- `artifact.record(payload={'kind': 'decision', ...})`
   - review conclusion, claim downgrade recommendation, route choice, stop/go recommendation
 - `artifact.create_analysis_campaign(...)`
   - when the experiment TODO list should become concrete follow-up slices

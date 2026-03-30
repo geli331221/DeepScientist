@@ -3909,10 +3909,11 @@ class QuestService:
         workspace_root = self.active_workspace_root(quest_root)
         state = self._json_compatible_state(self._metrics_timeline_state(quest_root, workspace_root))
         cache_path = self._metrics_timeline_cache_path(quest_root)
+        cache_schema_version = 2
         cached = self._read_cached_json(cache_path, {})
         if (
             isinstance(cached, dict)
-            and int(cached.get("schema_version") or 0) == 1
+            and int(cached.get("schema_version") or 0) == cache_schema_version
             and self._json_compatible_state(cached.get("state")) == state
             and isinstance(cached.get("payload"), dict)
         ):
@@ -3922,7 +3923,7 @@ class QuestService:
             cached = read_json(cache_path, {})
             if (
                 isinstance(cached, dict)
-                and int(cached.get("schema_version") or 0) == 1
+                and int(cached.get("schema_version") or 0) == cache_schema_version
                 and self._json_compatible_state(cached.get("state")) == state
                 and isinstance(cached.get("payload"), dict)
             ):
@@ -3933,6 +3934,23 @@ class QuestService:
             selected_variant_id = (
                 str(attachment.get("source_variant_id") or "").strip() or None if isinstance(attachment, dict) else None
             )
+            if not baseline_entry:
+                latest_baseline_payload = None
+                for item in reversed(self._collect_artifacts_raw(quest_root)):
+                    if str(item.get("kind") or "").strip() != "baselines":
+                        continue
+                    payload = item.get("payload") or {}
+                    if not isinstance(payload, dict):
+                        continue
+                    if str(payload.get("status") or "").strip().lower() != "confirmed":
+                        continue
+                    latest_baseline_payload = payload
+                    break
+                if isinstance(latest_baseline_payload, dict) and latest_baseline_payload:
+                    baseline_entry = dict(latest_baseline_payload)
+                    selected_variant_id = (
+                        str(latest_baseline_payload.get("baseline_variant_id") or "").strip() or None
+                    )
             run_records = [
                 item.get("payload") or {}
                 for item in self._collect_run_artifacts_raw(quest_root, run_kind="main_experiment")
@@ -3947,7 +3965,7 @@ class QuestService:
             write_json(
                 cache_path,
                 {
-                    "schema_version": 1,
+                    "schema_version": cache_schema_version,
                     "generated_at": utc_now(),
                     "state": state,
                     "payload": payload,

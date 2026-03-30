@@ -23,7 +23,7 @@ Use this reference because the current runtime has no dedicated `campaign` artif
 
 ## Recommended per-slice fields
 
-Because `artifact.record(...)` accepts extra fields, include:
+Because `artifact.record(payload={...})` accepts extra fields, include:
 
 - `campaign_id`
 - `slice_id`
