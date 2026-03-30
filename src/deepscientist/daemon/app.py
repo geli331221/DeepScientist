@@ -1311,6 +1311,7 @@ class DaemonApp:
             client_message_id=client_message_id,
         )
         snapshot = self.quest_service.snapshot(quest_id)
+        snapshot = self._reconcile_stale_active_turn(quest_id, snapshot=snapshot)
         runtime_status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip()
         auto_resumed = previous_status in {"stopped", "paused", "completed"} and runtime_status not in {"stopped", "paused", "completed"}
         if auto_resumed:
@@ -1323,9 +1324,8 @@ class DaemonApp:
                 summary=f"Quest {quest_id} automatically resumed after a new user message.",
                 automated=True,
             )
-        with self._turn_lock:
-            turn_state = dict(self._turn_state.get(quest_id) or {})
-        has_live_turn = bool(turn_state.get("running")) or bool(snapshot.get("active_run_id"))
+        turn_state = self._refresh_turn_worker_state(quest_id)
+        has_live_turn = bool(turn_state.get("running"))
         if runtime_status == "running" and has_live_turn:
             scheduled = {
                 "scheduled": True,
@@ -1495,6 +1495,7 @@ class DaemonApp:
         return snapshot
 
     def schedule_turn(self, quest_id: str, *, reason: str = "user_message") -> dict:
+        self._refresh_turn_worker_state(quest_id)
         with self._turn_lock:
             state = self._turn_state.setdefault(quest_id, {"running": False, "pending": False})
             state["pending"] = True
@@ -1522,6 +1523,69 @@ class DaemonApp:
             "queued": False,
             "reason": reason,
         }
+
+    @staticmethod
+    def _turn_worker_is_alive(worker: object) -> bool:
+        return isinstance(worker, threading.Thread) and worker.is_alive()
+
+    def _refresh_turn_worker_state(self, quest_id: str) -> dict[str, object]:
+        with self._turn_lock:
+            state = self._turn_state.setdefault(quest_id, {"running": False, "pending": False})
+            if bool(state.get("running")) and not self._turn_worker_is_alive(state.get("worker")):
+                state["running"] = False
+                state.pop("worker", None)
+            return dict(state)
+
+    def _reconcile_stale_active_turn(self, quest_id: str, *, snapshot: dict | None = None) -> dict:
+        snapshot = dict(snapshot or self.quest_service.snapshot(quest_id))
+        active_run_id = str(snapshot.get("active_run_id") or "").strip()
+        if not active_run_id:
+            self._refresh_turn_worker_state(quest_id)
+            return snapshot
+        turn_state = self._refresh_turn_worker_state(quest_id)
+        if turn_state.get("running"):
+            return snapshot
+
+        quest_root = self.quest_service._quest_root(quest_id)
+        result_payload = read_json(quest_root / ".ds" / "runs" / active_run_id / "result.json", {})
+        completed_at = str(result_payload.get("completed_at") or "").strip() if isinstance(result_payload, dict) else ""
+        exit_code = result_payload.get("exit_code") if isinstance(result_payload, dict) else None
+        previous_status = (
+            str(snapshot.get("runtime_status") or snapshot.get("status") or snapshot.get("display_status") or "running").strip()
+            or "running"
+        )
+        normalized_status = "active" if previous_status == "running" else previous_status
+        summary = (
+            f"Cleared stale active turn state for run `{active_run_id}` after no live worker was found."
+            if not completed_at
+            else f"Cleared stale active turn state for completed run `{active_run_id}`."
+        )
+        append_jsonl(
+            quest_root / ".ds" / "events.jsonl",
+            {
+                "event_id": generate_id("evt"),
+                "type": "quest.turn_state_reconciled",
+                "quest_id": quest_id,
+                "abandoned_run_id": active_run_id,
+                "previous_status": previous_status,
+                "status": normalized_status,
+                "completed_at": completed_at or None,
+                "exit_code": exit_code if isinstance(exit_code, int) else None,
+                "summary": summary,
+                "created_at": utc_now(),
+            },
+        )
+        self.logger.log(
+            "warning",
+            "quest.turn_state_reconciled",
+            quest_id=quest_id,
+            abandoned_run_id=active_run_id,
+            previous_status=previous_status,
+            status=normalized_status,
+            completed_at=completed_at or None,
+            exit_code=exit_code if isinstance(exit_code, int) else None,
+        )
+        return self.quest_service.mark_turn_finished(quest_id, status=normalized_status)
 
     def control_quest(self, quest_id: str, *, action: str, source: str = "local") -> dict:
         normalized_action = str(action or "").strip().lower()
@@ -1905,7 +1969,16 @@ class DaemonApp:
                     state.pop("worker", None)
                     return
                 state["pending"] = False
-            self._run_quest_turn(quest_id)
+            try:
+                self._run_quest_turn(quest_id)
+            except Exception as exc:
+                self.logger.log(
+                    "error",
+                    "daemon.turn_worker_crashed",
+                    quest_id=quest_id,
+                    error=str(exc),
+                    traceback=traceback.format_exc(),
+                )
 
     def _run_quest_turn(self, quest_id: str) -> None:
         with self._turn_lock:
@@ -2044,24 +2117,172 @@ class DaemonApp:
                         "next_retry_at": None,
                     },
                 )
-
             try:
-                result = runner.run(request)
-            except Exception as exc:  # pragma: no cover - exercised via integration behavior
+                try:
+                    result = runner.run(request)
+                except Exception as exc:  # pragma: no cover - exercised via integration behavior
+                    if self._turn_stop_requested(quest_id):
+                        return
+                    failure_summary = f"Runner `{runner_name}` failed on attempt {attempt_index}/{max_attempts}: {exc}"
+                    retry_context = self._build_retry_context(
+                        quest_id=quest_id,
+                        failed_run_id=current_run_id,
+                        turn_id=turn_id,
+                        attempt_index=attempt_index,
+                        max_attempts=max_attempts,
+                        failure_kind="exception",
+                        failure_summary=failure_summary,
+                        previous_exit_code=None,
+                        previous_output_text="",
+                        stderr_text=str(exc),
+                    )
+                    if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
+                        delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
+                        next_retry_at = self._retry_next_timestamp(delay_seconds)
+                        self.quest_service.update_runtime_state(
+                            quest_root=quest_root,
+                            status="running",
+                            display_status="retrying",
+                            active_run_id=None,
+                            retry_state={
+                                "turn_id": turn_id,
+                                "attempt_index": attempt_index,
+                                "max_attempts": max_attempts,
+                                "last_run_id": current_run_id,
+                                "last_error": failure_summary,
+                                "next_retry_at": next_retry_at,
+                            },
+                        )
+                        self._append_retry_event(
+                            quest_id,
+                            event_type="runner.turn_retry_scheduled",
+                            runner_name=runner_name,
+                            run_id=current_run_id,
+                            turn_id=turn_id,
+                            skill_id=skill_id,
+                            model=model,
+                            attempt_index=attempt_index,
+                            max_attempts=max_attempts,
+                            summary=f"Attempt {attempt_index}/{max_attempts} failed. Retrying in {delay_seconds:.1f}s.",
+                            failure_summary=failure_summary,
+                            backoff_seconds=delay_seconds,
+                            next_attempt_index=attempt_index + 1,
+                        )
+                        if self._wait_for_retry_delay(quest_id, delay_seconds):
+                            continue
+                        self._append_retry_event(
+                            quest_id,
+                            event_type="runner.turn_retry_aborted",
+                            runner_name=runner_name,
+                            run_id=current_run_id,
+                            turn_id=turn_id,
+                            skill_id=skill_id,
+                            model=model,
+                            attempt_index=attempt_index,
+                            max_attempts=max_attempts,
+                            summary="Retry sequence aborted because the quest was stopped or paused.",
+                            failure_summary=failure_summary,
+                        )
+                        return
+                    exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
+                    self._append_retry_event(
+                        quest_id,
+                        event_type="runner.turn_retry_exhausted",
+                        runner_name=runner_name,
+                        run_id=current_run_id,
+                        turn_id=turn_id,
+                        skill_id=skill_id,
+                        model=model,
+                        attempt_index=attempt_index,
+                        max_attempts=max_attempts,
+                        summary=exhausted_summary,
+                        failure_summary=failure_summary,
+                    )
+                    self._record_turn_error(
+                        quest_id=quest_id,
+                        runner_name=runner_name,
+                        run_id=current_run_id,
+                        skill_id=skill_id,
+                        model=model,
+                        summary=exhausted_summary,
+                        retry_state=None,
+                    )
+                    return
+
                 if self._turn_stop_requested(quest_id):
                     return
-                failure_summary = f"Runner `{runner_name}` failed on attempt {attempt_index}/{max_attempts}: {exc}"
+
+                if result.ok:
+                    self.quest_service.update_runtime_state(quest_root=quest_root, retry_state=None)
+                    if result.output_text:
+                        result_attachment = [
+                            {
+                                "kind": "runner_result",
+                                "run_id": result.run_id,
+                                "skill_id": skill_id,
+                                "runner": runner_name,
+                                "model": result.model,
+                                "exit_code": result.exit_code,
+                                "history_root": str(result.history_root),
+                                "run_root": str(result.run_root),
+                            }
+                        ]
+                        try:
+                            self.quest_service.append_message(
+                                quest_id,
+                                role="assistant",
+                                content=result.output_text,
+                                source=runner_name,
+                                run_id=result.run_id,
+                                skill_id=skill_id,
+                            )
+                        except Exception as exc:
+                            self._record_turn_postprocess_warning(
+                                quest_id=quest_id,
+                                runner_name=runner_name,
+                                run_id=result.run_id,
+                                skill_id=skill_id,
+                                model=result.model,
+                                stage="append_message",
+                                error=exc,
+                            )
+                        try:
+                            self._relay_quest_message_to_bound_connectors(
+                                quest_id,
+                                message=result.output_text,
+                                kind="assistant",
+                                response_phase="final",
+                                importance="normal",
+                                attachments=result_attachment,
+                            )
+                        except Exception as exc:
+                            self._record_turn_postprocess_warning(
+                                quest_id=quest_id,
+                                runner_name=runner_name,
+                                run_id=result.run_id,
+                                skill_id=skill_id,
+                                model=result.model,
+                                stage="connector_relay",
+                                error=exc,
+                            )
+                    self._normalize_status_after_turn(quest_id, turn_reason=turn_reason)
+                    return
+
+                failure_summary = f"Runner `{runner_name}` exited with code {result.exit_code} on attempt {attempt_index}/{max_attempts}."
+                stderr_excerpt = self._trim_text(result.stderr_text, limit=240)
+                if stderr_excerpt:
+                    failure_summary = f"{failure_summary} stderr: {stderr_excerpt}"
                 retry_context = self._build_retry_context(
                     quest_id=quest_id,
-                    failed_run_id=current_run_id,
+                    failed_run_id=result.run_id,
                     turn_id=turn_id,
                     attempt_index=attempt_index,
                     max_attempts=max_attempts,
-                    failure_kind="exception",
+                    failure_kind="exit_code",
                     failure_summary=failure_summary,
-                    previous_exit_code=None,
-                    previous_output_text="",
-                    stderr_text=str(exc),
+                    previous_exit_code=result.exit_code,
+                    previous_output_text=result.output_text,
+                    stderr_text=result.stderr_text,
                 )
                 if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
                     delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
@@ -2075,7 +2296,7 @@ class DaemonApp:
                             "turn_id": turn_id,
                             "attempt_index": attempt_index,
                             "max_attempts": max_attempts,
-                            "last_run_id": current_run_id,
+                            "last_run_id": result.run_id,
                             "last_error": failure_summary,
                             "next_retry_at": next_retry_at,
                         },
@@ -2084,7 +2305,7 @@ class DaemonApp:
                         quest_id,
                         event_type="runner.turn_retry_scheduled",
                         runner_name=runner_name,
-                        run_id=current_run_id,
+                        run_id=result.run_id,
                         turn_id=turn_id,
                         skill_id=skill_id,
                         model=model,
@@ -2101,7 +2322,7 @@ class DaemonApp:
                         quest_id,
                         event_type="runner.turn_retry_aborted",
                         runner_name=runner_name,
-                        run_id=current_run_id,
+                        run_id=result.run_id,
                         turn_id=turn_id,
                         skill_id=skill_id,
                         model=model,
@@ -2111,12 +2332,13 @@ class DaemonApp:
                         failure_summary=failure_summary,
                     )
                     return
+
                 exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
                 self._append_retry_event(
                     quest_id,
                     event_type="runner.turn_retry_exhausted",
                     runner_name=runner_name,
-                    run_id=current_run_id,
+                    run_id=result.run_id,
                     turn_id=turn_id,
                     skill_id=skill_id,
                     model=model,
@@ -2128,139 +2350,19 @@ class DaemonApp:
                 self._record_turn_error(
                     quest_id=quest_id,
                     runner_name=runner_name,
-                    run_id=current_run_id,
+                    run_id=result.run_id,
                     skill_id=skill_id,
                     model=model,
                     summary=exhausted_summary,
                     retry_state=None,
                 )
                 return
-
-            if self._turn_stop_requested(quest_id):
-                return
-
-            if result.ok:
-                self.quest_service.update_runtime_state(quest_root=quest_root, retry_state=None)
-                if result.output_text:
-                    self.quest_service.append_message(
-                        quest_id,
-                        role="assistant",
-                        content=result.output_text,
-                        source=runner_name,
-                        run_id=result.run_id,
-                        skill_id=skill_id,
-                    )
-                    self._relay_quest_message_to_bound_connectors(
-                        quest_id,
-                        message=result.output_text,
-                        kind="assistant",
-                        response_phase="final",
-                        importance="normal",
-                        attachments=[
-                            {
-                                "kind": "runner_result",
-                                "run_id": result.run_id,
-                                "skill_id": skill_id,
-                                "runner": runner_name,
-                                "model": result.model,
-                                "exit_code": result.exit_code,
-                                "history_root": str(result.history_root),
-                                "run_root": str(result.run_root),
-                            }
-                        ],
-                    )
-                self._normalize_status_after_turn(quest_id, turn_reason=turn_reason)
-                return
-
-            failure_summary = f"Runner `{runner_name}` exited with code {result.exit_code} on attempt {attempt_index}/{max_attempts}."
-            stderr_excerpt = self._trim_text(result.stderr_text, limit=240)
-            if stderr_excerpt:
-                failure_summary = f"{failure_summary} stderr: {stderr_excerpt}"
-            retry_context = self._build_retry_context(
-                quest_id=quest_id,
-                failed_run_id=result.run_id,
-                turn_id=turn_id,
-                attempt_index=attempt_index,
-                max_attempts=max_attempts,
-                failure_kind="exit_code",
-                failure_summary=failure_summary,
-                previous_exit_code=result.exit_code,
-                previous_output_text=result.output_text,
-                stderr_text=result.stderr_text,
-            )
-            if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
-                delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
-                next_retry_at = self._retry_next_timestamp(delay_seconds)
-                self.quest_service.update_runtime_state(
-                    quest_root=quest_root,
-                    status="running",
-                    display_status="retrying",
-                    active_run_id=None,
-                    retry_state={
-                        "turn_id": turn_id,
-                        "attempt_index": attempt_index,
-                        "max_attempts": max_attempts,
-                        "last_run_id": result.run_id,
-                        "last_error": failure_summary,
-                        "next_retry_at": next_retry_at,
-                    },
-                )
-                self._append_retry_event(
+            finally:
+                self._ensure_turn_cleanup(
                     quest_id,
-                    event_type="runner.turn_retry_scheduled",
-                    runner_name=runner_name,
-                    run_id=result.run_id,
-                    turn_id=turn_id,
-                    skill_id=skill_id,
-                    model=model,
-                    attempt_index=attempt_index,
-                    max_attempts=max_attempts,
-                    summary=f"Attempt {attempt_index}/{max_attempts} failed. Retrying in {delay_seconds:.1f}s.",
-                    failure_summary=failure_summary,
-                    backoff_seconds=delay_seconds,
-                    next_attempt_index=attempt_index + 1,
+                    run_id=current_run_id,
+                    turn_reason=turn_reason,
                 )
-                if self._wait_for_retry_delay(quest_id, delay_seconds):
-                    continue
-                self._append_retry_event(
-                    quest_id,
-                    event_type="runner.turn_retry_aborted",
-                    runner_name=runner_name,
-                    run_id=result.run_id,
-                    turn_id=turn_id,
-                    skill_id=skill_id,
-                    model=model,
-                    attempt_index=attempt_index,
-                    max_attempts=max_attempts,
-                    summary="Retry sequence aborted because the quest was stopped or paused.",
-                    failure_summary=failure_summary,
-                )
-                return
-
-            exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
-            self._append_retry_event(
-                quest_id,
-                event_type="runner.turn_retry_exhausted",
-                runner_name=runner_name,
-                run_id=result.run_id,
-                turn_id=turn_id,
-                skill_id=skill_id,
-                model=model,
-                attempt_index=attempt_index,
-                max_attempts=max_attempts,
-                summary=exhausted_summary,
-                failure_summary=failure_summary,
-            )
-            self._record_turn_error(
-                quest_id=quest_id,
-                runner_name=runner_name,
-                run_id=result.run_id,
-                skill_id=skill_id,
-                model=model,
-                summary=exhausted_summary,
-                retry_state=None,
-            )
-            return
 
     def _runner_name_for(self, snapshot: dict) -> str:
         configured = self.config_manager.load_named("config")
@@ -2333,11 +2435,7 @@ class DaemonApp:
         turn_reason: str = "user_message",
         turn_mode: str = "stage_execution",
     ) -> str:
-        if turn_mode in {"answering", "command_execution", "recovering"}:
-            return "decision"
-        if str(turn_reason or "").strip() == "auto_continue" or latest_user_message is None:
-            return DaemonApp._continuation_anchor_for(snapshot)
-        reply_target = str(latest_user_message.get("reply_to_interaction_id") or "").strip()
+        reply_target = str((latest_user_message or {}).get("reply_to_interaction_id") or "").strip()
         if reply_target:
             for item in (snapshot.get("active_interactions") or []):
                 candidate_ids = {
@@ -2355,11 +2453,19 @@ class DaemonApp:
                     str(item.get("interaction_id") or "").strip(),
                     str(item.get("artifact_id") or "").strip(),
                 }
-                if reply_target in candidate_ids and (
+                if reply_target not in candidate_ids:
+                    continue
+                if (
                     str(item.get("reply_mode") or "") == "blocking"
                     or str(item.get("kind") or "") == "decision_request"
                 ):
                     return "decision"
+                if str(item.get("reply_mode") or "") == "threaded":
+                    return DaemonApp._continuation_anchor_for(snapshot)
+        if turn_mode in {"answering", "command_execution", "recovering"}:
+            return "decision"
+        if str(turn_reason or "").strip() == "auto_continue" or latest_user_message is None:
+            return DaemonApp._continuation_anchor_for(snapshot)
         continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
         if continuation_policy == "wait_for_user_or_resume":
             return DaemonApp._continuation_anchor_for(snapshot)
@@ -2711,6 +2817,79 @@ class DaemonApp:
                 }
             ],
         )
+
+    def _record_turn_postprocess_warning(
+        self,
+        *,
+        quest_id: str,
+        runner_name: str,
+        run_id: str,
+        skill_id: str,
+        model: str,
+        stage: str,
+        error: Exception,
+    ) -> None:
+        quest_root = self.home / "quests" / quest_id
+        summary = f"Runner post-run stage `{stage}` failed for run `{run_id}`: {error}"
+        append_jsonl(
+            quest_root / ".ds" / "events.jsonl",
+            {
+                "event_id": generate_id("evt"),
+                "type": "runner.turn_postprocess_warning",
+                "quest_id": quest_id,
+                "run_id": run_id,
+                "source": runner_name,
+                "skill_id": skill_id,
+                "model": model,
+                "stage": stage,
+                "summary": summary,
+                "created_at": utc_now(),
+            },
+        )
+        self.logger.log(
+            "error",
+            "runner.turn_postprocess_warning",
+            quest_id=quest_id,
+            run_id=run_id,
+            runner=runner_name,
+            skill_id=skill_id,
+            model=model,
+            stage=stage,
+            error=str(error),
+        )
+
+    def _ensure_turn_cleanup(self, quest_id: str, *, run_id: str, turn_reason: str) -> None:
+        snapshot = self.quest_service.snapshot(quest_id)
+        if str(snapshot.get("active_run_id") or "").strip() != str(run_id or "").strip():
+            return
+        try:
+            self._normalize_status_after_turn(quest_id, turn_reason=turn_reason)
+            return
+        except Exception as exc:
+            current_status = str(snapshot.get("status") or snapshot.get("display_status") or "active").strip() or "active"
+            normalized_status = "active" if current_status == "running" else current_status
+            self.quest_service.mark_turn_finished(quest_id, status=normalized_status)
+            quest_root = self.quest_service._quest_root(quest_id)
+            append_jsonl(
+                quest_root / ".ds" / "events.jsonl",
+                {
+                    "event_id": generate_id("evt"),
+                    "type": "runner.turn_cleanup_recovered",
+                    "quest_id": quest_id,
+                    "run_id": run_id,
+                    "status": normalized_status,
+                    "summary": f"Recovered turn cleanup after `_normalize_status_after_turn` failed: {exc}",
+                    "created_at": utc_now(),
+                },
+            )
+            self.logger.log(
+                "error",
+                "runner.turn_cleanup_recovered",
+                quest_id=quest_id,
+                run_id=run_id,
+                status=normalized_status,
+                error=str(exc),
+            )
 
     def _normalize_status_after_turn(self, quest_id: str, *, turn_reason: str = "user_message") -> None:
         with self._turn_lock:
@@ -5742,6 +5921,13 @@ class DaemonApp:
         return emitted
 
     def _lingzhu_short_status_text(self, quest_id: str | None) -> str:
+        normalized_quest_id = str(quest_id or "").strip()
+        if normalized_quest_id:
+            snapshot = self.quest_service.snapshot_fast(normalized_quest_id)
+            runtime_status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip().lower()
+            if runtime_status in {"running", "active"}:
+                return "进行中"
+            return self._lingzhu_status_hint_text(normalized_quest_id)
         return self._lingzhu_status_hint_text(quest_id)
 
     @staticmethod

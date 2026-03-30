@@ -47,6 +47,16 @@ def test_idea_skill_requires_survey_delta_and_memory_reuse_contract() -> None:
     assert "Do not write, promote, or submit a final idea" in text
     assert "standard citation format" in text
     assert "The selected idea draft must cite the survey papers" in text
+    assert "references/idea-generation-playbook.md" in text
+    assert "direction families, not a large within-family variant swarm" in text
+    assert "Treat within-family micro-variants as `optimize` brief work" in text
+    assert "selected / deferred / rejected outcomes explicitly" in text
+    assert "one selected idea or selected direction family" in text
+    assert "one-line rejection reason" in text
+    assert "Set the frontier width with a validation-cost estimate before widening" in text
+    assert "`fast-check`" in text
+    assert "`slow-check`" in text
+    assert "validation is cheaper than overthinking" in text
 
 
 def test_system_prompt_stays_compact_and_delegates_stage_sop() -> None:
@@ -56,6 +66,15 @@ def test_system_prompt_stays_compact_and_delegates_stage_sop() -> None:
     assert "Do not restate large stage-specific playbooks" in text
     assert len(text.splitlines()) < 400
     assert len(text) < 20000
+
+
+def test_system_prompt_keeps_idea_vs_optimize_boundary_compact() -> None:
+    text = _system_prompt_text()
+
+    assert "Do not start route generation from a preferred mechanism when the active bottleneck is still underspecified." in text
+    assert "When generating new routes, prefer a small differentiated frontier over many near-duplicate variants." in text
+    assert "Match frontier width to validation cost: widen more when tests are cheap; gate harder when tests are slow or expensive." in text
+    assert "Use `idea` for problem-framed direction families; use `optimize` for branchless candidate briefs, ranking, and promotion." in text
 
 
 def test_system_prompt_requires_outline_and_analysis_mapping_for_paper_work() -> None:
@@ -167,6 +186,7 @@ def test_optimize_skill_distinguishes_candidate_briefs_lines_and_attempts() -> N
     assert "references/optimize-checklist-template.md" in text
     assert "references/candidate-board-template.md" in text
     assert "references/method-brief-template.md" in text
+    assert "references/brief-shaping-playbook.md" in text
     assert "references/candidate-ranking-template.md" in text
     assert "references/frontier-review-template.md" in text
     assert "references/optimization-memory-template.md" in text
@@ -189,6 +209,20 @@ def test_optimize_skill_distinguishes_candidate_briefs_lines_and_attempts() -> N
     assert "distinct promotion policy" in text
     assert "mechanism family" in text
     assert "change-layer diversity" in text
+    assert "clarify the bottleneck, constraints, and comparability boundary first" in text
+    assert "generate a small differentiated slate, usually `2-3` serious approaches" in text
+    assert "recommend one approach with explicit tradeoffs against the alternatives" in text
+    assert "self-check the winning brief for ambiguity, overlap, and weak justification before submission" in text
+    assert "why_now" in text
+    assert "validation-cost-aware seed policy" in text
+    assert "validation-cost-aware loop policy" in text
+    assert "under about `20` minutes" in text
+    assert "if the validation loop is slow, do not keep paying for frontier uncertainty that could have been reduced in `brief`" in text
+    assert "gate evolution on clear objective signal" in text
+    assert "a separate smoke stage is optional; direct submission into quick parallel validation is acceptable" in text
+    assert "only skip smoke when the parallel quick validations are expected to produce distinguishable conclusions" in text
+    assert "smoke test or direct quick validation" in text
+    assert "you may skip a separate smoke stage and submit several quick validations in parallel" in text
     assert "Family-shift trigger" in text
     assert "Task-category primer" in text
     assert "simple-first" in text
@@ -204,6 +238,7 @@ def test_algorithm_first_companion_skills_handoff_into_optimize() -> None:
 
     assert "Algorithm-first exception" in idea_text
     assert "optimization brief frontier" in idea_text
+    assert "keep only a small differentiated `2-3` option slate" in idea_text
     assert "`artifact.get_optimization_frontier(...)`" in decision_text
     assert "frontier says `explore`" in decision_text
     assert "frontier says `fusion`" in decision_text

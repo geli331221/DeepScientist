@@ -6020,6 +6020,14 @@ class ArtifactService:
             )
         except Exception:
             pass
+        try:
+            self.quest_service.schedule_projection_refresh(
+                quest_root,
+                kinds=("details", "canvas"),
+                throttle_seconds=0.0,
+            )
+        except Exception:
+            pass
 
         should_checkpoint = self._should_checkpoint(record["kind"]) if checkpoint is None else checkpoint
         checkpoint_result = None

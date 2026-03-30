@@ -39,6 +39,7 @@ import {
   type ManuscriptEditMode,
   type ResearchIntensity,
   type ReviewFollowupPolicy,
+  type StandardProfile,
   type StartResearchTemplate,
   type StartResearchTemplateEntry,
 } from '@/lib/startResearch'
@@ -111,7 +112,7 @@ const copy = {
       'First choose whether this project should follow the ordinary research workflow or enter through a custom task type.',
     standardProfileLabel: 'Entry type',
     standardProfileHelp:
-      'In Standard mode, this stays on the canonical research workflow.',
+      'Choose whether Standard mode should follow the paper-oriented research path or the optimization-only path.',
     customProfileLabel: 'Entry type',
     customProfileHelp:
       'In Custom mode, choose what kind of entry this is: continue existing state, run a review audit, handle rebuttal / revision, or follow a freeform brief.',
@@ -263,6 +264,13 @@ const copy = {
       meta: 'Standard path',
       body: 'Stay on the normal full-research route: baseline, idea, experiment, analysis, and then paper work when justified.',
     },
+    standardOptimizationChoiceOption: {
+      title: 'Optimization task',
+      meta: 'Non-paper path',
+      body: 'Skip default paper writing and default analysis-campaign routing. Focus on many justified attempts to reach the strongest durable result.',
+    },
+    standardOptimizationPaperLock:
+      'Optimization task forces non-paper mode for this launch. If you later need paper writing, switch back to the canonical entry type or use a custom entry.',
     customProfileOptions: {
       continue_existing_state: 'Continue existing state — first audit baselines, results, drafts, and current project assets.',
       review_audit: 'Review — run an independent skeptical audit on the current draft or paper package.',
@@ -409,7 +417,7 @@ const copy = {
       '先选择这次项目是走普通科研工作流，还是通过自定义任务入口启动。',
     standardProfileLabel: '入口类型',
     standardProfileHelp:
-      '在 Standard 模式下，这里固定为普通科研工作流。',
+      '选择 Standard 模式是走论文导向的普通科研路径，还是走只追求最优结果的优化任务路径。',
     customProfileLabel: '入口类型',
     customProfileHelp:
       '在 Custom 模式下，选择这次启动属于哪一种入口：继续已有状态、Review、Rebuttal / Revision，还是自由任务。',
@@ -559,6 +567,13 @@ const copy = {
       meta: '标准主线',
       body: '沿用常规 full research 路线：baseline、方向选择、主实验、补充分析，以及在证据足够后进入论文工作。',
     },
+    standardOptimizationChoiceOption: {
+      title: '优化任务',
+      meta: '非论文路径',
+      body: '默认不做论文写作，也不走常规 analysis-campaign 主线，重点是做大量有依据的尝试，尽快逼近最优且可信的结果。',
+    },
+    standardOptimizationPaperLock:
+      '当前选择的是优化任务，本次启动会强制关闭论文模式。如果后续需要写论文，请切回普通科研工作流，或改用 custom 入口。',
     customProfileOptions: {
       continue_existing_state: '继续已有状态 —— 先审计 baseline、结果、草稿和现有项目资产。',
       review_audit: 'Review —— 先对当前 draft / paper package 做一次独立、skeptical 的审计。',
@@ -1115,6 +1130,7 @@ function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<Start
       research_intensity: 'balanced',
       decision_policy: 'autonomous',
       launch_mode: 'standard',
+      standard_profile: 'canonical_research_graph',
       custom_profile: 'freeform',
       review_followup_policy: 'audit_only',
       baseline_execution_policy: 'auto',
@@ -1152,6 +1168,7 @@ function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<Start
     research_intensity: 'balanced',
     decision_policy: 'autonomous',
     launch_mode: 'standard',
+    standard_profile: 'canonical_research_graph',
     custom_profile: 'freeform',
     review_followup_policy: 'audit_only',
     baseline_execution_policy: 'auto',
@@ -1314,14 +1331,19 @@ export function CreateProjectDialog({
   )
 
   const standardProfileItems = useMemo(
-    () => [
-      {
-        value: 'canonical_research_graph' as const,
-        title: t.standardProfileChoiceOption.title,
-        meta: t.standardProfileChoiceOption.meta,
-        description: t.standardProfileChoiceOption.body,
-      },
-    ],
+    () =>
+      (['canonical_research_graph', 'optimization_task'] as const).map((value) => {
+        const option =
+          value === 'optimization_task'
+            ? t.standardOptimizationChoiceOption
+            : t.standardProfileChoiceOption
+        return {
+          value,
+          title: option.title,
+          meta: option.meta,
+          description: option.body,
+        }
+      }),
     [t]
   )
 
@@ -1422,6 +1444,33 @@ export function CreateProjectDialog({
       return next
     })
   }
+
+  const applyStandardProfile = useCallback((profile: StandardProfile) => {
+    setForm((current) => {
+      const next: StartResearchTemplate = {
+        ...current,
+        standard_profile: profile,
+        need_research_paper: profile === 'optimization_task' ? false : true,
+      }
+      saveStartResearchDraft(next)
+      return next
+    })
+  }, [])
+
+  const applyLaunchMode = useCallback((mode: LaunchMode) => {
+    setForm((current) => {
+      const next: StartResearchTemplate = {
+        ...current,
+        launch_mode: mode,
+        need_research_paper:
+          mode === 'standard'
+            ? current.standard_profile !== 'optimization_task'
+            : current.need_research_paper,
+      }
+      saveStartResearchDraft(next)
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -1718,6 +1767,7 @@ export function CreateProjectDialog({
       research_intensity: next.research_intensity,
       decision_policy: next.decision_policy,
       launch_mode: next.launch_mode,
+      standard_profile: next.standard_profile,
       custom_profile: next.custom_profile,
       review_followup_policy: next.review_followup_policy,
       baseline_execution_policy: next.baseline_execution_policy,
@@ -1806,6 +1856,7 @@ export function CreateProjectDialog({
       research_intensity: saved.research_intensity,
       decision_policy: saved.decision_policy,
       launch_mode: saved.launch_mode,
+      standard_profile: saved.standard_profile,
       custom_profile: saved.custom_profile,
       review_followup_policy: effectiveReviewFollowupPolicy,
       baseline_execution_policy: saved.baseline_execution_policy,
@@ -2079,7 +2130,7 @@ export function CreateProjectDialog({
                   hint={t.launchModeHelp}
                   value={form.launch_mode}
                   items={launchModeItems}
-                  onChange={(value) => setField('launch_mode', value as LaunchMode)}
+                  onChange={(value) => applyLaunchMode(value as LaunchMode)}
                   disabled={manualOverride}
                 />
                 {form.launch_mode === 'custom' ? (
@@ -2178,9 +2229,9 @@ export function CreateProjectDialog({
                     label={t.standardProfileLabel}
                     help={t.standardProfileHelp}
                     hint={t.standardProfileHelp}
-                    value="canonical_research_graph"
+                    value={form.standard_profile}
                     items={standardProfileItems}
-                    onChange={() => {}}
+                    onChange={(value) => applyStandardProfile(value as StandardProfile)}
                     disabled={manualOverride}
                   />
                 )}
@@ -2202,27 +2253,29 @@ export function CreateProjectDialog({
                   onChange={(value) => setField('decision_policy', value as DecisionPolicy)}
                   disabled={manualOverride}
                 />
-                <InlineField label={t.researchPaperLabel} help={t.researchPaperHelp} hint={t.researchPaperHelp}>
-                  <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-3 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
-                          {form.need_research_paper ? t.researchPaperEnabled : t.researchPaperDisabled}
+                {form.launch_mode === 'custom' ? (
+                  <InlineField label={t.researchPaperLabel} help={t.researchPaperHelp} hint={t.researchPaperHelp}>
+                    <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-3 dark:border-[rgba(45,42,38,0.08)] dark:bg-white/76">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-[rgba(38,36,33,0.95)] dark:text-[rgba(38,36,33,0.95)]">
+                            {form.need_research_paper ? t.researchPaperEnabled : t.researchPaperDisabled}
+                          </div>
+                          <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
+                            {form.need_research_paper ? t.researchPaperEnabledBody : t.researchPaperDisabledBody}
+                          </div>
                         </div>
-                        <div className="mt-1 text-[11px] leading-5 text-[rgba(86,82,77,0.82)] dark:text-[rgba(86,82,77,0.82)]">
-                          {form.need_research_paper ? t.researchPaperEnabledBody : t.researchPaperDisabledBody}
-                        </div>
+                        <AnimatedCheckbox
+                          checked={form.need_research_paper}
+                          onChange={(checked) => setField('need_research_paper', checked)}
+                          disabled={manualOverride}
+                          size="md"
+                          className="shrink-0"
+                        />
                       </div>
-                      <AnimatedCheckbox
-                        checked={form.need_research_paper}
-                        onChange={(checked) => setField('need_research_paper', checked)}
-                        disabled={manualOverride}
-                        size="md"
-                        className="shrink-0"
-                      />
                     </div>
-                  </div>
-                </InlineField>
+                  </InlineField>
+                ) : null}
                 <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-[rgba(244,239,233,0.52)] px-3 py-3 dark:border-[rgba(45,42,38,0.08)] dark:bg-[rgba(244,239,233,0.62)]">
                   <div className="text-[11px] font-medium text-[rgba(75,73,69,0.78)] dark:text-[rgba(75,73,69,0.78)]">
                     {t.derivedPolicyTitle}

@@ -1,11 +1,12 @@
 'use client'
 
 import * as React from 'react'
-import { AlertTriangle, Link2, Moon, RefreshCw, Sun } from 'lucide-react'
+import { AlertTriangle, Link2, Moon, Plus, RefreshCw, Sun, Trash2 } from 'lucide-react'
 
 import { ConnectorTargetRadioGroup, type ConnectorTargetRadioItem } from '@/components/connectors/ConnectorTargetRadioGroup'
 import { EnhancedCard } from '@/components/ui/enhanced-card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { ConfirmModal } from '@/components/ui/modal'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Separator } from '@/components/ui/separator'
@@ -21,6 +22,46 @@ type ConflictItem = {
   quest_id: string
   title?: string | null
   reason?: string | null
+}
+
+type RunnerEnvRow = {
+  key: string
+  value: string
+}
+
+const DEFAULT_CODEX_ENV_KEYS = ['OPENAI_BASE_URL', 'OPENAI_API_KEY'] as const
+
+function normalizeRunnerEnvRows(raw: unknown): RunnerEnvRow[] {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  const rows: RunnerEnvRow[] = []
+  const seen = new Set<string>()
+  for (const key of DEFAULT_CODEX_ENV_KEYS) {
+    rows.push({
+      key,
+      value: typeof source[key] === 'string' ? source[key] : '',
+    })
+    seen.add(key)
+  }
+  for (const [rawKey, rawValue] of Object.entries(source)) {
+    const key = String(rawKey || '').trim()
+    if (!key || seen.has(key)) continue
+    rows.push({
+      key,
+      value: rawValue == null ? '' : String(rawValue),
+    })
+  }
+  return rows
+}
+
+function runnerEnvRowsToPayload(rows: RunnerEnvRow[]): Record<string, string> {
+  const payload: Record<string, string> = {}
+  for (const row of rows) {
+    const key = String(row.key || '').trim()
+    const value = String(row.value || '')
+    if (!key) continue
+    payload[key] = value
+  }
+  return payload
 }
 
 function connectorLabel(connector: ConnectorSnapshot, fallbackConnectorLabel: string) {
@@ -125,6 +166,14 @@ export function QuestSettingsSurface({
   const [confirmOpen, setConfirmOpen] = React.useState(false)
   const [confirmPayload, setConfirmPayload] = React.useState<Array<{ connector: string; conversation_id?: string | null }>>([])
   const [conflicts, setConflicts] = React.useState<ConflictItem[]>([])
+  const [runnerEnvRows, setRunnerEnvRows] = React.useState<RunnerEnvRow[]>(() =>
+    normalizeRunnerEnvRows({})
+  )
+  const [runnerEnvSaving, setRunnerEnvSaving] = React.useState(false)
+  const [runnerConfigRevision, setRunnerConfigRevision] = React.useState<string | null>(null)
+  const [savedRunnerEnvRows, setSavedRunnerEnvRows] = React.useState<RunnerEnvRow[]>(() =>
+    normalizeRunnerEnvRows({})
+  )
 
   const theme = useThemeStore((state) => state.theme)
   const setTheme = useThemeStore((state) => state.setTheme)
@@ -148,6 +197,26 @@ export function QuestSettingsSurface({
       window.clearInterval(timer)
     }
   }, [reloadConnectors])
+
+  const reloadRunnerEnv = React.useCallback(async () => {
+    const document = await client.configDocument('runners')
+    const structured =
+      document.meta?.structured_config && typeof document.meta.structured_config === 'object'
+        ? (document.meta.structured_config as Record<string, unknown>)
+        : {}
+    const codex =
+      structured.codex && typeof structured.codex === 'object'
+        ? (structured.codex as Record<string, unknown>)
+        : {}
+    const rows = normalizeRunnerEnvRows(codex.env)
+    setRunnerEnvRows(rows)
+    setSavedRunnerEnvRows(rows)
+    setRunnerConfigRevision(document.revision || null)
+  }, [])
+
+  React.useEffect(() => {
+    void reloadRunnerEnv()
+  }, [reloadRunnerEnv])
 
   React.useEffect(() => {
     if (!connectors.length) {
@@ -332,6 +401,47 @@ export function QuestSettingsSurface({
     []
   )
 
+  const saveRunnerEnv = React.useCallback(async () => {
+    setRunnerEnvSaving(true)
+    try {
+      const document = await client.configDocument('runners')
+      const structured =
+        document.meta?.structured_config && typeof document.meta.structured_config === 'object'
+          ? ({ ...(document.meta.structured_config as Record<string, unknown>) } as Record<string, unknown>)
+          : {}
+      const codex =
+        structured.codex && typeof structured.codex === 'object'
+          ? ({ ...(structured.codex as Record<string, unknown>) } as Record<string, unknown>)
+          : {}
+      codex.env = runnerEnvRowsToPayload(runnerEnvRows)
+      structured.codex = codex
+      const result = await client.saveConfig('runners', {
+        structured,
+        revision: document.revision || runnerConfigRevision || undefined,
+      })
+      if (!result.ok) {
+        toast({
+          title: 'Save failed',
+          description: String(result.message || 'Unable to update Codex environment variables.'),
+          variant: 'destructive',
+        })
+        return
+      }
+      await Promise.all([reloadRunnerEnv(), onRefresh()])
+      toast({
+        title: 'Saved',
+        description: 'Codex environment variables will be injected automatically on the next run.',
+      })
+    } finally {
+      setRunnerEnvSaving(false)
+    }
+  }, [onRefresh, reloadRunnerEnv, runnerConfigRevision, runnerEnvRows, toast])
+
+  const runnerEnvDirty = React.useMemo(
+    () => JSON.stringify(runnerEnvRows) !== JSON.stringify(savedRunnerEnvRows),
+    [runnerEnvRows, savedRunnerEnvRows]
+  )
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden p-4 sm:p-5">
       <div className="flex min-h-0 flex-1 flex-col gap-4 rounded-[28px] border border-black/[0.06] bg-white/[0.42] p-4 shadow-card backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.03] sm:p-5">
@@ -373,6 +483,98 @@ export function QuestSettingsSurface({
               </div>
               <div className="text-xs text-muted-foreground">
                 This setting applies to the whole web workspace (not just this project).
+              </div>
+            </div>
+          </EnhancedCard>
+
+          <EnhancedCard
+            enableSpotlight={false}
+            className="border border-border/60 bg-[var(--ds-panel-elevated)]/70 backdrop-blur-xl shadow-[var(--ds-shadow-md)]"
+          >
+            <div className="p-4 space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Codex environment</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    These variables are injected when DeepScientist starts Codex. Empty values are ignored.
+                  </div>
+                  {runnerEnvDirty ? (
+                    <div className="mt-2 text-xs font-medium text-[var(--ds-brand)]">
+                      Unsaved changes. Click `Save env vars` to apply them.
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      setRunnerEnvRows((current) => [...current, { key: '', value: '' }])
+                    }
+                  >
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => void saveRunnerEnv()}
+                    disabled={runnerEnvSaving || !runnerEnvDirty}
+                  >
+                    <Link2 className="mr-2 h-4 w-4" />
+                    Save env vars
+                  </Button>
+                </div>
+              </div>
+
+              <Separator className="bg-border/50" />
+
+              <div className="space-y-3">
+                {runnerEnvRows.map((row, index) => (
+                  <div key={`${row.key || 'env'}-${index}`} className="grid gap-3 md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.35fr)_auto]">
+                    <Input
+                      value={row.key}
+                      onChange={(event) =>
+                        setRunnerEnvRows((current) =>
+                          current.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, key: event.target.value } : item
+                          )
+                        )
+                      }
+                      placeholder={index < DEFAULT_CODEX_ENV_KEYS.length ? DEFAULT_CODEX_ENV_KEYS[index] : 'ENV_NAME'}
+                    />
+                    <Input
+                      value={row.value}
+                      onChange={(event) =>
+                        setRunnerEnvRows((current) =>
+                          current.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, value: event.target.value } : item
+                          )
+                        )
+                      }
+                      placeholder="value"
+                    />
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="shrink-0"
+                      onClick={() =>
+                        setRunnerEnvRows((current) => {
+                          if (index < DEFAULT_CODEX_ENV_KEYS.length) {
+                            return current.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, value: '' } : item
+                            )
+                          }
+                          return current.filter((_, itemIndex) => itemIndex !== index)
+                        })
+                      }
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
               </div>
             </div>
           </EnhancedCard>

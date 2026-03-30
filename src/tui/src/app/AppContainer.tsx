@@ -1838,6 +1838,10 @@ export const AppContainer: React.FC<{ baseUrl: string; initialQuestId?: string |
     setStatusLine(nextStatus)
   }, [])
 
+  const openConfigBrowser = useCallback((nextStatus?: string) => {
+    openConfigRoot(nextStatus)
+  }, [openConfigRoot])
+
   const openConnectorBrowser = useCallback(
     async (targetConnector?: ManagedConnectorName | null) => {
       try {

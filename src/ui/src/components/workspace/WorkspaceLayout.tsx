@@ -2907,15 +2907,37 @@ function CenterPanel({
 
   if (localQuestMode && resolvedQuestWorkspaceView) {
     return (
-      <QuestWorkspaceSurface
-        questId={projectId}
-        safePaddingLeft={safePaddingLeft}
-        safePaddingRight={safePaddingRight}
-        view={resolvedQuestWorkspaceView}
-        stageSelection={getQuestWorkspaceStageSelection(resolvedTab)}
-        onViewChange={openQuestWorkspaceTab}
-        workspace={workspace}
-      />
+      <div className="panel center-panel morandi-glow ds-stage" style={{ flex: 1 }}>
+        <div
+          className={cn('ds-stage-safe h-full min-h-0 overflow-hidden', tabSwitching && 'ds-stage-switch')}
+          style={{ paddingLeft: safePaddingLeft, paddingRight: safePaddingRight }}
+        >
+          <div className="relative h-full min-h-0 overflow-hidden">
+            {projectTabs.map((tab) => {
+              const isActive = tab.id === activeTabIdForProject
+              const shouldRender = isActive || mountedTabIds.has(tab.id)
+              if (!shouldRender || !isQuestWorkspaceTab(tab, projectId)) return null
+              return (
+                <div
+                  key={tab.id}
+                  className={cn('absolute inset-0 min-h-0', isActive ? 'block z-10' : 'hidden z-0')}
+                  aria-hidden={!isActive}
+                >
+                  <QuestWorkspaceSurface
+                    questId={projectId}
+                    safePaddingLeft={0}
+                    safePaddingRight={0}
+                    view={getQuestWorkspaceTabView(tab)}
+                    stageSelection={getQuestWorkspaceStageSelection(tab)}
+                    onViewChange={openQuestWorkspaceTab}
+                    workspace={workspace}
+                  />
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
     )
   }
 

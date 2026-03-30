@@ -1,5 +1,17 @@
 export type Locale = 'en' | 'zh'
 
+export interface ProjectionStatus {
+  projection_id: string
+  state: 'missing' | 'queued' | 'building' | 'ready' | 'stale' | 'failed' | string
+  progress_current?: number
+  progress_total?: number
+  current_step?: string | null
+  source_signature?: string | null
+  generated_at?: string | null
+  last_success_at?: string | null
+  error?: string | null
+}
+
 export interface GuidanceRoute {
   action: string
   label: string
@@ -868,6 +880,7 @@ export interface GitBranchesPayload {
   head?: string
   nodes: GitBranchNode[]
   edges: GitBranchEdge[]
+  projection_status?: ProjectionStatus | null
   views?: {
     ideas?: string[]
     analysis?: string[]
@@ -1033,6 +1046,7 @@ export interface WorkflowPayload {
     document_id?: string
     writable?: boolean
   }>
+  projection_status?: ProjectionStatus | null
   optimization_frontier?: {
     mode?: string | null
     frontier_reason?: string | null

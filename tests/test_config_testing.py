@@ -43,6 +43,33 @@ def test_default_config_removes_report_palette_settings_and_keeps_qq_media_polic
     assert connectors_payload["weixin"]["auto_send_main_experiment_png"] is True
 
 
+def test_default_runtime_config_enables_telegram_feishu_and_whatsapp_system_gates(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    gates = manager.system_connector_gates()
+
+    assert gates["qq"] is True
+    assert gates["weixin"] is True
+    assert gates["telegram"] is True
+    assert gates["feishu"] is True
+    assert gates["whatsapp"] is True
+    assert gates["lingzhu"] is True
+
+
+def test_daemon_app_exposes_telegram_feishu_and_whatsapp_as_system_enabled(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    app = DaemonApp(temp_home)
+
+    assert app._is_connector_system_enabled("telegram") is True
+    assert app._is_connector_system_enabled("feishu") is True
+    assert app._is_connector_system_enabled("whatsapp") is True
+
+
 def test_config_normalization_strips_legacy_report_palette_block(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
@@ -729,6 +756,53 @@ def test_codex_probe_passes_profile_and_runner_env_to_subprocess(monkeypatch, te
     assert result["details"]["profile"] == "m27"
     assert captured["command"][:4] == ["/tmp/fake-codex", "--search", "--profile", "m27"]
     assert captured["env"]["MINIMAX_API_KEY"] == "secret-value"
+
+
+def test_codex_probe_omits_empty_runner_env_values(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        if list(command) == ["/tmp/fake-codex", "--version"]:
+            class VersionResult:
+                returncode = 0
+                stdout = "codex-cli 0.116.0"
+                stderr = ""
+
+            return VersionResult()
+        captured["env"] = dict(kwargs.get("env") or {})
+
+        class Result:
+            returncode = 0
+            stdout = '{"type":"item.completed","item":{"text":"HELLO"}}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("deepscientist.config.service.subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner(
+        {
+            "binary": "codex",
+            "model": "inherit",
+            "env": {
+                "OPENAI_BASE_URL": "",
+                "OPENAI_API_KEY": "",
+                "MINIMAX_API_KEY": "secret-value",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert "MINIMAX_API_KEY" in captured["env"]
+    assert "OPENAI_BASE_URL" not in captured["env"]
+    assert "OPENAI_API_KEY" not in captured["env"]
 
 
 def test_codex_probe_adapts_profile_only_provider_config_for_legacy_minimax_shape(monkeypatch, temp_home: Path) -> None:

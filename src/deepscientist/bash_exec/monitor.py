@@ -485,7 +485,7 @@ def run_monitor(session_dir: Path) -> int:
                 _terminate_process(process, process_group_id)
                 stop_requested = True
 
-            if output_fd is not None and process.poll() is None:
+            if ((using_pty and master_fd is not None) or process.stdin is not None) and process.poll() is None:
                 cursor_payload = read_json(input_cursor_path, {}) or {}
                 offset = int(cursor_payload.get("offset") or 0)
                 total_input_entries = sum(1 for _ in iter_jsonl(input_path))

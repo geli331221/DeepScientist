@@ -612,6 +612,34 @@ def test_prompt_builder_mentions_algorithm_first_mode_when_paper_disabled(temp_h
     assert "do not self-route into paper work by default" in prompt
 
 
+def test_prompt_builder_strengthens_standard_optimization_entry_guidance(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    snapshot = service.create(
+        "run the standard optimization-only entry",
+        startup_contract={
+            "launch_mode": "standard",
+            "standard_profile": "optimization_task",
+            "need_research_paper": False,
+        },
+    )
+    builder = PromptBuilder(repo_root(), temp_home)
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="optimize",
+        user_message="Keep iterating toward the strongest result without paper work.",
+        model="gpt-5.4",
+    )
+
+    assert "standard_profile: optimization_task" in prompt
+    assert "standard_optimization_entry_rule:" in prompt
+    assert "do not route into `analysis-campaign` by default" in prompt
+    assert "do not route into `write`, `review`, or `finalize`" in prompt
+    assert "do not treat missing paper artifacts or missing analysis-campaign artifacts as unfinished work" in prompt
+
+
 def test_prompt_builder_supports_optimize_as_standard_stage_skill(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()

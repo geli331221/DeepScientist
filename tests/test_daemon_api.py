@@ -185,7 +185,7 @@ def test_handlers_workflow_includes_optimization_frontier_when_available(temp_ho
         next_target="optimize",
     )
 
-    workflow = app.handlers.workflow(quest_id)
+    workflow = _wait_for_projection_ready(lambda: app.handlers.workflow(quest_id))
     assert workflow["optimization_frontier"]["mode"] in {"explore", "exploit", "fusion", "stop"}
     assert workflow["optimization_frontier"]["candidate_backlog"]["candidate_brief_count"] == 1
 
@@ -202,6 +202,132 @@ def _wait_for_json(url: str, *, timeout: float = 10.0) -> dict | list:
     if last_error is not None:
         raise last_error
     raise TimeoutError(f"Timed out waiting for JSON response from {url}")
+
+
+def _wait_for_projection_ready(loader, *, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    last_payload = None
+    while time.time() < deadline:
+        last_payload = loader()
+        state = str(((last_payload or {}).get("projection_status") or {}).get("state") or "").strip().lower()
+        if not state or state == "ready":
+            return last_payload
+        time.sleep(0.05)
+    if last_payload is not None:
+        return last_payload
+    return loader()
+
+
+def test_workflow_projection_returns_placeholder_then_ready(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("workflow projection quest")
+    quest_id = quest["quest_id"]
+    service = app.quest_service
+
+    started = threading.Event()
+    release = threading.Event()
+    original = service._build_details_projection_payload
+
+    def _blocked_details_builder(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_build_details_projection_payload", _blocked_details_builder)
+
+    initial = service.workflow(quest_id)
+    initial_state = str(((initial or {}).get("projection_status") or {}).get("state") or "").strip().lower()
+    assert initial_state in {"queued", "building", "stale", "missing"}
+    assert isinstance(initial.get("changed_files"), list)
+    assert started.wait(timeout=2.0)
+
+    release.set()
+    ready = _wait_for_projection_ready(lambda: service.workflow(quest_id))
+    assert str(((ready or {}).get("projection_status") or {}).get("state") or "").strip().lower() == "ready"
+    changed_paths = [str(item.get("path") or "") for item in ready.get("changed_files") or []]
+    assert any(path.endswith("/brief.md") for path in changed_paths)
+
+
+def test_quest_session_prewarms_details_and_canvas_projections(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("session prewarm quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    session = app.handlers.quest_session(quest_id)
+    assert session["ok"] is True
+
+    manifest_path = quest_root / ".ds" / "projections" / "manifest.json"
+    deadline = time.time() + 5.0
+    manifest = {}
+    while time.time() < deadline:
+        manifest = read_json(manifest_path, {})
+        projections = manifest.get("projections") if isinstance(manifest, dict) else {}
+        if isinstance(projections, dict) and {"details", "canvas"}.issubset(projections.keys()):
+            break
+        time.sleep(0.05)
+
+    projections = manifest.get("projections") if isinstance(manifest, dict) else {}
+    assert isinstance(projections, dict)
+    assert "details" in projections
+    assert "canvas" in projections
+
+
+def test_runtime_state_update_schedules_details_projection_refresh(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("runtime projection refresh quest")
+    quest_root = Path(quest["quest_root"])
+    queued: list[str] = []
+
+    def _capture_queue(target_root: Path, kind: str, *, source_signature: str) -> None:
+        assert target_root == quest_root
+        assert source_signature
+        queued.append(kind)
+
+    monkeypatch.setattr(app.quest_service, "_queue_projection_build", _capture_queue)
+
+    app.quest_service.update_runtime_state(
+        quest_root=quest_root,
+        status="running",
+        active_run_id="run-projection-refresh",
+    )
+
+    assert queued == ["details"]
+
+
+def test_research_state_update_schedules_details_and_canvas_projection_refresh(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("research projection refresh quest")
+    quest_root = Path(quest["quest_root"])
+    queued: list[str] = []
+
+    def _capture_queue(target_root: Path, kind: str, *, source_signature: str) -> None:
+        assert target_root == quest_root
+        assert source_signature
+        queued.append(kind)
+
+    monkeypatch.setattr(app.quest_service, "_queue_projection_build", _capture_queue)
+
+    app.quest_service.update_research_state(
+        quest_root,
+        current_workspace_branch="ideas/projection-refresh",
+    )
+
+    assert queued == ["details", "canvas"]
 
 
 def test_runtime_state_updates_do_not_revert_status_on_concurrent_writes(temp_home: Path) -> None:
@@ -3649,6 +3775,175 @@ def test_daemon_startup_reconciles_stale_running_quest(temp_home: Path) -> None:
         and item.get("abandoned_run_id") == "run-crashed-001"
         for item in events
     )
+
+
+def test_submit_user_message_reconciles_stale_active_turn_and_starts_new_run(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("stale active turn submit quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    app.quest_service.set_continuation_state(quest_root, policy="none")
+
+    stale_run_id = "run-stale-submit-001"
+    app.quest_service.mark_turn_started(quest_id, run_id=stale_run_id, status="running")
+    stale_run_root = ensure_dir(quest_root / ".ds" / "runs" / stale_run_id)
+    write_json(
+        stale_run_root / "result.json",
+        {
+            "ok": True,
+            "run_id": stale_run_id,
+            "model": "gpt-5.4",
+            "exit_code": 0,
+            "output_text": "stale result",
+            "stderr_text": "",
+            "completed_at": utc_now(),
+        },
+    )
+
+    class RecoveryRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests: list[str] = []
+
+        def run(self, request):
+            self.requests.append(request.message)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text=f"Recovered: {request.message}",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = RecoveryRunner()
+    app.runners["codex"] = runner
+
+    payload = app.submit_user_message(
+        quest_id,
+        text="Please continue after stale state.",
+        source="web-react",
+    )
+
+    assert payload["started"] is True
+    assert payload["queued"] is False
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        if runner.requests:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("stale active turn was not reconciled into a fresh run")
+
+    assert runner.requests[0] == "Please continue after stale state."
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        if snapshot["active_run_id"] is None:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("fresh run did not clear active_run_id after completing")
+
+    events = app.quest_service.events(quest_id)["events"]
+    assert any(
+        item.get("type") == "quest.turn_state_reconciled"
+        and item.get("abandoned_run_id") == stale_run_id
+        for item in events
+    )
+
+
+def test_run_quest_turn_clears_active_run_when_assistant_append_fails(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("append failure cleanup quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    app.quest_service.set_continuation_state(quest_root, policy="none")
+
+    app.quest_service.append_message(
+        quest_id,
+        role="user",
+        content="Please inspect the failure path.",
+        source="web-react",
+    )
+
+    class SuccessfulRunner:
+        binary = ""
+
+        def run(self, request):
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="Assistant output should still clear runtime state.",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    app.runners["codex"] = SuccessfulRunner()
+
+    original_append_message = app.quest_service.append_message
+
+    def _broken_append_message(target_quest_id, role, content, source="local", **kwargs):  # noqa: ANN001
+        if role == "assistant":
+            raise RuntimeError("assistant append exploded")
+        return original_append_message(target_quest_id, role, content, source=source, **kwargs)
+
+    monkeypatch.setattr(app.quest_service, "append_message", _broken_append_message)
+
+    app._turn_state[quest_id] = {"running": True, "pending": False, "reason": "user_message"}
+    app._run_quest_turn(quest_id)
+
+    snapshot = app.quest_service.snapshot(quest_id)
+    assert snapshot["active_run_id"] is None
+    assert snapshot["status"] == "active"
+
+    events = app.quest_service.events(quest_id)["events"]
+    assert any(
+        item.get("type") == "runner.turn_postprocess_warning"
+        and item.get("stage") == "append_message"
+        for item in events
+    )
+
+
+def test_drain_turns_clears_running_state_after_worker_exception(
+    temp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("turn drain exception quest")
+    quest_id = quest["quest_id"]
+
+    def _boom(_quest_id: str) -> None:
+        raise RuntimeError("turn exploded")
+
+    monkeypatch.setattr(app, "_run_quest_turn", _boom)
+
+    app._turn_state[quest_id] = {"running": True, "pending": True, "reason": "user_message"}
+    app._drain_turns(quest_id)
+
+    state = dict(app._turn_state.get(quest_id) or {})
+    assert state["running"] is False
+    assert "worker" not in state
 
 
 def test_daemon_auto_resumes_recent_reconciled_quest(temp_home: Path) -> None:

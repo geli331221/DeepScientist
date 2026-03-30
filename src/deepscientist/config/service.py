@@ -48,6 +48,7 @@ from .models import (
     ConfigFileInfo,
     SYSTEM_CONNECTOR_NAMES,
     config_filename,
+    default_system_enabled_connectors,
     default_payload,
 )
 
@@ -112,8 +113,9 @@ class ConfigManager:
         config = self.load_runtime_config()
         connectors = config.get("connectors") if isinstance(config.get("connectors"), dict) else {}
         system_enabled = connectors.get("system_enabled") if isinstance(connectors.get("system_enabled"), dict) else {}
+        defaults = default_system_enabled_connectors()
         return {
-            name: self._coerce_bool(system_enabled.get(name), default=name in {"qq", "weixin"})
+            name: self._coerce_bool(system_enabled.get(name), default=defaults.get(name, False))
             for name in SYSTEM_CONNECTOR_NAMES
         }
 
@@ -1207,7 +1209,10 @@ Use **Test** when the file exposes runtime dependencies.
             env_key = str(key or "").strip()
             if not env_key or value is None:
                 continue
-            resolved[env_key] = str(value)
+            env_value = str(value)
+            if env_value == "":
+                continue
+            resolved[env_key] = env_value
         return resolved
 
     def _prepare_codex_probe_home(

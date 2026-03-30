@@ -14,6 +14,7 @@ export type GitStrategy =
 export type ResearchIntensity = 'light' | 'balanced' | 'sprint'
 export type DecisionPolicy = 'autonomous' | 'user_gated'
 export type LaunchMode = 'standard' | 'custom'
+export type StandardProfile = 'canonical_research_graph' | 'optimization_task'
 export type CustomProfile =
   | 'continue_existing_state'
   | 'review_audit'
@@ -44,6 +45,7 @@ export type StartResearchTemplate = {
   research_intensity: ResearchIntensity
   decision_policy: DecisionPolicy
   launch_mode: LaunchMode
+  standard_profile: StandardProfile
   custom_profile: CustomProfile
   review_followup_policy: ReviewFollowupPolicy
   baseline_execution_policy: BaselineExecutionPolicy
@@ -163,6 +165,7 @@ export function defaultStartResearchTemplate(language: 'en' | 'zh'): StartResear
     research_intensity: 'balanced',
     decision_policy: 'autonomous',
     launch_mode: 'standard',
+    standard_profile: 'canonical_research_graph',
     custom_profile: 'freeform',
     review_followup_policy: 'audit_only',
     baseline_execution_policy: 'auto',
@@ -280,6 +283,7 @@ export function listReferenceStartResearchTemplates(): StartResearchTemplateEntr
     research_intensity: 'balanced',
     decision_policy: 'autonomous',
     launch_mode: 'standard',
+    standard_profile: 'canonical_research_graph',
     custom_profile: 'freeform',
     review_followup_policy: 'audit_only',
     baseline_execution_policy: 'auto',
@@ -328,6 +332,7 @@ export function listReferenceStartResearchTemplates(): StartResearchTemplateEntr
     research_intensity: 'balanced',
     decision_policy: 'autonomous',
     launch_mode: 'standard',
+    standard_profile: 'canonical_research_graph',
     custom_profile: 'freeform',
     review_followup_policy: 'audit_only',
     baseline_execution_policy: 'auto',
@@ -414,6 +419,11 @@ function sanitizeLaunchMode(value: unknown): LaunchMode {
   return normalized === 'custom' ? 'custom' : 'standard'
 }
 
+function sanitizeStandardProfile(value: unknown): StandardProfile {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'optimization_task' ? 'optimization_task' : 'canonical_research_graph'
+}
+
 function sanitizeCustomProfile(value: unknown): CustomProfile {
   const normalized = String(value || '').trim().toLowerCase()
   if (
@@ -496,6 +506,7 @@ function sanitizeTemplate(input: PersistedStartResearchTemplate): StartResearchT
     research_intensity: sanitizeResearchIntensity(input.research_intensity, input),
     decision_policy: sanitizeDecisionPolicy(input.decision_policy),
     launch_mode: sanitizeLaunchMode(input.launch_mode),
+    standard_profile: sanitizeStandardProfile(input.standard_profile),
     custom_profile: sanitizeCustomProfile(input.custom_profile),
     review_followup_policy: sanitizeReviewFollowupPolicy(input.review_followup_policy),
     baseline_execution_policy: sanitizeBaselineExecutionPolicy(input.baseline_execution_policy),
@@ -550,6 +561,15 @@ function labelLaunchMode(value: LaunchMode) {
       return 'Custom mode: start from an existing state, review-driven task, or a user-defined brief instead of assuming a blank full-research launch.'
     default:
       return 'Standard mode: start from the ordinary canonical research loop and let the default stage graph drive the first round.'
+  }
+}
+
+function labelStandardProfile(value: StandardProfile) {
+  switch (value) {
+    case 'optimization_task':
+      return 'Optimization task: skip default paper writing and avoid default analysis-campaign routing; focus on repeated implementation attempts and the strongest justified result.'
+    default:
+      return 'Canonical research workflow: follow the ordinary research graph from baseline and idea selection through experiment, analysis, and paper work when justified.'
   }
 }
 
@@ -662,6 +682,7 @@ function deliveryModeLines(needResearchPaper: boolean) {
     '- A research paper is NOT required for this project.',
     '- The primary goal is the strongest justified algorithmic result, not paper drafting or paper packaging.',
     '- The project must still do rigorous baseline work, literature-grounded idea selection, implementation, and main experiments.',
+    '- Do not schedule analysis-campaign work by default; only run extra analysis when it directly changes optimization decisions or validates a suspected result.',
     '- After each `artifact.record_main_experiment(...)`, use the measured result to decide the next optimization step.',
     '- The idea stage only creates or revises a candidate direction; it does not by itself decide the next round.',
     '- The agent should decide how to continue from durable evidence such as the accepted baseline, the current research head, and the strongest recent main-experiment result.',
@@ -688,8 +709,17 @@ function decisionPolicyLines(value: DecisionPolicy) {
 function customLaunchLines(input: StartResearchTemplate) {
   const normalized = sanitizeTemplate(input)
   if (normalized.launch_mode !== 'custom') {
+    if (normalized.standard_profile === 'optimization_task') {
+      return [
+        '- Standard launch mode is active.',
+        '- Standard profile: optimization task.',
+        '- This standard entry is non-paper by default: do not plan around paper writing, paper review, paper bundle work, or default analysis-campaign expansion.',
+        '- The first round should focus on baseline trust, implementation attempts, fast iteration, main-experiment measurement, and promotion of the strongest durable optimization line.',
+      ]
+    }
     return [
       '- Standard launch mode is active.',
+      '- Standard profile: canonical research workflow.',
       '- Start from the canonical research graph unless durable state later proves that a non-standard entry path is better.',
     ]
   }
@@ -789,6 +819,7 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
     '',
     'Research Contract',
     `- Launch mode: ${labelLaunchMode(normalized.launch_mode)}`,
+    `- Standard entry type: ${normalized.launch_mode === 'standard' ? labelStandardProfile(normalized.standard_profile) : 'Not applicable outside Standard mode.'}`,
     `- Research intensity: ${labelResearchIntensity(normalized.research_intensity)}`,
     `- Decision policy: ${labelDecisionPolicy(normalized.decision_policy)}`,
     `- Research paper required: ${normalized.need_research_paper ? 'Yes' : 'No; optimize for the strongest justified algorithmic result.'}`,
@@ -806,7 +837,9 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
     '- Reuse existing baseline artifacts whenever possible before rebuilding them.',
     normalized.launch_mode === 'custom'
       ? '- Custom launch mode is authoritative here: do not restart from scratch unless the existing state is unusable or misleading.'
-      : '- Standard launch mode is active here: use the canonical research graph unless later durable evidence justifies a different entry path.',
+      : normalized.standard_profile === 'optimization_task'
+        ? '- Standard optimization entry is authoritative here: do not drift into paper writing or default analysis-campaign work unless the user later changes scope.'
+        : '- Standard launch mode is active here: use the canonical research graph unless later durable evidence justifies a different entry path.',
     '- Emit explicit milestone updates after each meaningful step.',
     '- Every decision must include reasons, evidence, and the next recommended action.',
     '- If the startup contract already fixes the delivery mode and baseline policy, follow it without asking the user again unless cost, safety, or scope changes materially.',

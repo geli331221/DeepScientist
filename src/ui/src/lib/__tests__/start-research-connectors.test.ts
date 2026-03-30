@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  compileStartResearchPrompt,
+  defaultStartResearchTemplate,
   resolveStartResearchConnectorBindings,
+  saveStartResearchTemplate,
   shouldRecommendStartResearchConnectorBinding,
 } from '../startResearch'
 
@@ -163,5 +166,39 @@ describe('resolveStartResearchConnectorBindings', () => {
       qq: null,
       telegram: null,
     })
+  })
+})
+
+describe('start research standard profiles', () => {
+  it('defaults standard mode to the canonical research graph', () => {
+    expect(defaultStartResearchTemplate('en').standard_profile).toBe('canonical_research_graph')
+  })
+
+  it('persists and recompiles the optimization task profile', () => {
+    const saved = saveStartResearchTemplate({
+      ...defaultStartResearchTemplate('en'),
+      launch_mode: 'standard',
+      standard_profile: 'optimization_task',
+      need_research_paper: false,
+      goal: 'Optimize the system rather than writing a paper.',
+    })
+
+    expect(saved.standard_profile).toBe('optimization_task')
+    expect(saved.compiled_prompt).toContain('Optimization task:')
+    expect(saved.compiled_prompt).toContain('Do not schedule analysis-campaign work by default')
+  })
+
+  it('describes the optimization task as non-paper in the compiled prompt', () => {
+    const prompt = compileStartResearchPrompt({
+      ...defaultStartResearchTemplate('en'),
+      launch_mode: 'standard',
+      standard_profile: 'optimization_task',
+      need_research_paper: false,
+      goal: 'Search for the strongest result only.',
+    })
+
+    expect(prompt).toContain('Standard profile: optimization task.')
+    expect(prompt).toContain('do not plan around paper writing')
+    expect(prompt).toContain('do not drift into paper writing or default analysis-campaign work')
   })
 })

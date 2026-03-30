@@ -761,6 +761,15 @@ class PromptBuilder:
         return "standard"
 
     @staticmethod
+    def _standard_profile(snapshot: dict) -> str:
+        startup_contract = snapshot.get("startup_contract")
+        if isinstance(startup_contract, dict):
+            value = str(startup_contract.get("standard_profile") or "").strip().lower()
+            if value in {"canonical_research_graph", "optimization_task"}:
+                return value
+        return "canonical_research_graph"
+
+    @staticmethod
     def _custom_profile(snapshot: dict) -> str:
         startup_contract = snapshot.get("startup_contract")
         if isinstance(startup_contract, dict):
@@ -799,6 +808,7 @@ class PromptBuilder:
     def _research_delivery_policy_block(self, snapshot: dict) -> str:
         need_research_paper = self._need_research_paper(snapshot)
         launch_mode = self._launch_mode(snapshot)
+        standard_profile = self._standard_profile(snapshot)
         custom_profile = self._custom_profile(snapshot)
         baseline_execution_policy = self._baseline_execution_policy(snapshot)
         review_followup_policy = self._review_followup_policy(snapshot)
@@ -806,6 +816,7 @@ class PromptBuilder:
         lines = [
             f"- need_research_paper: {need_research_paper}",
             f"- launch_mode: {launch_mode}",
+            f"- standard_profile: {standard_profile if launch_mode == 'standard' else 'n/a'}",
             f"- custom_profile: {custom_profile if launch_mode == 'custom' else 'n/a'}",
             f"- review_followup_policy: {review_followup_policy if custom_profile == 'review_audit' else 'n/a'}",
             f"- baseline_execution_policy: {baseline_execution_policy if launch_mode == 'custom' else 'n/a'}",
@@ -900,6 +911,15 @@ class PromptBuilder:
                         "- manuscript_edit_rule: when manuscript revision is needed, provide section-level copy-ready replacement text and explicit deltas even if no LaTeX source is available.",
                     ]
                 )
+        elif standard_profile == "optimization_task":
+            lines.extend(
+                [
+                    "- standard_optimization_entry_rule: this standard entry is explicitly optimization-only; treat repeated implementation attempts and measured main-experiment results as the primary progress loop.",
+                    "- standard_optimization_no_analysis_default: do not route into `analysis-campaign` by default; only run extra analysis when it directly validates a suspected win, disambiguates a frontier decision, or exposes a concrete failure mode that changes the next optimization move.",
+                    "- standard_optimization_no_writing_default: do not route into `write`, `review`, or `finalize` while this optimization task profile remains active unless the user explicitly broadens scope.",
+                    "- standard_optimization_iteration_rule: prefer more justified optimization attempts, branch promotion, or frontier cleanup over paper-facing packaging.",
+                ]
+            )
         if need_research_paper:
             lines.extend(
                 [
@@ -995,6 +1015,7 @@ class PromptBuilder:
         need_research_paper = self._need_research_paper(snapshot)
         decision_policy = self._decision_policy(snapshot)
         launch_mode = self._launch_mode(snapshot)
+        standard_profile = self._standard_profile(snapshot)
         custom_profile = self._custom_profile(snapshot)
         lines = [
             f"- configured_default_locale: {default_locale}",
@@ -1002,6 +1023,7 @@ class PromptBuilder:
             f"- bound_conversation_count: {len(bound_conversations)}",
             f"- decision_policy: {decision_policy}",
             f"- launch_mode: {launch_mode}",
+            f"- standard_profile: {standard_profile if launch_mode == 'standard' else 'n/a'}",
             f"- custom_profile: {custom_profile if launch_mode == 'custom' else 'n/a'}",
             "- collaboration_mode: long-horizon, continuity-first, artifact-aware",
             "- response_pattern: say what changed -> say what it means -> say what happens next",
@@ -1057,6 +1079,10 @@ class PromptBuilder:
         else:
             lines.append(
                 "- completion_protocol: when `startup_contract.need_research_paper` is false, the quest goal is the strongest justified algorithmic result; keep iterating from measured main-experiment results and do not self-route into paper work by default"
+            )
+        if launch_mode == "standard" and standard_profile == "optimization_task":
+            lines.append(
+                "- standard_optimization_completion_protocol: in this entry profile, do not treat missing paper artifacts or missing analysis-campaign artifacts as unfinished work by themselves; keep pushing the optimization frontier until the result plateaus, a blocker appears, or the user changes scope."
             )
         if chinese_turn:
             lines.extend(

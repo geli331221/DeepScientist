@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, unquote
 from ...acp import OptionalACPBridge, build_session_descriptor, build_session_update, get_acp_bridge_status
 from ...bash_exec.service import DEFAULT_TERMINAL_SESSION_ID
 from ... import __version__ as DEEPSCIENTIST_VERSION
-from ...gitops import commit_detail, compare_refs, diff_file_between_refs, diff_file_for_commit, export_git_graph, list_branch_canvas, log_ref_history
+from ...gitops import commit_detail, compare_refs, diff_file_between_refs, diff_file_for_commit, export_git_graph, log_ref_history
 from ...memory import MemoryService
 from ...quest import QuestService
 from ...shared import generate_id, read_json, read_text, resolve_within, run_command, sha256_text, utc_now
@@ -474,6 +474,11 @@ npm --prefix src/ui run build</pre>
 
     def quest_session(self, quest_id: str) -> dict:
         snapshot = self.app.quest_service.snapshot_fast(quest_id)
+        for kind in ("details", "canvas"):
+            try:
+                self.app.quest_service.prime_projection(quest_id, kind)
+            except Exception:
+                continue
         return {
             "ok": True,
             "quest_id": quest_id,
@@ -769,6 +774,11 @@ npm --prefix src/ui run build</pre>
 
     def workflow(self, quest_id: str) -> dict:
         payload = self.app.quest_service.workflow(quest_id)
+        projection_state = str(((payload or {}).get("projection_status") or {}).get("state") or "").strip().lower()
+        if projection_state and projection_state != "ready":
+            if isinstance(payload, dict):
+                payload["optimization_frontier"] = None
+            return payload
         quest_root = self._fresh_quest_service()._quest_root(quest_id)
         try:
             frontier = self.app.artifact_service.get_optimization_frontier(quest_root)
@@ -826,13 +836,16 @@ npm --prefix src/ui run build</pre>
 
     def git_branches(self, quest_id: str) -> dict:
         quest_root = self._fresh_quest_service()._quest_root(quest_id)
-        payload = list_branch_canvas(quest_root, quest_id=quest_id)
+        payload = self.app.quest_service.git_branch_canvas(quest_id)
         research_state = self.app.quest_service.read_research_state(quest_root)
         active_workspace_branch = str(research_state.get("current_workspace_branch") or "").strip() or None
         research_head_branch = str(research_state.get("research_head_branch") or "").strip() or None
         payload["active_workspace_ref"] = active_workspace_branch
         payload["research_head_ref"] = research_head_branch
         payload["workspace_mode"] = str(research_state.get("workspace_mode") or "quest").strip() or "quest"
+        projection_state = str(((payload or {}).get("projection_status") or {}).get("state") or "").strip().lower()
+        if projection_state and projection_state != "ready" and not (payload.get("nodes") or []):
+            return payload
         quest_data = self.app.quest_service.read_quest_yaml(quest_root)
         active_anchor = str(quest_data.get("active_anchor") or "").strip().lower()
         active_analysis_campaign_id = str(research_state.get("active_analysis_campaign_id") or "").strip() or None

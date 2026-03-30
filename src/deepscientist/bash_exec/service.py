@@ -498,14 +498,14 @@ class BashExecService:
                 return self._session_payload(quest_root, read_json(meta_path, meta) or meta)
         monitor_pid = meta.get("monitor_pid")
         process_pid = meta.get("process_pid")
-        if kind == "terminal" and _is_process_alive(process_pid):
+        if kind == "terminal" and is_process_alive(process_pid):
             terminate_process_ids(
                 process_pid=process_pid if isinstance(process_pid, int) else None,
                 process_group_id=meta.get("process_group_id") if isinstance(meta.get("process_group_id"), int) else None,
                 force=False,
             )
             time.sleep(0.05)
-        if kind != "terminal" and (_is_process_alive(process_pid) or _is_process_alive(monitor_pid)):
+        if kind != "terminal" and (is_process_alive(process_pid) or is_process_alive(monitor_pid)):
             return self._session_payload(quest_root, meta)
         stop_reason = _normalize_string(meta.get("stop_reason"))
         meta["status"] = "terminated" if stop_reason else "failed"

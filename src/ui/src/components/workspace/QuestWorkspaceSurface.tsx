@@ -17,15 +17,6 @@ import {
   Square,
   Terminal,
 } from 'lucide-react'
-import {
-  Line,
-  LineChart,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
 
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/components/ui/toast'
@@ -64,6 +55,7 @@ import type {
   GuidanceVm,
   MetricsTimelinePayload,
   MetricTimelineSeries,
+  WorkflowEntry,
 } from '@/types'
 import {
   QUEST_WORKSPACE_VIEW_EVENT,
@@ -92,6 +84,83 @@ type QuestWorkspaceSurfaceInnerProps = {
   stageSelection?: QuestStageSelection | null
   onViewChange?: (view: QuestWorkspaceView, stageSelection?: QuestStageSelection | null) => void
   workspace: QuestWorkspaceState
+}
+
+function projectionState(payload?: { projection_status?: { state?: string | null } | null } | null) {
+  return String(payload?.projection_status?.state || '')
+    .trim()
+    .toLowerCase()
+}
+
+function projectionPending(payload?: { projection_status?: { state?: string | null } | null } | null) {
+  const state = projectionState(payload)
+  return Boolean(state) && state !== 'ready'
+}
+
+function projectionStatusLabel(payload?: { projection_status?: { state?: string | null } | null } | null) {
+  const status = payload?.projection_status
+  const state = projectionState(payload)
+  if (!state || state === 'ready') return null
+  const current = typeof status?.progress_current === 'number' ? status.progress_current : null
+  const total = typeof status?.progress_total === 'number' ? status.progress_total : null
+  const step = status?.current_step?.trim()
+  const suffix =
+    current != null && total != null && total > 0 ? ` (${Math.min(current, total)}/${total})` : ''
+  switch (state) {
+    case 'queued':
+      return `Background rebuild queued${suffix}${step ? ` · ${step}` : ''}`
+    case 'building':
+      return `Background rebuild in progress${suffix}${step ? ` · ${step}` : ''}`
+    case 'stale':
+      return 'Showing the last successful snapshot while a refresh is queued'
+    case 'failed':
+      return step || status?.error?.trim() || 'Background rebuild failed'
+    default:
+      return step || `Projection state: ${state}`
+  }
+}
+
+function projectionProgressValue(payload?: { projection_status?: { progress_current?: number | null; progress_total?: number | null } | null } | null) {
+  const status = payload?.projection_status
+  const current =
+    typeof status?.progress_current === 'number' && Number.isFinite(status.progress_current)
+      ? Math.max(0, status.progress_current)
+      : 0
+  const total =
+    typeof status?.progress_total === 'number' && Number.isFinite(status.progress_total)
+      ? Math.max(0, status.progress_total)
+      : 0
+  if (total <= 0) return null
+  return Math.min(100, Math.max(0, (current / total) * 100))
+}
+
+function ProjectionProgressBar({
+  percent,
+  className,
+  indicatorClassName,
+}: {
+  percent?: number | null
+  className?: string
+  indicatorClassName?: string
+}) {
+  const width = Number.isFinite(percent ?? NaN) ? Math.max(0, Math.min(100, percent ?? 0)) : 0
+  return (
+    <div
+      className={cn(
+        'h-2.5 overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]',
+        className
+      )}
+      aria-hidden="true"
+    >
+      <div
+        className={cn(
+          'h-full rounded-full bg-[#9b8352] transition-[width] duration-300 ease-out dark:bg-[#d7b676]',
+          indicatorClassName
+        )}
+        style={{ width: `${width}%` }}
+      />
+    </div>
+  )
 }
 
 function flattenText(value?: string | null) {
@@ -380,11 +449,14 @@ type MetricTimelineChartDatum = {
   beatsBaseline?: boolean
 }
 
-type MetricTimelineDotProps = {
-  cx?: number
-  cy?: number
-  payload?: MetricTimelineChartDatum
-}
+const METRIC_TIMELINE_CHART_WIDTH = 360
+const METRIC_TIMELINE_CHART_HEIGHT = 220
+const METRIC_TIMELINE_CHART_PADDING = {
+  top: 14,
+  right: 16,
+  bottom: 32,
+  left: 24,
+} as const
 
 function normalizeTimelineDirection(value?: string | null): 'maximize' | 'minimize' {
   const text = String(value || '')
@@ -429,6 +501,75 @@ function buildStarPoints(cx: number, cy: number, outerRadius: number, innerRadiu
   return points.join(' ')
 }
 
+function clampMetricTimelineValue(value: number, minValue: number, maxValue: number) {
+  if (!Number.isFinite(value)) return minValue
+  return Math.min(maxValue, Math.max(minValue, value))
+}
+
+function buildMetricTimelineChartGeometry(chartData: MetricTimelineChartDatum[], baselineValue?: number | null) {
+  const width = METRIC_TIMELINE_CHART_WIDTH
+  const height = METRIC_TIMELINE_CHART_HEIGHT
+  const innerWidth = width - METRIC_TIMELINE_CHART_PADDING.left - METRIC_TIMELINE_CHART_PADDING.right
+  const innerHeight = height - METRIC_TIMELINE_CHART_PADDING.top - METRIC_TIMELINE_CHART_PADDING.bottom
+  const yValues = [
+    ...chartData
+      .map((item) => item.value)
+      .filter((item): item is number => typeof item === 'number' && Number.isFinite(item)),
+    ...(typeof baselineValue === 'number' && Number.isFinite(baselineValue) ? [baselineValue] : []),
+  ]
+  const rawMin = yValues.length ? Math.min(...yValues) : 0
+  const rawMax = yValues.length ? Math.max(...yValues) : 1
+  const spread = rawMax - rawMin
+  const padding = spread > 0 ? spread * 0.14 : Math.max(Math.abs(rawMax || 1) * 0.18, 1)
+  const minValue = rawMin - padding
+  const maxValue = rawMax + padding
+  const slotCount = Math.max(chartData.length - 1, 1)
+  const xForSlot = (slotIndex: number) =>
+    METRIC_TIMELINE_CHART_PADDING.left + (slotIndex / slotCount) * innerWidth
+  const yForValue = (value: number) =>
+    METRIC_TIMELINE_CHART_PADDING.top +
+    ((maxValue - clampMetricTimelineValue(value, minValue, maxValue)) / Math.max(maxValue - minValue, 1e-9)) *
+      innerHeight
+  const plottedPoints = chartData
+    .filter((item): item is MetricTimelineChartDatum & { value: number } => typeof item.value === 'number' && Number.isFinite(item.value))
+    .map((item) => ({
+      ...item,
+      x: xForSlot(item.slotIndex),
+      y: yForValue(item.value),
+    }))
+  const linePath = plottedPoints
+    .map((item, index) => `${index === 0 ? 'M' : 'L'}${item.x.toFixed(2)} ${item.y.toFixed(2)}`)
+    .join(' ')
+  const areaPath = plottedPoints.length
+    ? `${linePath} L${plottedPoints[plottedPoints.length - 1].x.toFixed(2)} ${(height - METRIC_TIMELINE_CHART_PADDING.bottom).toFixed(2)} L${plottedPoints[0].x.toFixed(2)} ${(height - METRIC_TIMELINE_CHART_PADDING.bottom).toFixed(2)} Z`
+    : ''
+  const baselineY =
+    typeof baselineValue === 'number' && Number.isFinite(baselineValue) ? yForValue(baselineValue) : null
+  const tickSlots = Array.from(
+    new Set(
+      chartData
+        .map((item) => item.slotIndex)
+        .filter(
+          (slotIndex, index, all) =>
+            slotIndex === 0 ||
+            slotIndex === all[all.length - 1] ||
+            chartData.length <= 5 ||
+            index % Math.ceil(chartData.length / 4) === 0
+        )
+    )
+  )
+  return {
+    width,
+    height,
+    plottedPoints,
+    linePath,
+    areaPath,
+    baselineY,
+    tickSlots,
+    xForSlot,
+  }
+}
+
 function formatMetricTimelineSlotLabel(slotKey?: string | null) {
   if (slotKey === 'baseline') return 'Baseline'
   const match = /^run-(\d+)$/.exec(String(slotKey || ''))
@@ -449,48 +590,22 @@ function formatMetricTimelineTooltipLabel(slotKey?: string | null) {
   return match ? `Run #${match[1]}` : String(slotKey || '')
 }
 
-function MetricTimelinePointDot({
-  cx,
-  cy,
-  payload,
-  active = false,
-}: MetricTimelineDotProps & { active?: boolean }) {
-  if (
-    typeof cx !== 'number' ||
-    typeof cy !== 'number' ||
-    !payload ||
-    typeof payload.value !== 'number' ||
-    !Number.isFinite(payload.value)
-  ) {
-    return null
-  }
-
-  if (payload.beatsBaseline) {
-    const outerRadius = active ? 8.2 : 6.8
-    const innerRadius = active ? 3.9 : 3.1
-    return (
-      <polygon
-        points={buildStarPoints(cx, cy, outerRadius, innerRadius)}
-        fill="#D0B26E"
-        stroke="#B99654"
-        strokeWidth={active ? 1.6 : 1.3}
-      />
+function buildMetricsTimelineRunSignature(entries?: WorkflowEntry[] | null) {
+  if (!Array.isArray(entries) || entries.length === 0) return 'none'
+  return entries
+    .filter((entry) => entry.kind === 'run')
+    .map((entry) =>
+      [
+        entry.run_id || entry.id,
+        entry.status || '',
+        entry.created_at || '',
+        entry.summary || '',
+      ].join(':')
     )
-  }
-
-  return (
-    <circle
-      cx={cx}
-      cy={cy}
-      r={active ? 5.4 : 4.2}
-      fill="#445F7D"
-      stroke="rgba(255,255,255,0.96)"
-      strokeWidth={active ? 1.9 : 1.5}
-    />
-  )
+    .join('|')
 }
 
-function MetricTimelineCard({
+const MetricTimelineCard = React.memo(function MetricTimelineCard({
   series,
   primaryMetricId,
 }: {
@@ -538,24 +653,22 @@ function MetricTimelineCard({
     ],
     [baselineValue, metricDirection, series.points]
   )
-  const yValues = [
-    ...chartData
-      .map((item) => item.value)
-      .filter((item): item is number => typeof item === 'number' && Number.isFinite(item)),
-    ...(typeof baselineValue === 'number' ? [baselineValue] : []),
-  ]
-  const minValue = yValues.length ? Math.min(...yValues) : undefined
-  const maxValue = yValues.length ? Math.max(...yValues) : undefined
-  const yDomain =
-    typeof minValue === 'number' && typeof maxValue === 'number'
-      ? [minValue === maxValue ? minValue - 1 : minValue, minValue === maxValue ? maxValue + 1 : maxValue]
-      : ['auto', 'auto']
   const lastSlotIndex = chartData[chartData.length - 1]?.slotIndex ?? 0
-  const xDomain: [number, number] = [-0.55, lastSlotIndex + 0.7]
   const latestPoint = series.points?.length ? series.points[series.points.length - 1] : null
+  const chartGeometry = React.useMemo(
+    () => buildMetricTimelineChartGeometry(chartData, baselineValue),
+    [chartData, baselineValue]
+  )
+  const chartId = React.useMemo(
+    () => `metric-${String(series.metric_id || 'metric').replace(/[^a-zA-Z0-9_-]+/g, '-')}`,
+    [series.metric_id]
+  )
 
   return (
-    <div className="overflow-hidden rounded-[26px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(244,239,233,0.94))] p-4 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]">
+    <div
+      className="overflow-hidden rounded-[26px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(244,239,233,0.94))] p-4 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: '320px' }}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-foreground">{series.label || series.metric_id}</div>
@@ -576,60 +689,97 @@ function MetricTimelineCard({
       </div>
 
       <div className="mt-4 h-[220px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartData} margin={{ top: 8, right: 12, left: 18, bottom: 0 }}>
-            <XAxis
-              dataKey="slotIndex"
-              type="number"
-              domain={xDomain}
-              ticks={chartData.map((item) => item.slotIndex)}
-              tickLine={false}
-              axisLine={false}
-              tickFormatter={formatMetricTimelineTickLabel}
-              tick={{ fill: 'currentColor', fontSize: 11 }}
-            />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              tick={{ fill: 'currentColor', fontSize: 11 }}
-              domain={yDomain as [number, number] | ['auto', 'auto']}
-            />
-            <Tooltip
-              contentStyle={{
-                borderRadius: 18,
-                border: '1px solid rgba(0,0,0,0.08)',
-                background: 'rgba(255,255,255,0.94)',
-                boxShadow: '0 18px 42px -34px rgba(17,24,39,0.18)',
-              }}
-              formatter={(value: number | string | null | undefined) => formatMetricValue(value, series.decimals)}
-              labelFormatter={(_, payload) => {
-                const item = Array.isArray(payload) && payload[0]?.payload ? (payload[0].payload as MetricTimelineChartDatum) : null
-                return formatMetricTimelineTooltipLabel(item?.slotKey)
-              }}
-            />
-            {typeof baselineValue === 'number' ? (
-              <ReferenceLine
-                segment={[
-                  { x: 0, y: baselineValue },
-                  { x: lastSlotIndex, y: baselineValue },
-                ]}
-                stroke="rgba(194,161,92,0.82)"
-                strokeDasharray="7 6"
-                strokeWidth={1.8}
-                ifOverflow="extendDomain"
+        <svg
+          viewBox={`0 0 ${chartGeometry.width} ${chartGeometry.height}`}
+          className="h-full w-full overflow-visible"
+          role="img"
+          aria-label={`${series.label || series.metric_id} metric timeline`}
+        >
+          <defs>
+            <linearGradient id={`${chartId}-fill`} x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor="rgba(91,112,131,0.22)" />
+              <stop offset="100%" stopColor="rgba(91,112,131,0.04)" />
+            </linearGradient>
+          </defs>
+          <line
+            x1={METRIC_TIMELINE_CHART_PADDING.left}
+            y1={METRIC_TIMELINE_CHART_HEIGHT - METRIC_TIMELINE_CHART_PADDING.bottom}
+            x2={METRIC_TIMELINE_CHART_WIDTH - METRIC_TIMELINE_CHART_PADDING.right}
+            y2={METRIC_TIMELINE_CHART_HEIGHT - METRIC_TIMELINE_CHART_PADDING.bottom}
+            stroke="rgba(68,95,125,0.16)"
+            strokeWidth="1"
+          />
+          {chartGeometry.tickSlots.map((slotIndex) => (
+            <g key={`tick-${slotIndex}`}>
+              <line
+                x1={chartGeometry.xForSlot(slotIndex)}
+                y1={METRIC_TIMELINE_CHART_HEIGHT - METRIC_TIMELINE_CHART_PADDING.bottom}
+                x2={chartGeometry.xForSlot(slotIndex)}
+                y2={METRIC_TIMELINE_CHART_HEIGHT - METRIC_TIMELINE_CHART_PADDING.bottom + 4}
+                stroke="rgba(68,95,125,0.18)"
+                strokeWidth="1"
               />
-            ) : null}
-            <Line
-              type="monotone"
-              dataKey="value"
-              stroke="rgba(91,112,131,0.78)"
-              strokeWidth={2.4}
-              dot={(props) => <MetricTimelinePointDot {...(props as MetricTimelineDotProps)} />}
-              activeDot={(props) => <MetricTimelinePointDot {...(props as MetricTimelineDotProps)} active />}
-              connectNulls
+              <text
+                x={chartGeometry.xForSlot(slotIndex)}
+                y={METRIC_TIMELINE_CHART_HEIGHT - 6}
+                textAnchor="middle"
+                className="fill-current text-[10px]"
+              >
+                {formatMetricTimelineTickLabel(slotIndex)}
+              </text>
+            </g>
+          ))}
+          {typeof chartGeometry.baselineY === 'number' ? (
+            <line
+              x1={METRIC_TIMELINE_CHART_PADDING.left}
+              y1={chartGeometry.baselineY}
+              x2={chartGeometry.xForSlot(lastSlotIndex)}
+              y2={chartGeometry.baselineY}
+              stroke="rgba(194,161,92,0.82)"
+              strokeDasharray="7 6"
+              strokeWidth="1.8"
             />
-          </LineChart>
-        </ResponsiveContainer>
+          ) : null}
+          {chartGeometry.areaPath ? (
+            <path d={chartGeometry.areaPath} fill={`url(#${chartId}-fill)`} />
+          ) : null}
+          {chartGeometry.linePath ? (
+            <path
+              d={chartGeometry.linePath}
+              fill="none"
+              stroke="rgba(91,112,131,0.82)"
+              strokeWidth="2.4"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          ) : null}
+          {chartGeometry.plottedPoints.map((point) => (
+            <g key={point.slotKey}>
+              <title>
+                {`${formatMetricTimelineTooltipLabel(point.slotKey)} · ${formatMetricValue(point.value, series.decimals)}${
+                  point.delta != null ? ` · Δ ${formatMetricValue(point.delta, series.decimals)}` : ''
+                }`}
+              </title>
+              {point.beatsBaseline ? (
+                <polygon
+                  points={buildStarPoints(point.x, point.y, 6.8, 3.1)}
+                  fill="#D0B26E"
+                  stroke="#B99654"
+                  strokeWidth={1.3}
+                />
+              ) : (
+                <circle
+                  cx={point.x}
+                  cy={point.y}
+                  r={4.1}
+                  fill="#445F7D"
+                  stroke="rgba(255,255,255,0.96)"
+                  strokeWidth={1.4}
+                />
+              )}
+            </g>
+          ))}
+        </svg>
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
@@ -644,7 +794,7 @@ function MetricTimelineCard({
       </div>
     </div>
   )
-}
+})
 
 function summarizeFeedItem(item: FeedItem) {
   if (item.type === 'message') {
@@ -758,6 +908,7 @@ function DetailSection({
         'py-6',
         first ? 'pt-0' : 'border-t border-dashed border-black/[0.12] dark:border-white/[0.12]'
       )}
+      style={{ contentVisibility: 'auto', containIntrinsicSize: first ? '560px' : '720px' }}
     >
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -952,19 +1103,10 @@ function QuestCanvasSurface({
   const queryClient = useQueryClient()
   const clearGraphSelection = useLabGraphSelectionStore((state) => state.clear)
   const selection = useLabGraphSelectionStore((state) => state.selection)
-  const [canvasReady, setCanvasReady] = React.useState(false)
 
   React.useEffect(() => {
     clearGraphSelection()
   }, [clearGraphSelection, questId])
-
-  React.useEffect(() => {
-    setCanvasReady(false)
-    const timer = window.setTimeout(() => {
-      setCanvasReady(true)
-    }, 1800)
-    return () => window.clearTimeout(timer)
-  }, [questId])
 
   const handleRefresh = React.useCallback(async () => {
     clearGraphSelection()
@@ -985,6 +1127,15 @@ function QuestCanvasSurface({
       selection &&
       ['branch_node', 'stage_node', 'baseline_node'].includes(String(selection.selection_type || ''))
   )
+  const canvasLiveRun = React.useMemo(() => {
+    const runtimeStatus = String(snapshot?.runtime_status ?? snapshot?.status ?? '')
+      .trim()
+      .toLowerCase()
+    if (runtimeStatus === 'stopped' || runtimeStatus === 'paused') return false
+    if (snapshot?.active_run_id) return true
+    if (runtimeStatus === 'running') return true
+    return (snapshot?.counts?.bash_running_count ?? 0) > 0
+  }, [snapshot])
 
   return (
     <div
@@ -1025,39 +1176,18 @@ function QuestCanvasSurface({
       </div>
 
       <div className="h-full min-h-0 overflow-hidden">
-        {canvasReady ? (
-          /* Keep the lab canvas refresh contract explicit for shared surface tests: onRefresh={handleRefresh}. */
-          <LabQuestGraphCanvas
-            projectId={questId}
-            questId={questId}
-            readOnly
-            preferredViewMode="branch"
-            activeBranch={snapshot?.branch || null}
-            highlightBranch={selection?.branch_name || null}
-            showFloatingPanels={false}
-            onStageOpen={onOpenStageSelection}
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center p-6">
-            <div className="max-w-xl rounded-[28px] border border-black/[0.08] bg-white/[0.88] px-6 py-6 text-center shadow-[0_24px_64px_rgba(15,23,42,0.08)] backdrop-blur dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.78)]">
-              <div className="text-base font-semibold text-foreground">Preparing branch canvas…</div>
-              <div className="mt-3 text-sm leading-7 text-muted-foreground">
-                Large quests open faster when the workspace shell loads first and the branch canvas is rebuilt after that.
-              </div>
-              <div className="mt-5 flex justify-center">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  onClick={() => setCanvasReady(true)}
-                >
-                  Load Canvas Now
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Keep the lab canvas refresh contract explicit for shared surface tests: onRefresh={handleRefresh}. */}
+        <LabQuestGraphCanvas
+          projectId={questId}
+          questId={questId}
+          readOnly
+          liveRun={canvasLiveRun}
+          preferredViewMode="branch"
+          activeBranch={snapshot?.branch || null}
+          highlightBranch={selection?.branch_name || null}
+          showFloatingPanels={false}
+          onStageOpen={onOpenStageSelection}
+        />
       </div>
     </div>
   )
@@ -2840,6 +2970,9 @@ function QuestDetails({
   onRefresh: () => Promise<void>
   error?: string | null
 }) {
+  const deferredFeed = React.useDeferredValue(feed)
+  const deferredDocuments = React.useDeferredValue(documents)
+  const deferredMemory = React.useDeferredValue(memory)
   const nodeCount = branches?.nodes.length ?? 0
   const ideaCount =
     branches?.nodes.filter((item) => item.branch_kind === 'idea').length ?? 0
@@ -2847,7 +2980,10 @@ function QuestDetails({
     branches?.nodes.filter(
       (item) => item.branch_kind === 'analysis' || item.mode === 'analysis'
     ).length ?? 0
-  const recentFeed = React.useMemo(() => [...feed].slice(-12).reverse(), [feed])
+  const recentFeed = React.useMemo(
+    () => [...deferredFeed].slice(-12).reverse(),
+    [deferredFeed]
+  )
   const { sessions: runningBashSessions } = useBashSessionStream({
     projectId: questId,
     status: 'running',
@@ -2895,8 +3031,8 @@ function QuestDetails({
 
     return preferred.map(([path, label]) => {
       const existing =
-        documents.find((item) => (item.path || '').endsWith(path)) ??
-        documents.find((item) => item.title === path)
+        deferredDocuments.find((item) => (item.path || '').endsWith(path)) ??
+        deferredDocuments.find((item) => item.title === path)
 
       return {
         key: path,
@@ -2906,30 +3042,30 @@ function QuestDetails({
         documentId: existing?.document_id || `path::${path}`,
       }
     })
-  }, [documents])
+  }, [deferredDocuments])
 
   const recentDocs = React.useMemo<LinkItem[]>(
     () =>
-      documents.slice(0, 10).map((item) => ({
+      deferredDocuments.slice(0, 10).map((item) => ({
         key: item.document_id,
         title: item.title,
         subtitle: item.path || item.source_scope || item.kind,
         badge: item.kind,
         documentId: item.document_id,
       })),
-    [documents]
+    [deferredDocuments]
   )
 
   const recentMemory = React.useMemo<LinkItem[]>(
     () =>
-      memory.slice(0, 10).map((item, index) => ({
+      deferredMemory.slice(0, 10).map((item, index) => ({
         key: `${item.document_id || item.path || 'memory'}-${index}`,
         title: item.title || item.path || 'Memory',
         subtitle: item.path || item.excerpt || item.type || null,
         badge: item.type || 'memory',
         documentId: item.document_id || null,
       })),
-    [memory]
+    [deferredMemory]
   )
 
   const recentArtifacts = React.useMemo<LinkItem[]>(
@@ -2962,6 +3098,28 @@ function QuestDetails({
     [snapshot]
   )
   const optimizationFrontier = workflow?.optimization_frontier ?? null
+  const workflowProjectionLabel = projectionStatusLabel(workflow)
+  const branchProjectionLabel = projectionStatusLabel(branches)
+  const projectionError =
+    workflow?.projection_status?.error || branches?.projection_status?.error || null
+  const projectionStatusCards = React.useMemo(
+    () =>
+      [
+        {
+          key: 'workflow',
+          title: 'Workflow',
+          message: workflowProjectionLabel,
+          percent: projectionProgressValue(workflow),
+        },
+        {
+          key: 'canvas',
+          title: 'Canvas',
+          message: branchProjectionLabel,
+          percent: projectionProgressValue(branches),
+        },
+      ].filter((item) => Boolean(item.message)),
+    [branchProjectionLabel, branches, workflow, workflowProjectionLabel]
+  )
 
   const optimizationTopBranchItems = React.useMemo<LinkItem[]>(
     () =>
@@ -3310,6 +3468,10 @@ function QuestDetails({
 
   const guidance = (snapshot?.guidance ?? null) as GuidanceVm | null
   const latestMetric = snapshot?.summary?.latest_metric ?? null
+  const metricsTimelineRunSignature = React.useMemo(
+    () => buildMetricsTimelineRunSignature(workflow?.entries),
+    [workflow?.entries]
+  )
   const statusLine =
     snapshot?.summary?.status_line || 'Research workspace ready.'
   const pendingDecisionCount = snapshot?.counts?.pending_decision_count || 0
@@ -3334,7 +3496,7 @@ function QuestDetails({
     return () => {
       cancelled = true
     }
-  }, [questId, snapshot?.updated_at, workflow?.entries.length])
+  }, [questId, metricsTimelineRunSignature])
 
   return (
     <div
@@ -3342,6 +3504,34 @@ function QuestDetails({
       data-onboarding-id="quest-details-surface"
     >
       <div className="mx-auto flex min-h-full max-w-[1120px] flex-col px-5 pb-10 pt-5 sm:px-6 lg:px-8">
+        {projectionStatusCards.length > 0 || projectionError ? (
+          <div className="mb-5 rounded-[22px] border border-black/[0.08] bg-white/[0.84] px-4 py-4 shadow-card dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.78)]">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#9b8352]" />
+              <div className="min-w-0 flex-1">
+                <div className="space-y-3 text-sm leading-6 text-muted-foreground">
+                  {projectionStatusCards.map((item) => (
+                    <div key={item.key}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="font-medium text-foreground">{item.title}</div>
+                        {typeof item.percent === 'number' ? (
+                          <div className="text-[12px] text-muted-foreground">
+                            {Math.round(item.percent)}%
+                          </div>
+                        ) : null}
+                      </div>
+                      <div>{item.message}</div>
+                      {typeof item.percent === 'number' ? (
+                        <ProjectionProgressBar percent={item.percent} className="mt-2" />
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                {projectionError ? <div className="text-[13px] text-foreground">{projectionError}</div> : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
         <DetailSection
           first
           title="Metrics Overview"
@@ -4135,6 +4325,13 @@ function QuestDetails({
   )
 }
 
+function workspaceLayerClass(active: boolean) {
+  return cn(
+    'absolute inset-0 min-h-0',
+    active ? 'z-10 block' : 'z-0 hidden'
+  )
+}
+
 export function QuestWorkspaceSurfaceInner({
   questId,
   safePaddingLeft,
@@ -4198,31 +4395,40 @@ export function QuestWorkspaceSurfaceInner({
   }, [refresh])
 
   React.useEffect(() => {
-    void ensureViewData(view)
-  }, [ensureViewData, view])
+    void ensureViewData('details')
+  }, [ensureViewData, questId])
 
   React.useEffect(() => {
-    if (view !== 'details') {
-      setBranches(null)
-      return
-    }
     let cancelled = false
-    void client
-      .gitBranches(questId)
-      .then((payload) => {
-        if (!cancelled) {
+    let retryTimer: number | null = null
+
+    const loadBranches = () => {
+      void client
+        .gitBranches(questId)
+        .then((payload) => {
+          if (cancelled) {
+            return
+          }
           setBranches(payload)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setBranches(null)
-        }
-      })
+          if (projectionPending(payload)) {
+            retryTimer = window.setTimeout(loadBranches, 1000)
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setBranches(null)
+          }
+        })
+    }
+
+    loadBranches()
     return () => {
       cancelled = true
+      if (retryTimer != null) {
+        window.clearTimeout(retryTimer)
+      }
     }
-  }, [questId, view, workflow?.entries.length])
+  }, [questId, workflow?.entries.length, workflow?.projection_status?.generated_at])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
@@ -4285,71 +4491,83 @@ export function QuestWorkspaceSurfaceInner({
   return (
     <div className="panel center-panel morandi-glow ds-stage" style={{ flex: 1 }}>
       <div
-        className={cn(
-          'ds-stage-safe h-full min-h-0',
-          view === 'canvas' ? 'overflow-hidden' : 'flex flex-col overflow-hidden'
-        )}
+        className="ds-stage-safe h-full min-h-0 overflow-hidden"
         style={{ paddingLeft: safePaddingLeft, paddingRight: safePaddingRight }}
       >
-        {view === 'canvas' ? (
-          <QuestCanvasSurface
-            questId={questId}
-            error={error}
-            onRefresh={refreshWorkspace}
-            onOpenStageSelection={onOpenStageSelection}
-            snapshot={snapshot}
-          />
-        ) : view === 'memory' ? (
-          <QuestMemorySurface
-            questId={questId}
-            memory={memory}
-            loading={loading || detailsLoading}
-            onRefresh={refreshWorkspace}
-            onOpenDocument={(documentId) => {
-              void openDocumentInTab(documentId)
-            }}
-          />
-        ) : view === 'terminal' ? (
-          <QuestTerminalSurface questId={questId} onRefresh={refreshWorkspace} />
-        ) : view === 'settings' ? (
-          <QuestSettingsSurface
-            questId={questId}
-            snapshot={snapshot}
-            onRefresh={refreshWorkspace}
-          />
-        ) : view === 'stage' ? (
-          <QuestStageSurface
-            questId={questId}
-            stageSelection={stageSelection ?? null}
-            onRefresh={refreshWorkspace}
-          />
-        ) : (
-          <QuestDetails
-            questId={questId}
-            snapshot={snapshot}
-            workflow={workflow}
-            feed={feed}
-            documents={documents}
-            memory={memory}
-            branches={branches}
-            loading={loading || detailsLoading}
-            restoring={restoring}
-            connectionState={connectionState}
-            onOpenDocument={(item) => {
-              if (item.stageSelection) {
-                updateView('stage', item.stageSelection)
-                return
-              }
-              if (!item.documentId) return
-              void openDocumentInTab(item.documentId)
-            }}
-            onOpenMemory={() => {
-              updateView('memory')
-            }}
-            onRefresh={refreshWorkspace}
-            error={error}
-          />
-        )}
+        <div className="relative h-full min-h-0 overflow-hidden">
+          <div className={workspaceLayerClass(view === 'canvas')} aria-hidden={view !== 'canvas'}>
+            <QuestCanvasSurface
+              questId={questId}
+              error={error}
+              onRefresh={refreshWorkspace}
+              onOpenStageSelection={onOpenStageSelection}
+              snapshot={snapshot}
+            />
+          </div>
+          <div className={workspaceLayerClass(view === 'details')} aria-hidden={view !== 'details'}>
+            <QuestDetails
+              questId={questId}
+              snapshot={snapshot}
+              workflow={workflow}
+              feed={feed}
+              documents={documents}
+              memory={memory}
+              branches={branches}
+              loading={loading || detailsLoading}
+              restoring={restoring}
+              connectionState={connectionState}
+              onOpenDocument={(item) => {
+                if (item.stageSelection) {
+                  updateView('stage', item.stageSelection)
+                  return
+                }
+                if (!item.documentId) return
+                void openDocumentInTab(item.documentId)
+              }}
+              onOpenMemory={() => {
+                updateView('memory')
+              }}
+              onRefresh={refreshWorkspace}
+              error={error}
+            />
+          </div>
+          {view === 'memory' ? (
+            <div className="absolute inset-0 min-h-0 z-20">
+              <QuestMemorySurface
+                questId={questId}
+                memory={memory}
+                loading={loading || detailsLoading}
+                onRefresh={refreshWorkspace}
+                onOpenDocument={(documentId) => {
+                  void openDocumentInTab(documentId)
+                }}
+              />
+            </div>
+          ) : null}
+          {view === 'terminal' ? (
+            <div className="absolute inset-0 min-h-0 z-20">
+              <QuestTerminalSurface questId={questId} onRefresh={refreshWorkspace} />
+            </div>
+          ) : null}
+          {view === 'settings' ? (
+            <div className="absolute inset-0 min-h-0 z-20">
+              <QuestSettingsSurface
+                questId={questId}
+                snapshot={snapshot}
+                onRefresh={refreshWorkspace}
+              />
+            </div>
+          ) : null}
+          {view === 'stage' ? (
+            <div className="absolute inset-0 min-h-0 z-20">
+              <QuestStageSurface
+                questId={questId}
+                stageSelection={stageSelection ?? null}
+                onRefresh={refreshWorkspace}
+              />
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

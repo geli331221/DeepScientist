@@ -63,6 +63,7 @@ type LabQuestGraphCanvasProps = {
   projectId: string
   questId: string
   readOnly?: boolean
+  liveRun?: boolean
   fetchGraph?: (
     projectId: string,
     questId: string,
@@ -272,6 +273,46 @@ const GRAPH_POLL_MS = 30000
 const PANEL_POLL_MS = 30000
 const BACKGROUND_POLL_MS = 45000
 const DEMO_POLL_MS = 1200
+const PROJECTION_POLL_MS = 1000
+
+const projectionState = (payload?: { projection_status?: { state?: string | null } | null } | null) =>
+  String(payload?.projection_status?.state || '')
+    .trim()
+    .toLowerCase()
+
+const projectionPending = (payload?: { projection_status?: { state?: string | null } | null } | null) => {
+  const state = projectionState(payload)
+  return Boolean(state) && state !== 'ready'
+}
+
+const projectionProgress = (
+  payload?: {
+    projection_status?: {
+      progress_current?: number | null
+      progress_total?: number | null
+      current_step?: string | null
+    } | null
+  } | null
+) => {
+  const status = payload?.projection_status
+  const current =
+    typeof status?.progress_current === 'number' && Number.isFinite(status.progress_current)
+      ? Math.max(0, status.progress_current)
+      : 0
+  const total =
+    typeof status?.progress_total === 'number' && Number.isFinite(status.progress_total)
+      ? Math.max(0, status.progress_total)
+      : 0
+  if (total <= 0) {
+    return null
+  }
+  return {
+    current,
+    total,
+    percent: Math.min(100, Math.max(0, (current / total) * 100)),
+    step: status?.current_step?.trim() || null,
+  }
+}
 
 const isAnalysisBranch = (branch?: string | null) => {
   if (!branch) return false
@@ -2477,6 +2518,9 @@ const GraphViewport = React.memo(function GraphViewport({
   onEdgesChange,
   isLoading,
   isError,
+  statusMessage,
+  statusProgress,
+  showStatusOverlay,
   hoverCard,
   toolbar,
   minimalChrome,
@@ -2495,6 +2539,9 @@ const GraphViewport = React.memo(function GraphViewport({
   onEdgesChange: (changes: any) => void
   isLoading: boolean
   isError: boolean
+  statusMessage?: string | null
+  statusProgress?: { current: number; total: number; percent: number; step?: string | null } | null
+  showStatusOverlay?: boolean
   hoverCard: GraphHoverCardState | null
   toolbar?: React.ReactNode
   minimalChrome?: boolean
@@ -2502,7 +2549,7 @@ const GraphViewport = React.memo(function GraphViewport({
   return (
     <div
       className={cn(
-        'lab-quest-graph-shell lab-quest-graph-shell--full',
+        'relative lab-quest-graph-shell lab-quest-graph-shell--full',
         minimalChrome && 'lab-quest-graph-shell--minimal'
       )}
     >
@@ -2546,8 +2593,22 @@ const GraphViewport = React.memo(function GraphViewport({
           <div className="lab-quest-graph-overlay-card">
             <div className="lab-quest-graph-overlay-title">Loading branch canvas…</div>
             <div className="lab-quest-graph-overlay-body">
-              Quest graph state is being rebuilt from durable branch and artifact records.
+              {statusMessage || 'Quest graph state is being rebuilt from durable branch and artifact records.'}
             </div>
+            {statusProgress ? (
+              <div className="mt-3">
+                <div className="h-2 overflow-hidden rounded-full bg-black/[0.08] dark:bg-white/[0.08]">
+                  <div
+                    className="h-full rounded-full bg-[#b48d4f] transition-[width] duration-300 ease-out"
+                    style={{ width: `${Math.max(0, statusProgress.percent)}%` }}
+                  />
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {statusProgress.current}/{statusProgress.total}
+                  {statusProgress.step ? ` · ${statusProgress.step}` : ''}
+                </div>
+              </div>
+            ) : null}
             <div className="lab-quest-graph-overlay-skeletons" aria-hidden="true">
               <Skeleton className="h-3 w-40" />
               <Skeleton className="h-3 w-56" />
@@ -2563,6 +2624,25 @@ const GraphViewport = React.memo(function GraphViewport({
               The branch canvas could not be reconstructed from the current quest state.
             </div>
           </div>
+        </div>
+      ) : null}
+      {!isLoading && !isError && showStatusOverlay && statusMessage ? (
+        <div className="pointer-events-none absolute left-4 bottom-4 z-20 max-w-[28rem] rounded-[18px] border border-black/[0.08] bg-white/[0.88] px-4 py-3 text-sm text-muted-foreground shadow-sm backdrop-blur dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.82)]">
+          <div>{statusMessage}</div>
+          {statusProgress ? (
+            <div className="mt-3">
+              <div className="h-2 overflow-hidden rounded-full bg-black/[0.08] dark:bg-white/[0.08]">
+                <div
+                  className="h-full rounded-full bg-[#b48d4f] transition-[width] duration-300 ease-out"
+                  style={{ width: `${Math.max(0, statusProgress.percent)}%` }}
+                />
+              </div>
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                {statusProgress.current}/{statusProgress.total}
+                {statusProgress.step ? ` · ${statusProgress.step}` : ''}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
       <GraphHoverCard card={hoverCard} />
@@ -2745,6 +2825,7 @@ function LabQuestGraphCanvasInner({
   projectId,
   questId,
   readOnly,
+  liveRun = false,
   highlightNodeId,
   highlightBranch,
   atEventId,
@@ -2762,9 +2843,9 @@ function LabQuestGraphCanvasInner({
   const graphFetcher = fetchGraph ?? getLabQuestGraph
   const eventFetcher = fetchEvents ?? listLabQuestEvents
   const isDemoProject = isDemoProjectId(projectId)
-  const graphPollMs = isDemoProject ? DEMO_POLL_MS : GRAPH_POLL_MS
-  const panelPollMs = isDemoProject ? DEMO_POLL_MS : PANEL_POLL_MS
-  const backgroundPollMs = isDemoProject ? DEMO_POLL_MS : BACKGROUND_POLL_MS
+  const graphPollMs = isDemoProject ? DEMO_POLL_MS : liveRun ? 5000 : GRAPH_POLL_MS
+  const panelPollMs = isDemoProject ? DEMO_POLL_MS : liveRun ? 8000 : PANEL_POLL_MS
+  const backgroundPollMs = isDemoProject ? DEMO_POLL_MS : liveRun ? 12000 : BACKGROUND_POLL_MS
   const { t } = useI18n('lab')
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme)
   const edgePalette = React.useMemo(() => resolveEdgePalette(resolvedTheme), [resolvedTheme])
@@ -2944,12 +3025,12 @@ function LabQuestGraphCanvasInner({
   const shouldPollBranchInsights =
     livePollingEnabled && (viewMode === 'branch' || !branchesPanel.collapsed || !eventsPanel.collapsed)
   const hasQuestScope = Boolean(projectId && questId)
-  const branchViewDataEnabled = hasQuestScope && (showFloatingPanels || viewMode === 'branch')
+  const branchViewDataEnabled = hasQuestScope && showFloatingPanels
   const eventPanelDataEnabled = hasQuestScope && showFloatingPanels
   const decisionDataEnabled = hasQuestScope && (showFloatingPanels || viewMode === 'event')
   const papersDataEnabled = hasQuestScope && showFloatingPanels
   const piQaDataEnabled = hasQuestScope && showFloatingPanels
-  const agentsDataEnabled = Boolean(projectId) && (showFloatingPanels || viewMode === 'branch')
+  const agentsDataEnabled = Boolean(projectId) && showFloatingPanels
   const branchGraphQueryEnabled = hasQuestScope && viewMode !== 'branch'
 
   const branchGraphQuery = useQuery({
@@ -2958,7 +3039,15 @@ function LabQuestGraphCanvasInner({
     enabled: branchGraphQueryEnabled,
     retry: false,
     staleTime: 15000,
-    refetchInterval: branchGraphQueryEnabled && shouldPollBranchData ? backgroundPollMs : false,
+    refetchInterval: branchGraphQueryEnabled
+      ? (query) => {
+          const data = query.state.data as LabQuestGraphResponse | undefined
+          if (projectionPending(data)) {
+            return PROJECTION_POLL_MS
+          }
+          return shouldPollBranchData ? backgroundPollMs : false
+        }
+      : false,
   })
 
   const graphQuery = useQuery({
@@ -2967,7 +3056,15 @@ function LabQuestGraphCanvasInner({
     enabled: hasQuestScope,
     retry: false,
     staleTime: 15000,
-    refetchInterval: hasQuestScope && shouldPollGraph ? graphPollMs : false,
+    refetchInterval: hasQuestScope
+      ? (query) => {
+          const data = query.state.data as LabQuestGraphResponse | undefined
+          if (projectionPending(data)) {
+            return PROJECTION_POLL_MS
+          }
+          return shouldPollGraph ? graphPollMs : false
+        }
+      : false,
   })
 
   const eventsQuery = useQuery({
@@ -3066,6 +3163,34 @@ function LabQuestGraphCanvasInner({
 
   const branchGraphData = viewMode === 'branch' ? graphQuery.data : branchGraphQuery.data
   const branchDataIsLoading = viewMode === 'branch' ? graphQuery.isLoading : branchGraphQuery.isLoading
+  const branchProjectionPending = projectionPending(branchGraphData)
+  const branchProjectionProgress = React.useMemo(
+    () => projectionProgress(branchGraphData),
+    [branchGraphData?.projection_status]
+  )
+  const branchProjectionStatusMessage = React.useMemo(() => {
+    const status = branchGraphData?.projection_status
+    const state = projectionState(branchGraphData)
+    if (!state || state === 'ready') return null
+    const current = typeof status?.progress_current === 'number' ? status.progress_current : null
+    const total = typeof status?.progress_total === 'number' ? status.progress_total : null
+    const step = status?.current_step?.trim()
+    const suffix =
+      current != null && total != null && total > 0 ? ` (${Math.min(current, total)}/${total})` : ''
+    if (state === 'queued') {
+      return `Branch canvas queued for rebuild${suffix}${step ? ` · ${step}` : ''}.`
+    }
+    if (state === 'building') {
+      return `Branch canvas is rebuilding in the background${suffix}${step ? ` · ${step}` : ''}.`
+    }
+    if (state === 'stale') {
+      return 'Showing the last successful branch canvas while a refresh is queued.'
+    }
+    if (state === 'failed') {
+      return step || status?.error?.trim() || 'Branch canvas rebuild failed.'
+    }
+    return step || `Branch canvas projection state: ${state}.`
+  }, [branchGraphData?.projection_status])
   const baselineMetricSnapshot = React.useMemo(
     () => buildBaselineMetricSnapshot(branchGraphData?.nodes ?? EMPTY_GRAPH_NODES),
     [branchGraphData?.nodes]
@@ -5207,8 +5332,11 @@ function LabQuestGraphCanvasInner({
         onNodeDragStop={handleDragStop}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        isLoading={graphQuery.isLoading}
+        isLoading={graphQuery.isLoading || (branchProjectionPending && nodes.length === 0)}
         isError={graphQuery.isError}
+        statusMessage={branchProjectionStatusMessage}
+        statusProgress={branchProjectionProgress}
+        showStatusOverlay={branchProjectionPending && nodes.length > 0}
         hoverCard={hoverCard}
         toolbar={graphToolbar}
         minimalChrome={minimalChrome}
@@ -5443,14 +5571,14 @@ function LabQuestGraphCanvasInner({
           ) : null}
         </div>
         <div className="lab-quest-branch-list">
-          {branchDataIsLoading ? (
+          {branchDataIsLoading || (branchProjectionPending && (branchGraphData?.nodes?.length ?? 0) === 0) ? (
             <div className="space-y-2">
               {Array.from({ length: 4 }).map((_, index) => (
                 <Skeleton key={`branch-skel-${index}`} className="h-10 w-full" />
               ))}
             </div>
           ) : null}
-          {!branchDataIsLoading && sortedBranches.length === 0 ? (
+          {!branchDataIsLoading && !branchProjectionPending && sortedBranches.length === 0 ? (
             <div className="lab-quest-empty">No branches yet.</div>
           ) : null}
           {sortedBranches.map((node) => {

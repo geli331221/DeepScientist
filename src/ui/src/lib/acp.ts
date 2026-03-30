@@ -573,6 +573,15 @@ function snapshotIndicatesLiveRun(snapshot?: QuestSummary | null) {
   return bashRunningCount > 0
 }
 
+function projectionNeedsRefresh(
+  payload?: { projection_status?: { state?: string | null } | null } | null
+) {
+  const state = String(payload?.projection_status?.state || '')
+    .trim()
+    .toLowerCase()
+  return Boolean(state) && state !== 'ready'
+}
+
 export function useQuestWorkspace(questId: string | null) {
   const [snapshot, setSnapshot] = useState<QuestSummary | null>(null)
   const [session, setSession] = useState<SessionPayload | null>(null)
@@ -607,7 +616,7 @@ export function useQuestWorkspace(questId: string | null) {
   } | null>(null)
   const detailsInFlightRef = useRef<{
     questId: string
-    promise: Promise<void>
+    promise: Promise<WorkflowPayload | null>
   } | null>(null)
   const detailsRefreshTimerRef = useRef<number | null>(null)
   const detailsRefreshInFlightRef = useRef(false)
@@ -619,6 +628,7 @@ export function useQuestWorkspace(questId: string | null) {
   const lastEventIdRef = useRef<string | null>(null)
   const oldestLoadedCursorRef = useRef<number | null>(null)
   const newestLoadedCursorRef = useRef<number | null>(null)
+  const hasLiveRunRef = useRef(false)
 
   const feed = useMemo(() => [...history, ...pendingFeed], [history, pendingFeed])
   const slashCommands = useMemo(() => session?.acp_session?.slash_commands ?? [], [session])
@@ -644,6 +654,10 @@ export function useQuestWorkspace(questId: string | null) {
     () => (hasLiveRun ? countActiveToolCalls(feed.slice(-180)) : 0),
     [feed, hasLiveRun]
   )
+
+  useEffect(() => {
+    hasLiveRunRef.current = hasLiveRun
+  }, [hasLiveRun])
 
   const updateFeedState = useCallback((nextState: FeedState) => {
     historyRef.current = nextState.history
@@ -719,12 +733,13 @@ export function useQuestWorkspace(questId: string | null) {
     ])
       .then(([nextMemory, nextDocuments, nextWorkflow]) => {
         if (questIdRef.current !== targetQuestId) {
-          return
+          return null
         }
         setMemory(nextMemory)
         setDocuments(nextDocuments)
         setWorkflow(nextWorkflow)
         setDetailsReady(true)
+        return nextWorkflow
       })
       .finally(() => {
         if (detailsInFlightRef.current?.promise === promise) {
@@ -808,7 +823,18 @@ export function useQuestWorkspace(questId: string | null) {
       detailsRefreshInFlightRef.current = true
       setDetailsLoading(true)
       try {
-        await hydrateDetailsState(targetQuestId)
+        const nextWorkflow = await hydrateDetailsState(targetQuestId)
+        const shouldContinuePolling =
+          questIdRef.current === targetQuestId &&
+          detailsEnabledRef.current &&
+          (projectionNeedsRefresh(nextWorkflow) || hasLiveRunRef.current)
+        if (shouldContinuePolling && !detailsRefreshTimerRef.current) {
+          const delay = projectionNeedsRefresh(nextWorkflow) ? 900 : 1500
+          detailsRefreshTimerRef.current = window.setTimeout(() => {
+            detailsRefreshTimerRef.current = null
+            void flushDetailsRefresh(targetQuestId)
+          }, delay)
+        }
       } catch (caught) {
         if (questIdRef.current === targetQuestId) {
           setError(caught instanceof Error ? caught.message : String(caught))
@@ -1150,12 +1176,7 @@ export function useQuestWorkspace(questId: string | null) {
       if (!questId) {
         return
       }
-      const detailsView = view === 'details' || view === 'memory'
-      detailsEnabledRef.current = detailsView
-      if (!detailsView) {
-        clearDetailsRefresh()
-        return
-      }
+      detailsEnabledRef.current = true
       if (detailsReady && !options?.force) {
         return
       }

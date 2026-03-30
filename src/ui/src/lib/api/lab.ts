@@ -18,6 +18,7 @@ import type {
   MainExperimentResultPayload,
   MemoryCard,
   OpenDocumentPayload,
+  ProjectionStatus,
   QuestArtifactListPayload,
   QuestArtifactRecord,
   QuestEventRecord,
@@ -35,7 +36,7 @@ import { apiClient } from './client'
 
 const LAB_BASE = (projectId: string) => `/api/v1/projects/${projectId}/lab`
 const LOCAL_QUEST_SESSION_TTL_MS = 3000
-const LOCAL_QUEST_BRANCHES_TTL_MS = 8000
+const LOCAL_QUEST_BRANCHES_TTL_MS = 1200
 const LOCAL_QUEST_LAYOUT_TTL_MS = 5000
 
 type LocalQuestRequestCacheEntry<T> = {
@@ -541,6 +542,7 @@ export type LabQuestGraphResponse = {
   nodes: LabQuestGraphNode[]
   edges: LabQuestGraphEdge[]
   head_branch?: string | null
+  projection_status?: ProjectionStatus | null
   layout_json?: Record<string, unknown> | null
   metric_catalog?: LabMetricObjective[] | null
   governance_vm?: QuestGovernanceVM | null
@@ -3034,6 +3036,7 @@ function buildLocalQuestGraphResponse(
       nodes: traces.map((trace) => mapTraceToGraphNode(trace, summary, view)),
       edges: buildTraceEdges(traces, view),
       head_branch: summary.branch || 'main',
+      projection_status: null,
       layout_json: layoutJson ?? null,
       metric_catalog: [],
       governance_vm: buildLocalGovernanceVm(summary, branches),
@@ -3047,6 +3050,7 @@ function buildLocalQuestGraphResponse(
     nodes: branchNodes,
     edges: branchEdges,
     head_branch: summary.branch || 'main',
+    projection_status: branches?.projection_status ?? null,
     layout_json: layoutJson ?? null,
     metric_catalog: buildGraphMetricCatalogFromNodes(branchNodes),
     governance_vm: buildLocalGovernanceVm(summary, branches),
@@ -3700,6 +3704,7 @@ export async function getLabQuestGraph(
       nodes: branchNodes,
       edges: branchEdges,
       head_branch: summary.branch || 'main',
+      projection_status: branches?.projection_status ?? null,
       layout_json: (layoutState?.layout_json as Record<string, unknown> | null) ?? null,
       metric_catalog: buildGraphMetricCatalogFromNodes(branchNodes),
       governance_vm: buildLocalGovernanceVm(summary, branches),
