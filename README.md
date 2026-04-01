@@ -1,20 +1,14 @@
 <h1 align="center">
   <img src="assets/branding/logo.svg" alt="DeepScientist logo" width="92" />
-  <br />
   DeepScientist
 </h1>
 
-<p align="center">
-  <strong>Make AI actually do research with you, not just talk about research.</strong>
-</p>
 
 <p align="center">
-  DeepScientist is a local-first AI research workspace: read papers, reproduce baselines, run experiments, organize results, and draft papers in one integrated system.
+  DeepScientist is a local-first AI research studio, Bring your own AI scientist onto your machine in 15 minutes.
 </p>
 
-<p align="center">
-  <strong>Bring your own AI scientist onto your machine in 15 minutes.</strong>
-</p>
+
 
 <p align="center">
   <a href="https://github.com/ResearAI/DeepScientist">GitHub</a> |
@@ -46,14 +40,16 @@
   <a href="docs/en/15_CODEX_PROVIDER_SETUP.md">Model Setup</a>
 </p>
 
+![deepscientist_install](https://github.com/user-attachments/assets/d8244944-4f70-4e08-94e3-002b74ce70fb)
 
-https://github.com/user-attachments/assets/3c7abb44-2b25-4477-a011-10a3154d6d76
 
 
 
 If you are tired of paper overload, broken baselines, scattered experiment logs, and late-night writing cleanup, give the project a star first, then keep scrolling to see how much research grunt work it can take off your plate.
 
 ---
+
+https://github.com/user-attachments/assets/3c7abb44-2b25-4477-a011-10a3154d6d76
 
 ## Still Spending Your Time On Research Grunt Work?
 
