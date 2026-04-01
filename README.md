@@ -46,9 +46,10 @@
   <a href="docs/en/15_CODEX_PROVIDER_SETUP.md">Model Setup</a>
 </p>
 
-![DeepScientist workspace preview](assets/branding/projects.png)
 
-> [TODO asset] Replace this with a 15 to 30 second demo GIF if possible: from `Start Research`, to entering the workspace, to experiment results or connector notifications. This slot is extremely important for both star conversion and trial conversion.
+https://github.com/user-attachments/assets/3c7abb44-2b25-4477-a011-10a3154d6d76
+
+
 
 If you are tired of paper overload, broken baselines, scattered experiment logs, and late-night writing cleanup, give the project a star first, then keep scrolling to see how much research grunt work it can take off your plate.
 
@@ -81,7 +82,11 @@ It is much closer to a real long-running AI research partner:
 | Hard to take over once it goes off track | Lets you pause, take over, edit plans, change code, and continue at any time |
 | Each run ends when the run ends | Preserves failed paths, winning paths, and reproduction lessons for the next round |
 
-In one sentence:
+
+
+
+
+## About
 
 > DeepScientist is not a one-shot agent demo. It is a system built for long-horizon research work.
 
