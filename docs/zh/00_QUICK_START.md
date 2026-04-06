@@ -204,6 +204,19 @@ ds --here
 
 它等价于 `ds --home "$PWD/DeepScientist"`。
 
+重要提醒：
+
+- 如果你是通过 `ds --here` 或显式的 `--home <path>` 启动 DeepScientist，后续像 `ds --status`、`ds --stop` 这样的管理命令，也应该使用同一个 DeepScientist home
+- 如果你是通过 `DEEPSCIENTIST_HOME` 或 `DS_HOME` 环境变量固定 home，只要后续命令继续使用同一个环境变量配置，也可以
+- 否则 CLI 可能会回退到默认的 `~/DeepScientist`，从而把一个实际上可访问的 daemon 误判成“不是当前 home 下的受管 daemon”
+
+例如，当你使用的是非默认 home 时，应这样执行：
+
+```bash
+ds --status --home /path/to/DeepScientist
+ds --stop --home /path/to/DeepScientist
+```
+
 如果你想换一个端口，可以运行：
 
 ```bash

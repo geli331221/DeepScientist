@@ -206,11 +206,12 @@ This is equivalent to `ds --home "$PWD/DeepScientist"`.
 
 Important:  
 * if you start DeepScientist with `ds --here` or an explicit `--home <path>`, later management commands such as `ds --status` and `ds --stop` should use the same DeepScientist home  
+* using the same `DEEPSCIENTIST_HOME` or `DS_HOME` environment variable for those commands is also fine
 * otherwise, the CLI may fall back to the default `~/DeepScientist`, which can make a reachable daemon look like an unverified one  
   
 For example, when using a non-default home, run:  
 
-```tbash
+```bash
 ds --status --home /path/to/DeepScientist  
 ds --stop --home /path/to/DeepScientist
 ```
