@@ -4,9 +4,7 @@
 </h1>
 
 
-<p align="center">
-  Unlike common The AI Scientist-style or autoresearch-style systems, DeepScientist is a local-first autonomous AI research studio that keeps the whole research loop moving on your machine, from baseline reproduction and experiment loops to paper-ready outputs, with a 10-minute local setup. With the Findings Memory and Bayesian optimization process introduced in DeepScientist V1, together with the Research Map introduced in V1.5, it keeps turning each newly established result into a new starting point for the next round of optimization.
-</p>
+Unlike one-shot AI Scientist or autoresearch-style systems, DeepScientist is a local-first autonomous research studio that keeps the full loop moving on your machine, from baselines and experiment rounds to paper-ready outputs, with a 10-minute setup. Powered by Findings Memory, Bayesian optimization, and the Research Map, it keeps turning each new result into the next starting point and goes deep through broader exploration and, when needed, thousands of experiment validations.
 
 
 
@@ -42,11 +40,13 @@
 
 ![deepscientist_install](https://github.com/user-attachments/assets/d8244944-4f70-4e08-94e3-002b74ce70fb)
 
-If you are tired of paper overload, broken baselines, scattered experiment logs, and late-night writing cleanup, give the project a star first, then keep scrolling to see how much research grunt work it can take off your plate.
+If you want the technical deep dive behind DeepScientist, watch the [Video](https://event.baai.ac.cn/activities/962).
 
 ---
 
 https://github.com/user-attachments/assets/3c7abb44-2b25-4477-a011-10a3154d6d76
+
+**If you want to understand the technical details behind DeepScientist, read here -> https://event.baai.ac.cn/activities/962**
 
 ## Still Spending Your Time On Research Grunt Work?
 
