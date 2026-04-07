@@ -11,6 +11,7 @@ from typing import Any
 
 from ..artifact import ArtifactService
 from ..codex_cli_compat import (
+    active_provider_metadata_from_home,
     materialize_codex_runtime_home,
     normalize_codex_reasoning_effort,
     provider_profile_metadata_from_home,
@@ -1202,9 +1203,9 @@ class CodexRunner:
         resolved_runner_config = runner_config if isinstance(runner_config, dict) else {}
         profile = str(resolved_runner_config.get("profile") or "").strip()
         config_home = str(resolved_runner_config.get("config_dir") or env.get("CODEX_HOME") or "").strip()
-        if not profile or not config_home:
+        if not config_home:
             return env
-        metadata = provider_profile_metadata_from_home(config_home, profile=profile)
+        metadata = active_provider_metadata_from_home(config_home, profile=profile or None)
         requires_openai_auth = metadata.get("requires_openai_auth")
         if requires_openai_auth is not False:
             return env

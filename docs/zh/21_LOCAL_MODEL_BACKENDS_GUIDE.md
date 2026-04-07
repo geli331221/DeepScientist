@@ -12,6 +12,7 @@
 
 - 如果你的后端只有 chat 接口，仍然有机会通过 **Codex CLI `0.57.0`** 跑通
 - 这条旧路径通常需要使用顶层 `model_provider` / `model`，并把 `wire_api` 设为 `chat`
+- DeepScientist 现在会在 Codex 启动探测阶段自动检查这一点；只要发现当前生效 provider 使用的是 `wire_api = "chat"`，就会要求 `codex-cli 0.57.0` 才继续
 
 ## 1. DeepScientist 实际依赖的是什么
 

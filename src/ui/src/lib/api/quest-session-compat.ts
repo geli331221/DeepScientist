@@ -17,6 +17,7 @@ const QUEST_SESSION_PREFIX = 'quest:'
 const QUEST_HISTORY_PAGE_SIZE = 200
 const QUEST_HISTORY_MAX_BATCHES = 25
 const QUEST_DEFAULT_LIMIT = 400
+const QUEST_HEAVY_REQUEST_TIMEOUT_MS = 180000
 
 type QuestSessionLike = {
   session_id: string
@@ -640,7 +641,9 @@ function inferQuestSessionStatus(snapshot: QuestSnapshot, events: AgentSSEEvent[
 }
 
 async function fetchQuestSessionPayload(questId: string) {
-  const response = await apiClient.get<SessionPayload>(`/api/quests/${questId}/session`)
+  const response = await apiClient.get<SessionPayload>(`/api/quests/${questId}/session`, {
+    timeout: QUEST_HEAVY_REQUEST_TIMEOUT_MS,
+  })
   return response.data
 }
 
@@ -655,6 +658,7 @@ async function fetchQuestEventEnvelope(
       format: 'acp',
       session_id: buildQuestSessionId(questId),
     },
+    timeout: QUEST_HEAVY_REQUEST_TIMEOUT_MS,
   })
   return response.data
 }

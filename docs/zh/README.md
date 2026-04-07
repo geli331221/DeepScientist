@@ -148,7 +148,7 @@ DeepScientist 灵活且易于使用，支持：
 - [90 Architecture](../en/90_ARCHITECTURE.md)
   说明系统级约束、核心契约和仓库结构。
 - [91 Development](../en/91_DEVELOPMENT.md)
-  面向维护者的开发工作流和实现说明。
+  面向维护者的开发工作流、实现说明，以及新增 MCP 工具、skills、connector 的具体清单。
 
 ## 社群交流
 

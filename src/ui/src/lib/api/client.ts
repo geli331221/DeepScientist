@@ -40,7 +40,7 @@ export function resolveApiBaseUrl(): string {
   return base.replace(/\/$/, '')
 }
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 40000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 90000;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 4 * 60 * 1000;
 
 type DsAxiosConfig = AxiosRequestConfig & {

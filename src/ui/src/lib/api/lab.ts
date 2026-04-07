@@ -38,6 +38,7 @@ const LAB_BASE = (projectId: string) => `/api/v1/projects/${projectId}/lab`
 const LOCAL_QUEST_SESSION_TTL_MS = 3000
 const LOCAL_QUEST_BRANCHES_TTL_MS = 1200
 const LOCAL_QUEST_LAYOUT_TTL_MS = 5000
+const LAB_HEAVY_REQUEST_TIMEOUT_MS = 180000
 
 type LocalQuestRequestCacheEntry<T> = {
   expiresAt: number
@@ -3690,6 +3691,7 @@ export async function getLabQuestGraph(
         search: params?.search ?? undefined,
         at_event_id: params?.atEventId ?? undefined,
       },
+      timeout: LAB_HEAVY_REQUEST_TIMEOUT_MS,
     })
     return response.data
   } catch (error) {
@@ -3846,6 +3848,7 @@ export async function getLabQuestSummary(
       params: {
         at_event_id: params?.atEventId ?? undefined,
       },
+      timeout: LAB_HEAVY_REQUEST_TIMEOUT_MS,
     })
     return response.data
   } catch (error) {
@@ -3880,6 +3883,7 @@ export async function getLabQuestTimeline(
       params: {
         limit: params?.limit ?? undefined,
       },
+      timeout: LAB_HEAVY_REQUEST_TIMEOUT_MS,
     })
     return response.data ?? { items: [] }
   } catch (error) {

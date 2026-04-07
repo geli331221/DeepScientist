@@ -10,10 +10,16 @@ from urllib.error import URLError
 from urllib.request import Request
 
 from ..codex_cli_compat import (
+    active_provider_metadata_from_home,
     adapt_profile_only_provider_config,
+    chat_wire_compatible_codex_version,
+    codex_cli_version,
+    format_codex_cli_version,
     materialize_codex_runtime_home,
+    missing_provider_env_key,
+    missing_provider_env_key_from_text,
     normalize_codex_reasoning_effort,
-    provider_profile_metadata_from_home,
+    provider_base_url_looks_local,
 )
 from ..connector.connector_profiles import PROFILEABLE_CONNECTOR_NAMES, list_connector_profiles, normalize_connector_config
 from ..connector_runtime import build_discovered_target, infer_connector_transport
@@ -1294,7 +1300,10 @@ Use **Test** when the file exposes runtime dependencies.
         base_url = str(metadata.get("base_url") or "").strip()
         wire_api = str(metadata.get("wire_api") or "").strip().lower()
         requires_openai_auth = metadata.get("requires_openai_auth")
-        if not base_url or requires_openai_auth is not False:
+        if not base_url:
+            return []
+        is_local_provider = provider_base_url_looks_local(base_url)
+        if requires_openai_auth is not False and not is_local_provider:
             return []
         hints = [
             f"Verify the local provider directly: `curl {base_url}/models`.",
@@ -1304,14 +1313,80 @@ Use **Test** when the file exposes runtime dependencies.
             "If the backend is chat-only and you still want to test it through Codex, try `@openai/codex@0.57.0` with top-level `model_provider` / `model` plus `wire_api = \"chat\"`.",
             "For local model backends, vLLM is the safest path. Ollama only works when its `/v1/responses` endpoint works; chat-only SGLang deployments will fail with the latest Codex.",
         ]
-        if wire_api and wire_api != "responses":
+        if requires_openai_auth is not False:
+            hints.insert(
+                0,
+                "For local or self-hosted providers, add `requires_openai_auth = false` so DeepScientist can remove conflicting `OPENAI_*` auth variables.",
+            )
+        if not wire_api:
+            hints.insert(0, "Your current provider config does not declare `wire_api`; set `wire_api = \"responses\"` first.")
+        elif wire_api != "responses":
             hints.insert(0, f"Your current provider config uses `wire_api = \"{wire_api}\"`; switch it to `wire_api = \"responses\"` first.")
         return hints
+
+    @staticmethod
+    def _missing_provider_env_guidance(
+        *,
+        profile: str,
+        env_key: str,
+        metadata: dict[str, object],
+    ) -> list[str]:
+        guidance = [
+            f"Set `runners.codex.env.{env_key}` in `~/DeepScientist/config/runners.yaml`, or export `{env_key}` before launching `ds`.",
+        ]
+        if provider_base_url_looks_local(str(metadata.get("base_url") or "").strip()):
+            guidance.append(
+                f"If `{env_key}` is only a placeholder for a local OpenAI-compatible backend, any non-empty value such as `1234` is usually enough."
+            )
+            if metadata.get("requires_openai_auth") is not False:
+                guidance.append(
+                    "Also add `requires_openai_auth = false` to that local provider profile so DeepScientist can remove conflicting `OPENAI_*` auth variables."
+                )
+        guidance.append(
+            f"Before retrying DeepScientist, run a real request such as `codex exec --profile {profile} --json --cd /tmp --skip-git-repo-check -` and verify it returns `HELLO`."
+        )
+        return guidance
+
+    @staticmethod
+    def _chat_wire_probe_version_block(
+        metadata: dict[str, object],
+        *,
+        resolved_binary: str,
+    ) -> tuple[tuple[int, int, int] | None, dict[str, object] | None]:
+        wire_api = str(metadata.get("wire_api") or "").strip().lower()
+        if wire_api != "chat":
+            return None, None
+        detected_version = codex_cli_version(str(resolved_binary or ""))
+        required_version = chat_wire_compatible_codex_version()
+        if detected_version == required_version:
+            return detected_version, None
+        required_text = format_codex_cli_version(required_version)
+        detected_text = format_codex_cli_version(detected_version)
+        errors = [
+            "This provider uses `wire_api = \"chat\"`, but DeepScientist only probes chat-mode providers with `codex-cli 0.57.0`.",
+        ]
+        if detected_text:
+            errors.append(f"Detected Codex CLI version: `{detected_text}`.")
+        else:
+            errors.append("DeepScientist could not determine the active Codex CLI version from the configured binary.")
+        guidance = [
+            "Install `npm install -g @openai/codex@0.57.0`, or point DeepScientist at a dedicated `0.57.0` binary with `ds --codex /absolute/path/to/codex`.",
+            "If you want to stay on a newer Codex CLI, switch the provider/backend to `wire_api = \"responses\"` instead.",
+            "For chat-mode fallback configs, keep the compatible top-level `model_provider` / `model` entries in `~/.codex/config.toml`.",
+        ]
+        return (
+            detected_version,
+            {
+                "summary": f"Codex startup probe blocked by chat-mode provider compatibility. Required Codex CLI: `{required_text}`.",
+                "errors": errors,
+                "guidance": guidance,
+            },
+        )
 
     def _codex_probe_failure_guidance(self, config: dict) -> tuple[list[str], list[str]]:
         profile = self._codex_profile_name(config)
         config_dir = str(config.get("config_dir") or "~/.codex").strip()
-        metadata = provider_profile_metadata_from_home(config_dir, profile=profile) if profile else {}
+        metadata = active_provider_metadata_from_home(config_dir, profile=profile or None) if config_dir else {}
         if profile:
             provider_hints = self._provider_profile_probe_hints(metadata)
             local_hints = self._local_provider_probe_hints(metadata)
@@ -1320,7 +1395,7 @@ Use **Test** when the file exposes runtime dependencies.
                     f"Codex profile `{profile}` did not complete the startup hello probe successfully.",
                 ],
                 [
-                    f"Run `codex --profile {profile}` in a terminal and confirm that profile can start normally.",
+                    f"Run `codex exec --profile {profile} --json --cd /tmp --skip-git-repo-check -` in a terminal and confirm that a real `HELLO` request succeeds.",
                     "If the profile uses a custom provider, make sure its API key, Base URL, and model configuration are available to Codex.",
                     "If the provider expects the model from the Codex profile itself, set `model: inherit` in `~/DeepScientist/config/runners.yaml`.",
                     *provider_hints,
@@ -1471,10 +1546,20 @@ Use **Test** when the file exposes runtime dependencies.
             env["CODEX_HOME"] = prepared_home
             if profile_config_warning:
                 compatibility_warnings.append(profile_config_warning)
-        metadata = provider_profile_metadata_from_home(env.get("CODEX_HOME") or config_dir, profile=profile)
+        metadata = active_provider_metadata_from_home(env.get("CODEX_HOME") or config_dir, profile=profile or None)
         if metadata.get("requires_openai_auth") is False:
             env.pop("OPENAI_API_KEY", None)
             env.pop("OPENAI_BASE_URL", None)
+        configured_provider_env_key = missing_provider_env_key(metadata, env)
+        details["provider_env_key"] = str(metadata.get("env_key") or "").strip() or None
+        details["provider_env_missing"] = bool(configured_provider_env_key)
+        details["provider_wire_api"] = str(metadata.get("wire_api") or "").strip() or None
+        detected_codex_version, chat_wire_block = self._chat_wire_probe_version_block(
+            metadata,
+            resolved_binary=resolved_binary,
+        )
+        if detected_codex_version is not None:
+            details["codex_cli_version"] = format_codex_cli_version(detected_codex_version) or None
         prompt = "Reply with exactly HELLO."
         if reasoning_effort_warning:
             compatibility_warnings.append(reasoning_effort_warning)
@@ -1483,6 +1568,15 @@ Use **Test** when the file exposes runtime dependencies.
                 f"Codex profile `{profile}` is provider-backed. DeepScientist is probing it with `model: inherit`."
             )
         base_warnings: list[str] = list(compatibility_warnings)
+        if chat_wire_block is not None:
+            return {
+                "ok": False,
+                "summary": str(chat_wire_block["summary"]),
+                "warnings": base_warnings,
+                "errors": list(chat_wire_block["errors"]),
+                "details": details,
+                "guidance": list(chat_wire_block["guidance"]),
+            }
 
         def run_probe_once(model_for_command: str) -> tuple[list[str], subprocess.CompletedProcess[str] | None, subprocess.TimeoutExpired | None]:
             command = self._build_codex_probe_command(
@@ -1609,7 +1703,20 @@ Use **Test** when the file exposes runtime dependencies.
             if details.get("model_fallback_attempted") and not details.get("model_fallback_used"):
                 warnings.append("DeepScientist also tried the current Codex default model, but that fallback probe did not succeed.")
             errors.extend(self._codex_probe_failure_guidance(config)[0])
+        missing_env_key = missing_provider_env_key_from_text(stdout_text, stderr_text) or configured_provider_env_key
         failure_guidance = self._codex_probe_failure_guidance(config)[1]
+        if not ok and missing_env_key and profile:
+            errors.append(
+                f"Codex profile `{profile}` requires environment variable `{missing_env_key}`, but DeepScientist did not receive it."
+            )
+            failure_guidance = [
+                *self._missing_provider_env_guidance(
+                    profile=profile,
+                    env_key=missing_env_key,
+                    metadata=metadata,
+                ),
+                *failure_guidance,
+            ]
         return {
             "ok": ok,
             "summary": "Codex startup probe completed." if ok else "Codex startup probe failed.",

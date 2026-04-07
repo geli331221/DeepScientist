@@ -65,6 +65,7 @@ codex:
 - 对 provider-backed 的 Codex profile，建议优先使用 `model: inherit`
 - 除非你非常确定该 provider 接受你要显式传入的模型名，否则不要再额外硬写一个模型
 - DeepScientist 现在会在 `.ds/codex-home` 下启动一个隔离的运行时 home，但会先继承你配置的 `~/.codex` 里的 auth、config、skills、agents 与 prompts
+- 如果当前生效 provider 使用的是 `wire_api = "chat"`，DeepScientist 现在会在启动探测时自动检查所选 Codex binary 是否正好是 `0.57.0`
 
 ## Provider 一览
 

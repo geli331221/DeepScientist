@@ -12,6 +12,7 @@ There is one practical fallback:
 
 - if your backend is chat-only, you may still be able to use it through **Codex CLI `0.57.0`**
 - that older path can still work with `wire_api = "chat"` when the provider is configured at the top level
+- DeepScientist now checks this automatically during the Codex startup probe; if it sees `wire_api = "chat"` on any active provider config, it requires `codex-cli 0.57.0` before continuing
 
 ## 1. What DeepScientist actually depends on
 

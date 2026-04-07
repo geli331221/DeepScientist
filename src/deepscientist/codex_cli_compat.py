@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import shutil
@@ -7,10 +8,12 @@ import subprocess
 import tomllib
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .shared import ensure_dir, read_text, write_text
 
 _MIN_XHIGH_SUPPORTED_VERSION = (0, 63, 0)
+_CHAT_WIRE_COMPAT_VERSION = (0, 57, 0)
 _CODEX_VERSION_PATTERN = re.compile(r"codex-cli\s+(\d+)\.(\d+)\.(\d+)", re.IGNORECASE)
 _CODEX_HOME_SYNCED_FILES = ("config.toml", "auth.json")
 _CODEX_HOME_SYNCED_DIRS = ("skills", "agents", "prompts")
@@ -19,6 +22,8 @@ _ROOT_TABLE_SECTION_PATTERN = re.compile(r"^\s*\[")
 _ROOT_MODEL_ASSIGNMENT_PATTERN = re.compile(r"^\s*(model_provider|model)\s*=")
 _COMPAT_BEGIN_MARKER = "# BEGIN DEEPSCIENTIST PROFILE COMPAT"
 _COMPAT_END_MARKER = "# END DEEPSCIENTIST PROFILE COMPAT"
+_MISSING_ENV_PATTERN = re.compile(r"Missing environment variable:\s*[`'\"]?([^`'\"\s]+)", re.IGNORECASE)
+_LOCAL_PROVIDER_HOST_ALIASES = {"localhost", "host.docker.internal"}
 
 
 def parse_codex_cli_version(text: str) -> tuple[int, int, int] | None:
@@ -50,6 +55,10 @@ def format_codex_cli_version(version: tuple[int, int, int] | None) -> str:
     if version is None:
         return ""
     return ".".join(str(part) for part in version)
+
+
+def chat_wire_compatible_codex_version() -> tuple[int, int, int]:
+    return _CHAT_WIRE_COMPAT_VERSION
 
 
 def _split_root_table_lines(config_text: str) -> tuple[list[str], list[str]]:
@@ -300,61 +309,47 @@ def materialize_codex_runtime_home(
     return warning
 
 
-def provider_profile_metadata(
+def _empty_provider_metadata() -> dict[str, str | bool | None]:
+    return {
+        "provider": None,
+        "model": None,
+        "env_key": None,
+        "base_url": None,
+        "wire_api": None,
+        "requires_openai_auth": None,
+    }
+
+
+def active_provider_metadata(
     config_text: str,
     *,
-    profile: str,
+    profile: str | None = None,
 ) -> dict[str, str | bool | None]:
     normalized_profile = str(profile or "").strip()
-    if not normalized_profile or not str(config_text or "").strip():
-        return {
-            "provider": None,
-            "model": None,
-            "env_key": None,
-            "base_url": None,
-            "wire_api": None,
-            "requires_openai_auth": None,
-        }
+    if not str(config_text or "").strip():
+        return _empty_provider_metadata()
     try:
         parsed = tomllib.loads(config_text)
     except tomllib.TOMLDecodeError:
-        return {
-            "provider": None,
-            "model": None,
-            "env_key": None,
-            "base_url": None,
-            "wire_api": None,
-            "requires_openai_auth": None,
-        }
+        return _empty_provider_metadata()
 
-    profiles = parsed.get("profiles")
-    if not isinstance(profiles, dict):
-        return {
-            "provider": None,
-            "model": None,
-            "env_key": None,
-            "base_url": None,
-            "wire_api": None,
-            "requires_openai_auth": None,
-        }
-    profile_payload = profiles.get(normalized_profile)
-    if not isinstance(profile_payload, dict):
-        return {
-            "provider": None,
-            "model": None,
-            "env_key": None,
-            "base_url": None,
-            "wire_api": None,
-            "requires_openai_auth": None,
-        }
+    profile_payload: dict | None = None
+    if normalized_profile:
+        profiles = parsed.get("profiles")
+        if not isinstance(profiles, dict):
+            return _empty_provider_metadata()
+        candidate_profile = profiles.get(normalized_profile)
+        if not isinstance(candidate_profile, dict):
+            return _empty_provider_metadata()
+        profile_payload = candidate_profile
 
     model_provider = str(
-        profile_payload.get("model_provider")
+        (profile_payload or {}).get("model_provider")
         or parsed.get("model_provider")
         or ""
     ).strip() or None
     model = str(
-        profile_payload.get("model")
+        (profile_payload or {}).get("model")
         or parsed.get("model")
         or ""
     ).strip() or None
@@ -396,6 +391,17 @@ def provider_profile_metadata(
     }
 
 
+def provider_profile_metadata(
+    config_text: str,
+    *,
+    profile: str,
+) -> dict[str, str | bool | None]:
+    normalized_profile = str(profile or "").strip()
+    if not normalized_profile:
+        return _empty_provider_metadata()
+    return active_provider_metadata(config_text, profile=normalized_profile)
+
+
 def provider_profile_metadata_from_home(
     config_home: str | Path,
     *,
@@ -403,12 +409,54 @@ def provider_profile_metadata_from_home(
 ) -> dict[str, str | bool | None]:
     config_path = Path(config_home).expanduser() / "config.toml"
     if not config_path.exists():
-        return {
-            "provider": None,
-            "model": None,
-            "env_key": None,
-            "base_url": None,
-            "wire_api": None,
-            "requires_openai_auth": None,
-        }
+        return _empty_provider_metadata()
     return provider_profile_metadata(config_path.read_text(encoding="utf-8"), profile=profile)
+
+
+def provider_base_url_looks_local(base_url: str | None) -> bool:
+    normalized = str(base_url or "").strip()
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    hostname = str(parsed.hostname or "").strip().lower()
+    if not hostname:
+        return False
+    if hostname in _LOCAL_PROVIDER_HOST_ALIASES or hostname.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
+
+
+def missing_provider_env_key(
+    metadata: dict[str, str | bool | None],
+    env: dict[str, str] | None,
+) -> str | None:
+    env_key = str((metadata or {}).get("env_key") or "").strip()
+    if not env_key:
+        return None
+    env_value = str((env or {}).get(env_key) or "").strip()
+    if env_value:
+        return None
+    return env_key
+
+
+def missing_provider_env_key_from_text(*texts: str) -> str | None:
+    for text in texts:
+        match = _MISSING_ENV_PATTERN.search(str(text or ""))
+        if match:
+            return str(match.group(1) or "").strip() or None
+    return None
+
+
+def active_provider_metadata_from_home(
+    config_home: str | Path,
+    *,
+    profile: str | None = None,
+) -> dict[str, str | bool | None]:
+    config_path = Path(config_home).expanduser() / "config.toml"
+    if not config_path.exists():
+        return _empty_provider_metadata()
+    return active_provider_metadata(config_path.read_text(encoding="utf-8"), profile=profile)

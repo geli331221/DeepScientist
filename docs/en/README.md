@@ -102,7 +102,7 @@ This page is the shortest path to the right document.
 - [90 Architecture](./90_ARCHITECTURE.md)
   High-level system contracts and repository structure.
 - [91 Development](./91_DEVELOPMENT.md)
-  Maintainer-facing workflow and implementation notes.
+  Maintainer-facing workflow, implementation notes, and the concrete checklists for adding MCP tools, skills, and connectors.
 
 ## Community
 

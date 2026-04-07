@@ -64,6 +64,7 @@ Important:
 
 - keep `model: inherit` for provider-backed Codex profiles unless you are certain the provider accepts the explicit model id you plan to send
 - DeepScientist now launches Codex from an isolated runtime home under `.ds/codex-home`, but that runtime copy inherits your configured `~/.codex` auth, config, skills, agents, and prompts first
+- if the active provider uses `wire_api = "chat"`, DeepScientist now auto-checks that the selected Codex binary is exactly `0.57.0` during startup probe
 
 ## Provider matrix
 

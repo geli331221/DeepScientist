@@ -101,3 +101,22 @@ model_provider = "minimax"
     assert 'model_provider = "OpenAI"' not in adapted
     assert 'model = "gpt-5.4"' not in adapted
     assert 'model_reasoning_effort = "xhigh"' in adapted
+
+
+def test_provider_base_url_looks_local_accepts_private_and_loopback_hosts() -> None:
+    assert codex_cli_compat.provider_base_url_looks_local("http://127.0.0.1:8004/v1") is True
+    assert codex_cli_compat.provider_base_url_looks_local("http://192.168.3.9:30000/v1") is True
+    assert codex_cli_compat.provider_base_url_looks_local("https://api.minimaxi.com/v1") is False
+
+
+def test_missing_provider_env_key_helpers_detect_missing_key_from_metadata_and_output() -> None:
+    metadata = {"env_key": "sglang", "base_url": "http://192.168.3.9:30000/v1"}
+
+    assert codex_cli_compat.missing_provider_env_key(metadata, {"OTHER": "value"}) == "sglang"
+    assert codex_cli_compat.missing_provider_env_key(metadata, {"sglang": "1234"}) is None
+    assert (
+        codex_cli_compat.missing_provider_env_key_from_text(
+            '{"type":"error","message":"Missing environment variable: `sglang`."}'
+        )
+        == "sglang"
+    )

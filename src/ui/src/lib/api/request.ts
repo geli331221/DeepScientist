@@ -3,7 +3,7 @@ import { recordRequestEvent } from '@/lib/bugbash/repro-recorder'
 import { redactSensitive, sanitizeUrl, truncateText } from '@/lib/bugbash/sanitize'
 import { resolveApiBaseUrl } from '@/lib/api/client'
 
-const DEFAULT_TIMEOUT_MS = 20000
+const DEFAULT_TIMEOUT_MS = 90000
 const DEFAULT_RETRY_DELAY_MS = 800
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
 

@@ -835,16 +835,10 @@ model_provider = "minimax"
     (source_codex_home / "prompts" / "system.md").write_text("GLOBAL PROMPT\n", encoding="utf-8")
 
     monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr("deepscientist.config.service.codex_cli_version", lambda binary: (0, 57, 0))
     captured: dict[str, object] = {}
 
     def fake_run(command, **kwargs):  # noqa: ANN001
-        if list(command) == ["/tmp/fake-codex", "--version"]:
-            class VersionResult:
-                returncode = 0
-                stdout = "codex-cli 0.116.0"
-                stderr = ""
-
-            return VersionResult()
         captured["command"] = list(command)
         captured["env"] = dict(kwargs.get("env") or {})
         prepared_home = Path(str(captured["env"]["CODEX_HOME"]))
@@ -907,16 +901,10 @@ model_provider = "minimax"
     )
 
     monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr("deepscientist.config.service.codex_cli_version", lambda binary: (0, 57, 0))
     captured: dict[str, object] = {}
 
     def fake_run(command, **kwargs):  # noqa: ANN001
-        if list(command) == ["/tmp/fake-codex", "--version"]:
-            class VersionResult:
-                returncode = 0
-                stdout = "codex-cli 0.57.0"
-                stderr = ""
-
-            return VersionResult()
         captured["command"] = list(command)
         captured["env"] = dict(kwargs.get("env") or {})
         prepared_home = Path(str(captured["env"]["CODEX_HOME"]))
@@ -972,6 +960,7 @@ model_provider = "minimax"
     )
 
     monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr("deepscientist.config.service.codex_cli_version", lambda binary: (0, 57, 0))
     captured: dict[str, object] = {}
 
     def fake_run(command, **kwargs):  # noqa: ANN001
@@ -1027,6 +1016,7 @@ model_provider = "minimax"
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr("deepscientist.config.service.codex_cli_version", lambda binary: (0, 57, 0))
     captured: dict[str, object] = {}
 
     def fake_run(command, **kwargs):  # noqa: ANN001
@@ -1161,6 +1151,167 @@ model_provider = "local8004"
     assert "/v1/models" in guidance_text
     assert "/v1/responses" in guidance_text
     assert 'wire_api = "responses"' in guidance_text
+
+
+def test_codex_probe_failure_guidance_surfaces_missing_env_for_issue33_style_local_profile(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    source_codex_home = temp_home / "sglang-codex-home"
+    source_codex_home.mkdir(parents=True, exist_ok=True)
+    (source_codex_home / "config.toml").write_text(
+        """[model_providers.sglang]
+name = "sglang"
+base_url = "http://192.168.3.9:30000/v1"
+env_key = "sglang"
+stream_idle_timeout_ms = 10000000
+
+[profiles.sglang]
+model = "qwen3.5"
+model_provider = "sglang"
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        if list(command) == ["/tmp/fake-codex", "--version"]:
+            class VersionResult:
+                returncode = 0
+                stdout = "codex-cli 0.118.0"
+                stderr = ""
+
+            return VersionResult()
+
+        class Result:
+            returncode = 1
+            stdout = (
+                '{"type":"thread.started","thread_id":"019d66fc-7b29-7341-af68-fdfcfe79c1ca"}\n'
+                '{"type":"turn.started"}\n'
+                '{"type":"error","message":"Missing environment variable: `sglang`."}\n'
+                '{"type":"turn.failed","error":{"message":"Missing environment variable: `sglang`."}}'
+            )
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("deepscientist.config.service.subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner(
+        {
+            "binary": "codex",
+            "profile": "sglang",
+            "model": "inherit",
+            "config_dir": str(source_codex_home),
+        }
+    )
+
+    assert result["ok"] is False
+    guidance_text = "\n".join(result["guidance"])
+    error_text = "\n".join(result["errors"])
+    assert "environment variable `sglang`" in error_text
+    assert "runners.codex.env.sglang" in guidance_text
+    assert 'wire_api = "responses"' in guidance_text
+    assert "requires_openai_auth = false" in guidance_text
+    assert "codex exec --profile sglang" in guidance_text
+
+
+def test_codex_probe_blocks_chat_mode_profile_on_non_0570_codex(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    source_codex_home = temp_home / "chat-codex-home"
+    source_codex_home.mkdir(parents=True, exist_ok=True)
+    (source_codex_home / "config.toml").write_text(
+        """[model_providers.localchat]
+name = "localchat"
+base_url = "http://127.0.0.1:8004/v1"
+env_key = "LOCAL_API_KEY"
+wire_api = "chat"
+requires_openai_auth = false
+
+[profiles.localchat]
+model = "/model/gpt-oss-120b"
+model_provider = "localchat"
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr("deepscientist.config.service.codex_cli_version", lambda binary: (0, 116, 0))
+    executed: list[list[str]] = []
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        executed.append(list(command))
+        raise AssertionError("probe command should not execute when chat-mode Codex version is incompatible")
+
+    monkeypatch.setattr("deepscientist.config.service.subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner(
+        {
+            "binary": "codex",
+            "profile": "localchat",
+            "model": "inherit",
+            "config_dir": str(source_codex_home),
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["summary"].startswith("Codex startup probe blocked by chat-mode provider compatibility")
+    guidance_text = "\n".join(result["guidance"])
+    error_text = "\n".join(result["errors"])
+    assert "wire_api = \"chat\"" in error_text
+    assert "0.57.0" in error_text
+    assert "npm install -g @openai/codex@0.57.0" in guidance_text
+    assert not executed
+
+
+def test_codex_probe_blocks_chat_mode_top_level_provider_on_non_0570_codex(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+
+    source_codex_home = temp_home / "top-level-chat-codex-home"
+    source_codex_home.mkdir(parents=True, exist_ok=True)
+    (source_codex_home / "config.toml").write_text(
+        """model = "/model/gpt-oss-120b"
+model_provider = "localchat"
+
+[model_providers.localchat]
+name = "localchat"
+base_url = "http://127.0.0.1:8004/v1"
+env_key = "LOCAL_API_KEY"
+wire_api = "chat"
+requires_openai_auth = false
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+    monkeypatch.setattr("deepscientist.config.service.codex_cli_version", lambda binary: (0, 116, 0))
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        raise AssertionError("probe command should not execute when top-level chat-mode Codex version is incompatible")
+
+    monkeypatch.setattr("deepscientist.config.service.subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner(
+        {
+            "binary": "codex",
+            "model": "inherit",
+            "config_dir": str(source_codex_home),
+        }
+    )
+
+    assert result["ok"] is False
+    assert "0.57.0" in "\n".join(result["errors"])
+    assert "wire_api = \"responses\"" in "\n".join(result["guidance"])
 
 
 def test_codex_probe_failure_guidance_mentions_bailian_qwen_coding_plan_only(monkeypatch, temp_home: Path) -> None:
