@@ -55,9 +55,17 @@ Use `ds doctor` when DeepScientist does not start cleanly after installation.
 - whether required config files are valid
 - whether the current release is still using `codex` as the runnable runner
 - whether the Codex CLI can be found and passes a startup probe
+- whether a recent quest runtime failure already points to a known provider / protocol / retry problem
 - whether an optional local `pdflatex` runtime is available for paper PDF compilation
 - whether the web and TUI bundles exist
 - whether the configured web port is free or already running the correct daemon
+
+`ds doctor` now tries to render failed checks in a more operational form:
+
+- `Problem`: what failed
+- `Why`: why DeepScientist believes it failed
+- `Fix`: the concrete next steps to try
+- `Evidence`: the quest/run/request clues that matched the diagnosis
 
 ## Common fixes
 
@@ -126,6 +134,8 @@ MiniMax-specific note:
 - DeepScientist also strips conflicting `OPENAI_*` auth variables automatically for providers that set `requires_openai_auth = false`
 - if you also want plain terminal `codex --profile <name>` to work directly, put `model_provider = "minimax"` and the matching top-level model such as `MiniMax-M2.7` or `MiniMax-M2.5` in `~/.codex/config.toml`
 - DeepScientist automatically downgrades `xhigh` to `high` when it detects a Codex CLI older than `0.63.0`
+- if the provider returns `tool call result does not follow tool call (2013)`, treat it as a request-ordering/protocol error rather than a transient network failure
+- if the provider returns malformed tool-call argument errors such as `invalid function arguments json string` or `failed to parse tool call arguments`, fix the tool-call serialization path before retrying again
 
 ### The configured Codex model is unavailable
 

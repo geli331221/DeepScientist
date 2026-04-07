@@ -55,6 +55,7 @@ from ..connector.connector_profiles import (
 from ..connector_runtime import conversation_identity_key, format_conversation_id, normalize_conversation_id, parse_conversation_id
 from ..config import ConfigManager
 from ..config.models import SYSTEM_CONNECTOR_NAMES
+from ..diagnostics import FailureDiagnosis, diagnose_runner_failure
 from ..home import repo_root
 from ..memory import MemoryService
 from ..network import urlopen_with_proxy as urlopen
@@ -757,7 +758,23 @@ class DaemonApp:
                     if int(snapshot.get("pending_user_message_count") or 0) > 0
                     else "auto_continue"
                 )
-                scheduled = self.schedule_turn(quest_id, reason=reason)
+                retry_delay_seconds = self._recovery_retry_delay_seconds(snapshot) if reason == "auto_continue" else None
+                if retry_delay_seconds is not None and retry_delay_seconds > 0:
+                    self._schedule_turn_later(
+                        quest_id,
+                        reason=reason,
+                        delay_seconds=retry_delay_seconds,
+                    )
+                    scheduled = {
+                        "scheduled": True,
+                        "started": False,
+                        "queued": True,
+                        "reason": reason,
+                        "delayed": True,
+                        "delay_seconds": retry_delay_seconds,
+                    }
+                else:
+                    scheduled = self.schedule_turn(quest_id, reason=reason)
                 event = {
                     "event_id": generate_id("evt"),
                     "type": "quest.runtime_auto_resumed",
@@ -769,6 +786,8 @@ class DaemonApp:
                     "scheduled": bool(scheduled.get("scheduled")),
                     "started": bool(scheduled.get("started")),
                     "queued": bool(scheduled.get("queued")),
+                    "delayed": bool(scheduled.get("delayed")),
+                    "delay_seconds": scheduled.get("delay_seconds"),
                     "created_at": utc_now(),
                 }
                 append_jsonl(self.home / "quests" / quest_id / ".ds" / "events.jsonl", event)
@@ -783,6 +802,8 @@ class DaemonApp:
                     scheduled=bool(scheduled.get("scheduled")),
                     started=bool(scheduled.get("started")),
                     queued=bool(scheduled.get("queued")),
+                    delayed=bool(scheduled.get("delayed")),
+                    delay_seconds=scheduled.get("delay_seconds"),
                 )
                 self._recovered_quest_ids.add(quest_id)
                 resumed.append(
@@ -835,6 +856,63 @@ class DaemonApp:
                 continue
             count += 1
         return count
+
+    def _recovery_retry_delay_seconds(self, snapshot: dict[str, Any]) -> float | None:
+        retry_state = snapshot.get("retry_state") if isinstance(snapshot.get("retry_state"), dict) else None
+        if not retry_state:
+            return None
+        next_retry_at = str(retry_state.get("next_retry_at") or "").strip()
+        if not next_retry_at:
+            return None
+        parsed = self._parse_event_timestamp(next_retry_at)
+        if parsed is None:
+            return None
+        return max((parsed - datetime.now(UTC)).total_seconds(), 0.0)
+
+    def _resume_retry_state(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        max_attempts: int,
+    ) -> tuple[int, str | None, dict[str, Any] | None]:
+        retry_state = snapshot.get("retry_state") if isinstance(snapshot.get("retry_state"), dict) else None
+        resume_source = str(snapshot.get("last_resume_source") or "").strip()
+        if not retry_state or not resume_source.startswith("auto:daemon-recovery"):
+            return 1, None, None
+
+        try:
+            recorded_attempt = int(retry_state.get("attempt_index") or 0)
+        except (TypeError, ValueError):
+            recorded_attempt = 0
+        if recorded_attempt <= 0:
+            return 1, None, None
+
+        next_retry_at = str(retry_state.get("next_retry_at") or "").strip()
+        start_attempt = recorded_attempt + 1 if next_retry_at else recorded_attempt
+        if start_attempt > max_attempts:
+            start_attempt = max_attempts
+        if start_attempt <= 1:
+            return 1, None, None
+
+        turn_id = str(retry_state.get("turn_id") or "").strip() or None
+        previous_run_id = str(retry_state.get("last_run_id") or "").strip() or None
+        failure_summary = str(retry_state.get("last_error") or "").strip() or None
+        retry_context = {
+            "turn_id": turn_id,
+            "attempt_index": recorded_attempt,
+            "max_attempts": max_attempts,
+            "previous_run_id": previous_run_id,
+            "failure_kind": "daemon_recovery",
+            "failure_summary": failure_summary or "Recovered retry state after daemon restart.",
+            "previous_exit_code": None,
+            "previous_output_text": "",
+            "stderr_tail": "",
+            "recent_messages": [],
+            "tool_progress": [],
+            "workspace_summary": {},
+            "recent_artifacts": [],
+        }
+        return start_attempt, turn_id, retry_context
 
     def _record_auto_resume_suppressed(
         self,
@@ -2578,12 +2656,15 @@ class DaemonApp:
             )
         retry_policy = self._runner_retry_policy(runner_name, runner_cfg if isinstance(runner_cfg, dict) else {})
         max_attempts = int(retry_policy.get("max_attempts") or 1)
-        turn_id = generate_id("turn")
-        retry_context: dict[str, Any] | None = None
+        resumed_start_attempt, resumed_turn_id, retry_context = self._resume_retry_state(
+            snapshot,
+            max_attempts=max_attempts,
+        )
+        turn_id = resumed_turn_id or generate_id("turn")
         quest_root = Path(snapshot["quest_root"])
         worktree_root = Path(str(snapshot["current_workspace_root"])) if snapshot.get("current_workspace_root") else None
 
-        for attempt_index in range(1, max_attempts + 1):
+        for attempt_index in range(resumed_start_attempt, max_attempts + 1):
             current_run_id = run_id if attempt_index == 1 else generate_id("run")
             if attempt_index > 1:
                 self._append_retry_event(
@@ -2652,6 +2733,31 @@ class DaemonApp:
                         previous_output_text="",
                         stderr_text=str(exc),
                     )
+                    diagnosis = self._non_retryable_failure_diagnosis(
+                        runner_name=runner_name,
+                        summary=failure_summary,
+                        stderr_text=str(exc),
+                        output_text="",
+                    )
+                    if diagnosis is not None:
+                        self.quest_service.update_runtime_state(
+                            quest_root=quest_root,
+                            continuation_policy="wait_for_user_or_resume",
+                            continuation_reason="non_retryable_runner_error",
+                            continuation_updated_at=utc_now(),
+                        )
+                        self._record_turn_error(
+                            quest_id=quest_id,
+                            runner_name=runner_name,
+                            run_id=current_run_id,
+                            skill_id=skill_id,
+                            model=model,
+                            summary=f"{diagnosis.problem} {failure_summary}".strip(),
+                            retry_state=None,
+                            diagnosis_code=diagnosis.code,
+                            guidance=list(diagnosis.guidance),
+                        )
+                        return
                     if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
                         delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
                         next_retry_at = self._retry_next_timestamp(delay_seconds)
@@ -2800,6 +2906,31 @@ class DaemonApp:
                     previous_output_text=result.output_text,
                     stderr_text=result.stderr_text,
                 )
+                diagnosis = self._non_retryable_failure_diagnosis(
+                    runner_name=runner_name,
+                    summary=failure_summary,
+                    stderr_text=result.stderr_text,
+                    output_text=result.output_text,
+                )
+                if diagnosis is not None:
+                    self.quest_service.update_runtime_state(
+                        quest_root=quest_root,
+                        continuation_policy="wait_for_user_or_resume",
+                        continuation_reason="non_retryable_runner_error",
+                        continuation_updated_at=utc_now(),
+                    )
+                    self._record_turn_error(
+                        quest_id=quest_id,
+                        runner_name=runner_name,
+                        run_id=result.run_id,
+                        skill_id=skill_id,
+                        model=model,
+                        summary=f"{diagnosis.problem} {failure_summary}".strip(),
+                        retry_state=None,
+                        diagnosis_code=diagnosis.code,
+                        guidance=list(diagnosis.guidance),
+                    )
+                    return
                 if bool(retry_policy.get("enabled")) and attempt_index < max_attempts:
                     delay_seconds = self._retry_delay_seconds(retry_policy, attempt_index=attempt_index + 1)
                     next_retry_at = self._retry_next_timestamp(delay_seconds)
@@ -3365,8 +3496,11 @@ class DaemonApp:
         summary: str,
         display_status: str = "error",
         retry_state: dict[str, Any] | None = None,
+        diagnosis_code: str | None = None,
+        guidance: list[str] | None = None,
     ) -> None:
         quest_root = self.home / "quests" / quest_id
+        normalized_guidance = [str(line) for line in (guidance or []) if str(line).strip()]
         append_jsonl(
             quest_root / ".ds" / "events.jsonl",
             {
@@ -3378,6 +3512,8 @@ class DaemonApp:
                 "skill_id": skill_id,
                 "model": model,
                 "summary": summary,
+                "diagnosis_code": str(diagnosis_code or "").strip() or None,
+                "guidance": normalized_guidance,
                 "created_at": utc_now(),
             },
         )
@@ -3388,6 +3524,16 @@ class DaemonApp:
             active_run_id=None,
             retry_state=retry_state,
         )
+        notice_message = summary
+        if normalized_guidance:
+            notice_message = "\n".join(
+                [
+                    summary,
+                    "",
+                    "Suggested fix:",
+                    *[f"- {line}" for line in normalized_guidance[:3]],
+                ]
+            ).strip()
         self.logger.log(
             "error",
             "runner.turn_error",
@@ -3400,7 +3546,7 @@ class DaemonApp:
         )
         self._relay_quest_message_to_bound_connectors(
             quest_id,
-            message=summary,
+            message=notice_message,
             kind="error",
             response_phase="final",
             importance="warning",
@@ -3411,9 +3557,28 @@ class DaemonApp:
                     "skill_id": skill_id,
                     "runner": runner_name,
                     "model": model,
+                    "diagnosis_code": str(diagnosis_code or "").strip() or None,
                 }
             ],
         )
+
+    @staticmethod
+    def _non_retryable_failure_diagnosis(
+        *,
+        runner_name: str,
+        summary: str,
+        stderr_text: str,
+        output_text: str,
+    ) -> FailureDiagnosis | None:
+        diagnosis = diagnose_runner_failure(
+            runner_name=runner_name,
+            summary=summary,
+            stderr_text=stderr_text,
+            output_text=output_text,
+        )
+        if diagnosis is None or diagnosis.retriable:
+            return None
+        return diagnosis
 
     def _record_turn_postprocess_warning(
         self,
