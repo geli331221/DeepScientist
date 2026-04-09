@@ -546,12 +546,34 @@ npm --prefix src/ui run build</pre>
                 "ok": True,
                 "snapshot": self.app.quest_service.snapshot(quest_id),
             }
+        previous_snapshot = self.app.quest_service.snapshot(quest_id) if updates.get("workspace_mode") else None
         try:
             snapshot = self.app.quest_service.update_settings(quest_id, **updates)
         except FileNotFoundError:
             return 404, {"ok": False, "message": f"Unknown quest `{quest_id}`."}
         except ValueError as exc:
             return 400, {"ok": False, "message": str(exc)}
+        # When switching from copilot to autonomous, continue safely without
+        # replaying stale history-only user messages.
+        if previous_snapshot is not None:
+            prev_policy = str(previous_snapshot.get("continuation_policy") or "").strip().lower()
+            new_policy = str(snapshot.get("continuation_policy") or "").strip().lower()
+            prev_status = str(previous_snapshot.get("status") or previous_snapshot.get("runtime_status") or "").strip().lower()
+            if (
+                prev_policy == "wait_for_user_or_resume"
+                and new_policy == "auto"
+                and prev_status not in {"completed", "paused", "stopped", "error"}
+                and not str(previous_snapshot.get("active_run_id") or "").strip()
+            ):
+                if int(snapshot.get("pending_user_message_count") or 0) > 0:
+                    self.app.schedule_turn(quest_id, reason="queued_user_messages")
+                else:
+                    self.app.submit_user_message(
+                        quest_id,
+                        text="Continue",
+                        source="local",
+                    )
+                snapshot = self.app.quest_service.snapshot(quest_id)
         return {
             "ok": True,
             "snapshot": snapshot,

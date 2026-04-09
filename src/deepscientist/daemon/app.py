@@ -2345,6 +2345,25 @@ class DaemonApp:
             last_recovery_abandoned_run_id=recovery_abandoned_run_id,
             last_recovery_summary=recovery_summary,
         )
+        # Ensure continuation_policy matches current workspace_mode after resume.
+        snapshot = self.quest_service.snapshot(quest_id)
+        workspace_mode = self._workspace_mode_for(snapshot)
+        current_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower()
+        if workspace_mode == "autonomous" and current_policy == "wait_for_user_or_resume":
+            self.quest_service.update_runtime_state(
+                quest_root=self.quest_service._quest_root(quest_id),
+                continuation_policy="auto",
+                continuation_reason="autonomous_mode_reconciled",
+                continuation_updated_at=utc_now(),
+            )
+        elif workspace_mode == "copilot" and current_policy == "auto":
+            self.quest_service.update_runtime_state(
+                quest_root=self.quest_service._quest_root(quest_id),
+                continuation_policy="wait_for_user_or_resume",
+                continuation_reason="copilot_mode_reconciled",
+                continuation_updated_at=utc_now(),
+            )
+        snapshot = self.quest_service.snapshot(quest_id)
         summary = f"Quest {quest_id} resumed."
         event = self._append_control_event(
             quest_id,
@@ -3091,10 +3110,10 @@ class DaemonApp:
         normalized = str(current_policy or "auto").strip().lower() or "auto"
         if normalized != "auto":
             return normalized, str(snapshot.get("continuation_reason") or "").strip() or "explicit_continuation_policy"
-        if self._workspace_mode_for(snapshot) == "copilot":
-            return "wait_for_user_or_resume", "copilot_mode"
         if self._has_external_progress(snapshot):
             return "when_external_progress", "background_external_progress_active"
+        if self._workspace_mode_for(snapshot) == "copilot":
+            return "wait_for_user_or_resume", "copilot_mode"
         return "auto", "autonomous_prepare_or_launch_long_run"
 
     @staticmethod
@@ -3713,11 +3732,13 @@ class DaemonApp:
                 self.schedule_turn(quest_id, reason="queued_user_messages")
             else:
                 continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+                resolved_external_progress = False
                 if continuation_policy == "auto":
                     continuation_policy, continuation_reason = self._resolve_continuation_policy(
                         snapshot,
                         current_policy=continuation_policy,
                     )
+                    resolved_external_progress = continuation_policy == "when_external_progress"
                     self.quest_service.update_runtime_state(
                         quest_root=self.quest_service._quest_root(quest_id),
                         continuation_policy=continuation_policy,
@@ -3736,11 +3757,13 @@ class DaemonApp:
             self.schedule_turn(quest_id, reason="queued_user_messages")
             return
         continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+        resolved_external_progress = False
         if continuation_policy == "auto":
             continuation_policy, continuation_reason = self._resolve_continuation_policy(
                 snapshot,
                 current_policy=continuation_policy,
             )
+            resolved_external_progress = continuation_policy == "when_external_progress"
             self.quest_service.update_runtime_state(
                 quest_root=self.quest_service._quest_root(quest_id),
                 continuation_policy=continuation_policy,
@@ -3753,7 +3776,7 @@ class DaemonApp:
         if continuation_policy == "wait_for_user_or_resume":
             return
         if continuation_policy == "when_external_progress":
-            if not self._has_external_progress(snapshot):
+            if not resolved_external_progress and not self._has_external_progress(snapshot):
                 next_policy = "wait_for_user_or_resume" if self._workspace_mode_for(snapshot) == "copilot" else "auto"
                 next_reason = "external_progress_finished" if next_policy == "wait_for_user_or_resume" else "external_progress_finished_continue_autonomous"
                 self.quest_service.update_runtime_state(
@@ -3785,11 +3808,13 @@ class DaemonApp:
             if status in {"completed", "paused", "stopped", "error", "waiting_for_user"}:
                 return
             continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+            resolved_external_progress = False
             if continuation_policy == "auto":
                 continuation_policy, continuation_reason = self._resolve_continuation_policy(
                     snapshot,
                     current_policy=continuation_policy,
                 )
+                resolved_external_progress = continuation_policy == "when_external_progress"
                 self.quest_service.update_runtime_state(
                     quest_root=self.quest_service._quest_root(quest_id),
                     continuation_policy=continuation_policy,
@@ -3800,7 +3825,7 @@ class DaemonApp:
             if continuation_policy in {"none", "wait_for_user_or_resume"}:
                 return
             if continuation_policy == "when_external_progress":
-                if not self._has_external_progress(snapshot):
+                if not resolved_external_progress and not self._has_external_progress(snapshot):
                     next_policy = "wait_for_user_or_resume" if self._workspace_mode_for(snapshot) == "copilot" else "auto"
                     next_reason = "external_progress_finished" if next_policy == "wait_for_user_or_resume" else "external_progress_finished_continue_autonomous"
                     self.quest_service.update_runtime_state(
@@ -3824,16 +3849,18 @@ class DaemonApp:
         quest_id = str(snapshot.get("quest_id") or "").strip()
         if not quest_id:
             return False
+        counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
         try:
             quest_root = self.quest_service._quest_root(quest_id)
         except FileNotFoundError:
-            return False
+            return int(counts.get("bash_running_count") or 0) > 0
         try:
             sessions = self.bash_exec_service.list_sessions(quest_root, limit=200)
-            return any(str(item.get("status") or "").strip().lower() == "running" for item in sessions if isinstance(item, dict))
+            if any(str(item.get("status") or "").strip().lower() == "running" for item in sessions if isinstance(item, dict)):
+                return True
         except Exception:
-            counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
-            return int(counts.get("bash_running_count") or 0) > 0
+            pass
+        return int(counts.get("bash_running_count") or 0) > 0
 
     def _relay_quest_message_to_bound_connectors(
         self,

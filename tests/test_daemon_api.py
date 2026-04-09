@@ -3000,6 +3000,92 @@ def test_quest_settings_handler_updates_workspace_mode_and_research_state(temp_h
     assert runtime_state["continuation_reason"] == "copilot_mode"
 
 
+def test_quest_settings_switch_to_autonomous_injects_continue_without_replaying_stale_user_message(
+    temp_home: Path,
+) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("workspace mode continue quest", startup_contract={"workspace_mode": "copilot"})
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    app.quest_service.update_research_state(quest_root, workspace_mode="copilot")
+    app.quest_service.update_runtime_state(
+        quest_root=quest_root,
+        status="active",
+        continuation_policy="wait_for_user_or_resume",
+        continuation_reason="copilot_mode",
+    )
+    previous_message = app.quest_service.append_message(
+        quest_id,
+        role="user",
+        content="Original task",
+        source="web-react",
+    )
+    app.quest_service.claim_pending_user_message_for_turn(
+        quest_id,
+        message_id=str(previous_message.get("id") or ""),
+        run_id="run-previous",
+    )
+
+    class ContinueRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests: list[dict[str, str]] = []
+
+        def run(self, request):
+            self.requests.append(
+                {
+                    "message": request.message,
+                    "turn_reason": request.turn_reason,
+                }
+            )
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="continue ok",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = ContinueRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.quest_settings(
+        quest_id,
+        {
+            "workspace_mode": "autonomous",
+        },
+    )
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    assert payload["snapshot"]["workspace_mode"] == "autonomous"
+    assert payload["snapshot"]["continuation_policy"] == "auto"
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if runner.requests:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("workspace mode switch did not schedule a continuation turn")
+
+    assert runner.requests[0]["turn_reason"] == "user_message"
+    assert runner.requests[0]["message"] == "Continue"
+    assert runner.requests[0]["message"] != "Original task"
+
+    history = app.quest_service.history(quest_id)
+    assert any(item.get("role") == "user" and item.get("content") == "Continue" for item in history)
+
+
 def test_quest_settings_handler_rejects_invalid_workspace_mode(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -4407,20 +4493,39 @@ def test_quest_control_resume_marks_quest_active(temp_home: Path) -> None:
     assert payload["ok"] is True
     assert payload["action"] == "resume"
     assert payload["snapshot"]["status"] == "active"
-    history = app.quest_service.history(quest_id)
-    assert any(
-        item.get("role") == "assistant"
-        and "DeepScientist" in str(item.get("content") or "")
-        and ("恢复运行" in str(item.get("content") or "") or "resumed" in str(item.get("content") or "").lower())
-        for item in history
-    )
+    notice_message = str((payload.get("notice") or {}).get("message") or "")
+    assert notice_message
+    assert "恢复" in notice_message or "resumed" in notice_message.lower()
     outbox_path = temp_home / "logs" / "connectors" / "local" / "outbox.jsonl"
     outbox = [json.loads(line) for line in outbox_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert any(
-        "DeepScientist" in str(item.get("message") or "")
-        and ("恢复运行" in str(item.get("message") or "") or "resumed" in str(item.get("message") or "").lower())
+        ("恢复" in str(item.get("message") or "") or "resumed" in str(item.get("message") or "").lower())
         for item in outbox
     )
+
+
+def test_quest_control_resume_preserves_external_progress_policy_in_copilot(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("resume external progress quest", startup_contract={"workspace_mode": "copilot"})
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    app.quest_service.update_research_state(quest_root, workspace_mode="copilot")
+    app.quest_service.update_runtime_state(
+        quest_root=quest_root,
+        status="stopped",
+        continuation_policy="when_external_progress",
+        continuation_reason="background_external_progress_active",
+    )
+
+    payload = app.handlers.quest_control(quest_id, {"action": "resume", "source": "tui-ink"})
+
+    assert payload["ok"] is True
+    snapshot = app.quest_service.snapshot(quest_id)
+    assert snapshot["continuation_policy"] == "when_external_progress"
+    assert snapshot["continuation_reason"] == "background_external_progress_active"
 
 
 def test_quest_control_pause_marks_quest_paused_and_interrupts_runner(temp_home: Path) -> None:
@@ -5750,6 +5855,32 @@ def test_daemon_auto_resume_keeps_in_progress_retry_attempt_index(temp_home: Pat
 
     assert runner.requests[0]["attempt_index"] == 3
     assert runner.requests[0]["turn_id"] == "turn-retry-recovery-ongoing-001"
+
+
+def test_daemon_reconcile_runtime_state_preserves_external_progress_policy_in_copilot(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("reconcile external progress quest", startup_contract={"workspace_mode": "copilot"})
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    app.quest_service.update_research_state(quest_root, workspace_mode="copilot")
+    app.quest_service.update_runtime_state(
+        quest_root=quest_root,
+        status="running",
+        active_run_id="run-external-progress",
+        continuation_policy="when_external_progress",
+        continuation_reason="background_external_progress_active",
+    )
+
+    reconciled = app.quest_service.reconcile_runtime_state()
+
+    assert reconciled
+    snapshot = app.quest_service.snapshot(quest_id)
+    assert snapshot["status"] == "stopped"
+    assert snapshot["continuation_policy"] == "when_external_progress"
+    assert snapshot["continuation_reason"] == "background_external_progress_active"
 
 
 def test_auto_continue_parks_after_repeated_unchanged_finalize_state(temp_home: Path) -> None:
