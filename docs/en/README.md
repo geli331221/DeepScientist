@@ -42,6 +42,8 @@ This page is the shortest path to the right document.
   Read this when you want to run DeepScientist through MiniMax, GLM, Volcengine Ark, Alibaba Bailian Coding Plan, or another Codex profile.
 - [21 Local Model Backends Guide](./21_LOCAL_MODEL_BACKENDS_GUIDE.md)
   Read this if you want to run DeepScientist through local OpenAI-compatible backends such as vLLM, Ollama, or SGLang.
+- [22 Windows + WSL2 Deployment Guide](./22_WINDOWS_WSL2_DEPLOYMENT_GUIDE.md)
+  Read this if you want a Windows-first local deployment path through WSL2, including npm user-prefix setup and Alibaba Bailian Coding Plan.
 - [12 Guided Workflow Tour](./12_GUIDED_WORKFLOW_TOUR.md)
   Follow the real product flow from landing page to workspace, step by step.
 - [02 Start Research Guide](./02_START_RESEARCH_GUIDE.md)

@@ -88,6 +88,8 @@ DeepScientist 灵活且易于使用，支持：
   如果你准备通过 MiniMax、GLM、火山方舟、阿里百炼 Coding Plan 或其他 Codex profile 来运行 DeepScientist，先看这一篇。
 - [21 本地模型后端指南](./21_LOCAL_MODEL_BACKENDS_GUIDE.md)
   如果你想通过 vLLM、Ollama、SGLang 等本地 OpenAI-compatible 后端运行 DeepScientist，先看这一篇。
+- [22 Windows + WSL2 部署指南](./22_WINDOWS_WSL2_DEPLOYMENT_GUIDE.md)
+  如果你希望在 Windows 上通过 WSL2 本地部署 DeepScientist，并配置阿里百炼 Coding Plan，可以直接看这篇。
 - [12 引导式工作流教程](./12_GUIDED_WORKFLOW_TOUR.md)
   按真实产品流程，逐步理解从首页到工作区应该怎么使用。
 - [02 Start Research 参考](./02_START_RESEARCH_GUIDE.md)

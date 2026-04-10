@@ -33,7 +33,8 @@
   <a href="docs/zh/00_QUICK_START.md">快速开始</a> •
   <a href="docs/zh/02_START_RESEARCH_GUIDE.md">启动第一个课题</a> •
   <a href="docs/zh/12_GUIDED_WORKFLOW_TOUR.md">产品导览</a> •
-  <a href="docs/zh/15_CODEX_PROVIDER_SETUP.md">模型配置</a>
+  <a href="docs/zh/15_CODEX_PROVIDER_SETUP.md">模型配置</a> •
+  <a href="docs/zh/22_WINDOWS_WSL2_DEPLOYMENT_GUIDE.md">Windows + WSL2 部署</a>
 </p>
 
 ![deepscientist_install](https://github.com/user-attachments/assets/d8244944-4f70-4e08-94e3-002b74ce70fb)
